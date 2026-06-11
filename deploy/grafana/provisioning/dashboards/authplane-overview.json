@@ -1,0 +1,241 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    { "title": "Security", "type": "link", "url": "/d/authplane-security/authplane-security", "icon": "bolt" },
+    { "title": "Operations", "type": "link", "url": "/d/authplane-operations/authplane-operations", "icon": "cog" }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Key Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 200 }] },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "sum(rate(authserver_tokens_issued_total{job=~\"$job\"}[$__rate_interval])) or vector(0)", "legendFormat": "Tokens/s", "refId": "A" }
+      ],
+      "title": "Token Issuance Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 10 }] },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 1 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "(sum(rate(authserver_auth_denied_total{job=~\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(authplane_client_credentials_denied_total{job=~\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(authplane_dpop_proofs_rejected_total{job=~\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(authplane_token_exchange_denied_total{job=~\"$job\"}[$__rate_interval])) or vector(0))", "legendFormat": "Denied/s", "refId": "A" }
+      ],
+      "title": "Auth Denied Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "blue", "value": null }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 1 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "sum(authserver_clients_registered_total{job=~\"$job\"}) or vector(0)", "legendFormat": "Clients", "refId": "A" }
+      ],
+      "title": "Registered Clients",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 100 }] },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 5, "x": 14, "y": 1 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "sum(rate(authserver_http_requests_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "req/s", "refId": "A" }
+      ],
+      "title": "HTTP Request Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 }] },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 5, "x": 19, "y": 1 },
+      "id": 5,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "100 * (sum(rate(authserver_http_requests_total{job=~\"$job\",http_status_code=~\"5..\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(authserver_http_requests_total{job=~\"$job\"}[$__rate_interval])), 1)",
+          "legendFormat": "Error %",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP Error Rate",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 101,
+      "title": "Token Operations",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 30, "stacking": { "mode": "normal" } }, "unit": "ops" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 6,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (grant_type) (rate(authserver_tokens_issued_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "{{grant_type}}", "refId": "A" }
+      ],
+      "title": "Token Issuance by Grant Type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 }, "unit": "ops" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 7,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum(rate(authserver_tokens_refreshed_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Refreshed", "refId": "A" },
+        { "expr": "sum(rate(authserver_tokens_revoked_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Revoked", "refId": "B" },
+        { "expr": "sum(rate(authserver_introspection_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Introspected", "refId": "C" }
+      ],
+      "title": "Refresh / Revocation / Introspection",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 102,
+      "title": "HTTP",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } }, "unit": "ops" },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "2.." }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byRegexp", "options": "4.." }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byRegexp", "options": "5.." }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 8,
+      "options": { "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (http_status_code) (rate(authserver_http_requests_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "{{http_status_code}}", "refId": "A" }
+      ],
+      "title": "HTTP Requests by Status Code",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 10 }, "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 9,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(authserver_http_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(authserver_http_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(authserver_http_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p99", "refId": "C" }
+      ],
+      "title": "HTTP Latency (p50 / p95 / p99)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "id": 103,
+      "title": "Denials & Rejections",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 20 }, "unit": "ops" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "id": 10,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum(rate(authserver_auth_denied_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Auth denied", "refId": "A" },
+        { "expr": "sum(rate(authplane_client_credentials_denied_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Client creds denied", "refId": "B" },
+        { "expr": "sum(rate(authplane_dpop_proofs_rejected_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "DPoP rejected", "refId": "C" },
+        { "expr": "sum(rate(authplane_token_exchange_denied_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Token exchange denied", "refId": "D" },
+        { "expr": "sum(rate(authserver_refresh_token_reuse_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Refresh reuse (CRITICAL)", "refId": "E" }
+      ],
+      "title": "All Denial & Rejection Rates",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "definition": "label_values(authserver_http_requests_total, job)",
+        "includeAll": true,
+        "multi": false,
+        "name": "job",
+        "query": { "qryType": 1, "query": "label_values(authserver_http_requests_total, job)" },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-30m", "to": "now" },
+  "title": "Authplane Overview",
+  "uid": "authplane-overview"
+}

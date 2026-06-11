@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "authplane chart values",
+  "type": "object",
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "config": {
+      "type": "object",
+      "description": "Authplane YAML config; rendered into a Secret. Maps to internal/config.Config.",
+      "additionalProperties": true,
+      "not": {
+        "anyOf": [
+          { "required": ["resource_servers"] },
+          { "required": ["vault_connectors"] },
+          { "required": ["vault_connect"] }
+        ]
+      },
+      "properties": {
+        "server": {
+          "type": "object",
+          "properties": {
+            "issuer": {
+              "type": "string",
+              "description": "REQUIRED in production. OAuth 2.1 issuer identifier."
+            },
+            "address": { "type": "string" }
+          }
+        },
+        "storage": {
+          "type": "object",
+          "properties": {
+            "driver": { "enum": ["sqlite", "postgres"] }
+          }
+        },
+        "signing": {
+          "type": "object",
+          "properties": {
+            "algorithm": { "enum": ["ES256", "RS256"] },
+            "key_store": { "enum": ["keyfile", "vault_transit", "postgres_key", ""] }
+          }
+        },
+        "data_encryption": {
+          "type": "object",
+          "properties": {
+            "driver": { "enum": ["", "aes_master", "vault_transit_encrypt"] }
+          }
+        },
+        "dcr": {
+          "type": "object",
+          "properties": {
+            "mode": { "enum": ["open", "approved_redirects", "admin_only"] }
+          }
+        },
+        "session": {
+          "type": "object",
+          "properties": {
+            "same_site": { "enum": ["lax", "strict", "none", "Lax", "Strict", "None"] }
+          }
+        },
+        "observability": {
+          "type": "object",
+          "properties": {
+            "logging": {
+              "type": "object",
+              "properties": {
+                "level": { "enum": ["debug", "info", "warn", "error"] },
+                "format": { "enum": ["json", "text"] }
+              }
+            },
+            "metrics": {
+              "type": "object",
+              "properties": {
+                "provider": { "enum": ["prometheus", "otel", "both", "none"] }
+              }
+            },
+            "tracing": {
+              "type": "object",
+              "properties": {
+                "sample_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          }
+        },
+        "token_exchange": {
+          "type": "object",
+          "not": { "required": ["cross_client_allowlist"] }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "adminPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "accessMode": { "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"] }
+      }
+    },
+    "vault": {
+      "type": "object",
+      "properties": {
+        "signing": {
+          "type": "object",
+          "properties": {
+            "auth": {
+              "type": "object",
+              "properties": {
+                "method": { "enum": ["token", "approle"] }
+              }
+            }
+          }
+        },
+        "dataEncryption": {
+          "type": "object",
+          "properties": {
+            "auth": {
+              "type": "object",
+              "properties": {
+                "method": { "enum": ["token", "approle"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

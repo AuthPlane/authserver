@@ -1,0 +1,46 @@
+# NOTE: this example inlines the `authserver` service definition rather than
+# using `include: ../../_shared/docker-compose.authserver.yml`. Compose's
+# `include:` directive keeps `env_file` and bind-mount paths relative to the
+# included file's directory, which means the shared compose looks for a `.env`
+# under `examples/_shared/` and the config file at `_shared/config.example.yaml`.
+# The example's own `.env` lives here, so duplicating the service definition
+# is the least-magical fix. Keep this block in sync with
+# `../../_shared/docker-compose.authserver.yml` when that file changes.
+#
+# Topology:
+#   - authserver — AS, ports 9000 (public OIDC/OAuth) and 9001 (admin REST).
+#     Token Exchange enabled via AUTHPLANE_TOKEN_EXCHANGE_ENABLED=true in .env.
+#   - The agent itself runs on the host via `go run ./` (see Makefile).
+#     The optional `agent` service below is a reference for when you ship
+#     the same code as a long-running MCP-server component.
+services:
+  authserver:
+    image: authplane/authserver:latest
+    # ---------------------------------------------------------------------
+    # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
+    # ---------------------------------------------------------------------
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ../../_shared/config.example.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    restart: unless-stopped
+
+  # Reference packaging for the agent. The verify pipeline runs the agent
+  # on the host via `go run ./` for the typical hand-run workflow.
+  # Uncomment + `docker compose up agent` if you prefer to run the agent
+  # in a container.
+  # agent:
+  #   build: .
+  #   env_file:
+  #     - .env
+  #   depends_on:
+  #     - authserver
+  #   restart: "no"
+
+volumes:
+  authserver-data:

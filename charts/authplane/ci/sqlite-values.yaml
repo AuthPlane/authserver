@@ -1,0 +1,16 @@
+# SQLite mode with persistence.
+replicaCount: 1
+
+config:
+  server:
+    issuer: http://authplane.local
+  storage:
+    driver: sqlite
+
+secrets:
+  sessionSecret: "ci-test-session-secret-that-is-long-enough-for-validation"
+  adminApiKey: "ci-test-admin-api-key-that-is-long-enough-for-validation"
+
+persistence:
+  enabled: true
+  size: 256Mi

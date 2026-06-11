@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "authplane-example-python-04"
+version = "0.1.0"
+description = "Tier 04 — Broker upstream + ConsentRequiredError + RFC 8693 Token Exchange (Python)."
+requires-python = ">=3.12"
+dependencies = [
+  # Authplane SDK (PyPI). Pinned to the exact version this example was
+  # developed and verified against; bump together with the SDK. The agent
+  # depends on the core SDK for `client_credentials` (base machine token),
+  # `exchange` (RFC 8693 Token Exchange), and the typed
+  # `ConsentRequiredError` carrying `consent_url`.
+  "authplane-sdk==0.2.0",
+  # httpx is already a transitive dep of authplane-sdk, but pin it
+  # explicitly because verify.sh reaches into the container with httpx
+  # if it ever needs to bypass the SDK.
+  "httpx>=0.27,<1",
+]
+
+[tool.setuptools]
+py-modules = ["agent"]

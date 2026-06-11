@@ -1,0 +1,152 @@
+# Authplane MCP Authorization Server — full stack with Vault Transit JWT signing.
+#
+# Same as docker-compose.yml but JWT signing uses HashiCorp Vault Transit
+# instead of local key files. Vault runs in dev mode (token: root).
+#
+# Usage:
+#   COMPOSE_FILE=deploy/docker-compose.vault.yml ./deploy/start.sh up --build
+#
+# Or manually:
+#   export AUTHPLANE_SESSION_SECRET="$(openssl rand -hex 32)"
+#   export AUTHPLANE_ADMIN_API_KEY="$(openssl rand -hex 32)"
+#   docker compose -f deploy/docker-compose.vault.yml up --build
+#
+# Additional services:
+#   vault      — HashiCorp Vault in dev mode (:8200, token: root)
+#   vault-init — One-shot: enables Transit engine + creates ecdsa-p256 key
+
+include:
+  - path: observability/docker-compose.observability.yml
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: authserver
+      POSTGRES_USER: authserver
+      POSTGRES_PASSWORD: authserver
+    ports:
+      - "5432:5432"
+    volumes:
+      # PG18's image stores data in a version subdir and rejects a mount at the
+      # legacy /var/lib/postgresql/data; mount the parent instead.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authserver"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  vault:
+    image: hashicorp/vault:1.21
+    container_name: vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://127.0.0.1:8200
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  vault-init:
+    image: hashicorp/vault:1.21
+    container_name: vault-init
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        echo "Enabling Vault Transit engine..."
+        vault secrets enable transit 2>/dev/null || echo "  Transit already enabled."
+        echo "Creating ecdsa-p256 signing key..."
+        vault write -f transit/keys/authserver-signing type=ecdsa-p256 2>/dev/null || echo "  Key already exists."
+        echo "Vault Transit ready."
+    depends_on:
+      vault:
+        condition: service_healthy
+    restart: "no"
+
+  authserver:
+    build:
+      context: ..
+      dockerfile: build/Dockerfile
+    container_name: authserver
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      AUTHPLANE_SERVER_ISSUER: http://localhost:9000
+      AUTHPLANE_SESSION_SECRET: ${AUTHPLANE_SESSION_SECRET:?set AUTHPLANE_SESSION_SECRET (e.g. openssl rand -hex 32)}
+      AUTHPLANE_SESSION_SECURE: "false"
+      AUTHPLANE_SERVER_ALLOWED_ORIGINS: "*"
+      AUTHPLANE_ADMIN_API_KEY: ${AUTHPLANE_ADMIN_API_KEY:?set AUTHPLANE_ADMIN_API_KEY (e.g. openssl rand -hex 32)}
+      # Storage — PostgreSQL.
+      AUTHPLANE_STORAGE_DRIVER: postgres
+      AUTHPLANE_STORAGE_POSTGRES_DSN: postgres://authserver:authserver@postgres:5432/authserver?sslmode=disable
+      # Signing — Vault Transit (no local keys).
+      AUTHPLANE_SIGNING_KEY_STORE: vault_transit
+      AUTHPLANE_VAULT_ADDR: http://vault:8200
+      AUTHPLANE_VAULT_TOKEN: root
+      AUTHPLANE_VAULT_TRANSIT_KEY_NAME: authserver-signing
+      # Observability — full OTLP pipeline.
+      AUTHPLANE_LOG_FORMAT: json
+      AUTHPLANE_LOG_LEVEL: debug
+      AUTHPLANE_LOG_STDOUT: "true"
+      AUTHPLANE_LOG_OTEL: "true"
+      AUTHPLANE_LOG_OTEL_ENDPOINT: alloy:4317
+      AUTHPLANE_LOG_OTEL_INSECURE: "true"
+      AUTHPLANE_TRACING_ENABLED: "true"
+      AUTHPLANE_TRACING_ENDPOINT: alloy:4317
+      AUTHPLANE_TRACING_INSECURE: "true"
+      AUTHPLANE_TRACING_SAMPLE_RATE: "1.0"
+      AUTHPLANE_METRICS_PROVIDER: both
+      AUTHPLANE_METRICS_OTEL_ENDPOINT: alloy:4317
+      AUTHPLANE_METRICS_INSECURE: "true"
+      # OAuth features.
+      AUTHPLANE_CLIENT_CREDENTIALS_ENABLED: "true"
+      AUTHPLANE_DPOP_ENABLED: "true"
+      AUTHPLANE_DPOP_NONCE_TTL: "5m"
+      AUTHPLANE_DPOP_PROOF_LIFETIME: "120s"
+      AUTHPLANE_DPOP_PURGE_INTERVAL: "10m"
+      AUTHPLANE_TOKEN_EXCHANGE_ENABLED: "true"
+      AUTHPLANE_TOKEN_EXCHANGE_MAX_CHAIN_DEPTH: "5"
+    healthcheck:
+      test: ["CMD", "/authserver", "version"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+      alloy:
+        condition: service_started
+    restart: unless-stopped
+
+  setup:
+    image: curlimages/curl:8.19.0
+    container_name: authserver-setup
+    volumes:
+      - ./setup.sh:/setup.sh:ro
+    entrypoint: ["sh", "/setup.sh"]
+    environment:
+      AUTHPLANE_ADMIN_API_KEY: ${AUTHPLANE_ADMIN_API_KEY}
+    depends_on:
+      authserver:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  pgdata:

@@ -1,0 +1,24 @@
+# Per-tier auth-specific line budgets for examples.
+#
+# A tier is the two-digit prefix on an example directory name, e.g.
+# `examples/foo/01-mcp-server-basic` is tier "01".
+#
+# Calibration:
+#   Tier 01 — measured 5 lines for `examples/python/01-mcp-server-basic`
+#             using the official `authplane-fastmcp` adapter. +20% headroom
+#             rounds up to 6 to keep small refactors from blowing the gate.
+#   Tier 02 — projected from 01: an agent example needs token acquisition
+#             (`client_credentials`) + one call. Estimated ~8 lines, +20%
+#             rounds to 10.
+#   Tier 03 — projected: tier-01 shape + DPoP + per-tool scope assertions.
+#             ~13 measured-equivalent + 20% rounds to 16.
+#   Tier 04 — projected: broker upstream + ConsentRequiredError handling.
+#             ~25 measured-equivalent + 20% rounds to 30.
+#
+# Tiers 02–04 will be re-calibrated against measurements as additional
+# language tracks (Go, TypeScript) ship.
+tiers:
+  "01": 6
+  "02": 10
+  "03": 16
+  "04": 30

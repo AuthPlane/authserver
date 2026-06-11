@@ -1,0 +1,21 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "authplane.fullname" . }}
+  labels:
+    {{- include "authplane.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "authplane.selectorLabels" . | nindent 6 }}
+  endpoints:
+    # /metrics is exposed only on the admin port (api/admin/server.go); the
+    # public port serves OAuth traffic and 404s on /metrics.
+    - port: admin
+      path: {{ .Values.serviceMonitor.path }}
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

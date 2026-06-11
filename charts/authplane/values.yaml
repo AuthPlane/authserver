@@ -1,0 +1,554 @@
+# -- Number of replicas. Set to 1 when using SQLite storage.
+replicaCount: 1
+
+image:
+  # -- Container image repository
+  repository: authplane/authserver
+  # -- Container image tag (defaults to Chart appVersion)
+  tag: ""
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+# -- Override the chart name
+nameOverride: ""
+# -- Override the full release name
+fullnameOverride: ""
+
+# -- Authplane configuration rendered as config.yaml inside a Secret.
+# Maps directly to the Authplane YAML config schema.
+# See https://github.com/authplane/authserver/blob/main/deploy/config.yaml for reference.
+# When vault.signing.enabled=true, the chart auto-injects vault_transit config.
+config:
+  server:
+    # -- REQUIRED: OAuth 2.1 issuer identifier. Must match the external URL.
+    issuer: ""
+    address: ":9000"
+    # -- Allowed CORS origins. Set to ["*"] for development.
+    allowed_origins: []
+    read_timeout: 30s
+    write_timeout: 30s
+    idle_timeout: 120s
+    shutdown_wait: 10s
+  storage:
+    # -- Storage driver: "postgres" (production) or "sqlite" (dev/single-node)
+    driver: postgres
+    sqlite:
+      path: /data/authserver.db
+      wal: true
+    postgres:
+      # -- DSN is auto-constructed from postgresql/externalDatabase values.
+      # Override here only if you need full control.
+      dsn: ""
+      max_conns: 25
+      min_conns: 5
+      max_conn_lifetime: 1h
+      max_conn_idle_time: 30m
+  signing:
+    # -- Signing algorithm: ES256 (recommended) or RS256
+    algorithm: ES256
+    # -- Key store: "keyfile" | "vault_transit" | "postgres_key"
+    key_store: keyfile
+    # -- Path for local key files (used when key_store=keyfile)
+    key_path: /data/keys
+    # -- Vault Transit signing config. Populated automatically when
+    # vault.signing.enabled=true; set directly only if you bypass that knob.
+    vault_transit:
+      address: ""
+      mount: transit
+      key_name: authserver-signing
+      timeout: 10s
+      # token / approle.role_id are sourced from the Vault Secret via env vars
+      # when vault.signing.enabled=true. Set inline only for non-Helm wiring.
+    # -- Postgres-backed signing key store (HA). Requires storage.driver=postgres
+    # AND data_encryption.driver to be configured.
+    postgres_key:
+      # -- Env var name holding the key-encryption key (only when
+      # data_encryption.driver=aes_master).
+      encryption_key_env: ""
+  data_encryption:
+    # -- Data encryption driver: "" (none) | "aes_master" | "vault_transit_encrypt"
+    driver: ""
+    # -- AES-256-GCM master-key driver. The named env vars must be supplied
+    # via secrets.* / extraEnv (the chart does not auto-mount key material).
+    aes_master:
+      # -- Env var name holding the 64-hex-char (32-byte) master key.
+      key_env: ""
+      # -- Optional env var holding the previous master key during rotation
+      # (decrypt-only fallback). Remove after re-encrypt completes.
+      old_key_env: ""
+  dcr:
+    mode: open
+    approved_redirects: []
+    rate_limit: 10
+    rate_limit_burst: 20
+    default_token_expiry: 15m
+    default_refresh_expiry: 168h
+  # -- Client ID Metadata Document (CIMD) handling.
+  cimd:
+    enabled: true
+    # -- Require HTTPS for CIMD fetch URLs
+    require_https: true
+    # -- Cache TTL for fetched CIMD documents
+    cache_ttl: 1h
+    # -- HTTP timeout for CIMD fetches
+    fetch_timeout: 10s
+  # -- OAuth authorization server behavior.
+  oauth:
+    # -- Reject authorize requests missing the scope parameter (RFC 6749 §3.3 compliant).
+    # When false, missing scope defaults to all registered scopes for the resource.
+    # Default true matches DefaultConfig() in internal/config/loader.go.
+    require_scope: true
+  session:
+    cookie_name: authserver_session
+    max_age: 24h
+    # -- Set to true in production (requires HTTPS)
+    secure: true
+    same_site: lax
+  rate_limit:
+    enabled: true
+    requests_per_second: 100
+    burst: 200
+    auth_fail_max: 10
+    auth_fail_window: 10m
+    auth_lockout: 15m
+  admin:
+    enabled: true
+    address: ":9001"
+  # -- Upstream OIDC provider for federated login (Google, Okta, etc.)
+  # When enabled, users see a "Continue with [display_name]" button on the login page.
+  oidc:
+    enabled: false
+    # -- OIDC issuer URL.
+    # Google: https://accounts.google.com
+    # Okta:   https://your-org.okta.com
+    issuer: ""
+    # -- OAuth client ID from the upstream provider
+    client_id: ""
+    # -- OAuth client secret (prefer existingSecret or client_secret_env for production)
+    client_secret: ""
+    # -- Env var name holding the client secret (takes precedence over client_secret).
+    # Leave empty when using client_secret directly.
+    client_secret_env: ""
+    # -- Button text on the login page
+    display_name: ""
+    # -- OIDC scopes to request
+    scopes:
+      - openid
+      - email
+      - profile
+    # -- Callback URL. Defaults to {server.issuer}/oidc/callback
+    redirect_uri: ""
+    # -- Show local email/password login alongside the OIDC button
+    show_local_login: true
+    # -- Auto-add "groups" scope if upstream supports it (Okta: yes, Google: no)
+    include_groups_scope: false
+    # -- Dex connector_id parameter (alphanumeric + hyphens). Optional.
+    connector_id: ""
+  # -- Client credentials grant (RFC 6749 Section 4.4) for machine-to-machine tokens.
+  client_credentials:
+    enabled: false
+    token_expiry: 1h
+  # -- DPoP proof-of-possession (RFC 9449).
+  dpop:
+    enabled: false
+    nonce_ttl: 60s
+    proof_lifetime: 60s
+    require_nonce: false
+  # -- Token exchange (RFC 8693) for delegation and scope narrowing.
+  token_exchange:
+    enabled: false
+    allow_self_exchange: false
+    max_chain_depth: 5
+    token_expiry: 1h
+  # -- Agent identity features (Authplane extension).
+  agents:
+    # -- Expose agent client IDs in the JWKS endpoint. Privacy note: this makes
+    # client IDs publicly visible. Only enable if needed for agent discovery.
+    enable_jwks_listing: false
+  # -- XAA (Enterprise-Managed Authorization) for service-to-service federation.
+  # Trusted IdPs issue ID-JAG assertions exchanged for access tokens via JWT bearer grant.
+  # Configure IdPs at runtime via Admin API: POST /admin/idps
+  xaa:
+    enabled: false
+    token_expiry: 1h
+    max_assertion_age: 5m
+    # -- Require the `resource` claim in incoming ID-JAG assertions.
+    require_resource: false
+    subject_mode: auto_map
+    jwks_cache_ttl: 1h
+  observability:
+    logging:
+      level: info
+      format: json
+      add_source: false
+      outputs:
+        stdout: true
+        otel: false
+        otel_endpoint: ""
+        insecure: false
+    metrics:
+      # -- Metrics provider: prometheus | otel | both | none
+      provider: prometheus
+      path: /metrics
+      otel_endpoint: ""
+      insecure: false
+    tracing:
+      enabled: false
+      endpoint: ""
+      insecure: true
+      sample_rate: 1.0
+
+  # -- Resources seeded into the database on startup. After first install,
+  # manage via Admin API (/admin/resources) or `authserver admin resource`.
+  # See deploy/config.yaml for full schema.
+  # @default -- `[]`
+  resources: []
+  #  - slug: my-mcp-server
+  #    uri: https://mcp.example.com
+  #    backend_kind: mint
+  #    display_name: My MCP Server
+  #    scopes:
+  #      - name: tools/read
+  #        description: Read access
+  #      - name: tools/write
+  #        description: Write access
+  #    policy:
+  #      exchange:
+  #        allowed_client_ids: []
+  #      runtime:
+  #        # Empty = default-deny. Listed clients may act AS this resource.
+  #        client_ids: []
+  #      connect:
+  #        allowed_return_urls: []
+
+  # -- Upstream OAuth (or other protocol) providers that Broker resources
+  # reference. config_data is adapter-shaped; the brokerproto adapter
+  # validates the schema lazily at first vend.
+  # @default -- `[]`
+  broker_providers: []
+  #  - slug: github
+  #    display_name: GitHub
+  #    protocol: oauth
+  #    config_data:
+  #      client_id: "Iv1.test"
+  #      client_secret_env: "CONNECTOR_GITHUB_SECRET"
+  #      authorize_url: "https://github.com/login/oauth/authorize"
+  #      token_url: "https://github.com/login/oauth/access_token"
+
+  # -- Upstream-connection consent flow. Required when any Broker resource
+  # is configured. state_secret must be ≥32 chars; populate via
+  # secrets.connectStateSecret (chart wires it into AUTHPLANE_CONNECT_STATE_SECRET).
+  connect:
+    # -- Allowed post-consent return URLs (HTTPS only, except localhost).
+    allowed_return_urls: []
+    # -- Base URL for OAuth callbacks. Defaults to server.issuer when empty.
+    redirect_base_url: ""
+    # state_secret is intentionally not exposed here — set via secrets.connectStateSecret.
+
+# -- Use a pre-existing Secret containing the full config.yaml.
+# When set, the config: block above is ignored.
+existingConfigSecret: ""
+
+# -- Sensitive values injected as environment variables.
+secrets:
+  # -- Session encryption secret. Auto-generated if empty (not stable across upgrades).
+  sessionSecret: ""
+  # -- Admin API key. Auto-generated if empty (not stable across upgrades).
+  adminApiKey: ""
+  # -- HMAC key for upstream-connection state tokens (≥32 chars). Required
+  # when config.connect or any broker_providers are configured. Empty
+  # disables the connect flow.
+  connectStateSecret: ""
+  # -- Use a pre-existing Secret for the secrets above.
+  # Must contain keys: session-secret, admin-api-key, and (if used)
+  # connect-state-secret.
+  existingSecret: ""
+  # -- AES master-key material for data_encryption.driver=aes_master.
+  # The chart creates a Secret and injects env vars whose names match
+  # config.data_encryption.aes_master.{key_env,old_key_env}.
+  dataEncryption:
+    # -- 64-hex-char (32-byte) master key. Used only when
+    # config.data_encryption.driver=aes_master.
+    aesMasterKey: ""
+    # -- Previous master key during rotation (decrypt-only fallback).
+    # Set together with config.data_encryption.aes_master.old_key_env.
+    aesMasterOldKey: ""
+    # -- Pre-existing Secret with keys: aes-master-key (and optionally aes-master-old-key).
+    existingSecret: ""
+
+# ---------------------------------------------------------------------------
+# PostgreSQL subchart (Bitnami)
+# ---------------------------------------------------------------------------
+postgresql:
+  # -- Deploy a PostgreSQL instance via the Bitnami subchart.
+  # Disabled by default — production users should use externalDatabase.
+  enabled: false
+  auth:
+    username: authplane
+    password: ""
+    database: authplane
+    existingSecret: ""
+
+# ---------------------------------------------------------------------------
+# External database (when postgresql.enabled=false)
+# ---------------------------------------------------------------------------
+externalDatabase:
+  # -- PostgreSQL host
+  host: ""
+  # -- PostgreSQL port
+  port: 5432
+  # -- Database user
+  user: authplane
+  # -- Database password (ignored if existingSecret is set)
+  password: ""
+  # -- Database name
+  database: authplane
+  # -- SSL mode: disable | require | verify-ca | verify-full
+  sslmode: require
+  # -- Use a pre-existing Secret containing the full DSN
+  existingSecret: ""
+  # -- Key within the existing Secret that holds the DSN
+  existingSecretKey: dsn
+
+# ---------------------------------------------------------------------------
+# HashiCorp Vault
+# ---------------------------------------------------------------------------
+vault:
+  # -- Vault Transit for JWT signing.
+  # When enabled, private keys never leave Vault.
+  signing:
+    enabled: false
+    # -- Vault server address (e.g. https://vault.vault.svc:8200)
+    address: ""
+    # -- Transit engine mount path
+    mount: transit
+    # -- Transit key name
+    keyName: authserver-signing
+    # -- HTTP client timeout
+    timeout: 10s
+    auth:
+      # -- Auth method: "token" or "approle"
+      method: token
+      # -- Static Vault token (dev/testing only)
+      token: ""
+      approle:
+        roleId: ""
+        secretId: ""
+        # -- AppRole auth mount path
+        mount: approle
+    # -- Pre-existing Secret with keys: vault-token OR vault-approle-role-id + vault-approle-secret-id
+    existingSecret: ""
+
+  # -- Vault Transit for data-at-rest encryption (broker token storage).
+  dataEncryption:
+    enabled: false
+    # -- Vault server address (can differ from signing address)
+    address: ""
+    # -- Transit mount path
+    mountPath: transit
+    # -- Transit key name for encryption
+    keyName: authserver-encrypt
+    auth:
+      # -- Auth method: "token" or "approle"
+      method: token
+      # -- Environment variable name holding the Vault token
+      tokenEnv: VAULT_TOKEN
+      approle:
+        # -- Env var name for AppRole role ID
+        roleIdEnv: ""
+        # -- Env var name for AppRole secret ID
+        secretIdEnv: ""
+    # -- Pre-existing Secret for data encryption Vault credentials
+    existingSecret: ""
+
+# ---------------------------------------------------------------------------
+# Persistence (SQLite mode / signing key files)
+# ---------------------------------------------------------------------------
+persistence:
+  # -- Enable persistent storage. Required for SQLite; optional for keyfile signing.
+  enabled: false
+  # -- Storage size
+  size: 1Gi
+  # -- Storage class (empty = default)
+  storageClass: ""
+  # -- Access mode
+  accessMode: ReadWriteOnce
+  # -- Use an existing PVC instead of creating one
+  existingClaim: ""
+
+# ---------------------------------------------------------------------------
+# Service Account
+# ---------------------------------------------------------------------------
+serviceAccount:
+  # -- Create a ServiceAccount
+  create: true
+  # -- Annotations (e.g. for AWS IRSA or GCP Workload Identity)
+  annotations: {}
+  # -- Override the ServiceAccount name
+  name: ""
+  # -- Mount a projected ServiceAccount token (required for AWS IRSA /
+  # GCP Workload Identity). Pod-level automount is off; this opts in
+  # explicitly without lifting that for the rest of the pod.
+  projectedToken:
+    enabled: false
+    # -- Audience for the projected token (cloud-provider specific).
+    # AWS IRSA defaults to "sts.amazonaws.com".
+    audience: ""
+    # -- Token expiration (seconds).
+    expirationSeconds: 3600
+
+# ---------------------------------------------------------------------------
+# Pod Security
+# ---------------------------------------------------------------------------
+# -- Pod-level security context
+podSecurityContext:
+  fsGroup: 65534
+
+# -- Container-level security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  # -- Service type
+  type: ClusterIP
+  # -- OAuth endpoint port
+  port: 9000
+  # -- Admin API port
+  adminPort: 9001
+
+# ---------------------------------------------------------------------------
+# Ingress — OAuth endpoint
+# ---------------------------------------------------------------------------
+ingress:
+  # -- Enable ingress for the OAuth endpoint (port 9000)
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Ingress annotations
+  annotations: {}
+  # -- Ingress hosts
+  # @default -- `[]`
+  hosts: []
+  #  - host: auth.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: Prefix
+  # -- TLS configuration
+  tls: []
+  #  - secretName: auth-tls
+  #    hosts:
+  #      - auth.example.com
+
+# ---------------------------------------------------------------------------
+# Ingress — Admin API (separate security boundary)
+# ---------------------------------------------------------------------------
+adminIngress:
+  # -- Enable ingress for the Admin API (port 9001)
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+# -- Container resource requests/limits. Empty by default to run on minikube.
+resources: {}
+#  requests:
+#    cpu: 100m
+#    memory: 128Mi
+#  limits:
+#    cpu: 500m
+#    memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Autoscaling
+# ---------------------------------------------------------------------------
+autoscaling:
+  # -- Enable HorizontalPodAutoscaler
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# ---------------------------------------------------------------------------
+# Pod Disruption Budget
+# ---------------------------------------------------------------------------
+podDisruptionBudget:
+  # -- Enable PodDisruptionBudget
+  enabled: false
+  minAvailable: 1
+
+# ---------------------------------------------------------------------------
+# Network Policy
+# ---------------------------------------------------------------------------
+networkPolicy:
+  # -- Enable NetworkPolicy
+  enabled: false
+  # -- Egress rules (opt-in). Required in default-deny-egress clusters so
+  # authserver can reach Postgres, Vault, the upstream OIDC provider, OTLP
+  # collectors, and DNS. Empty list = no Egress policyType (egress unrestricted).
+  # Example:
+  #   egress:
+  #     - to:
+  #         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+  #       ports:
+  #         - { port: 53, protocol: UDP }
+  #     - to:
+  #         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: database } }
+  #       ports:
+  #         - { port: 5432, protocol: TCP }
+  egress: []
+
+# ---------------------------------------------------------------------------
+# Prometheus ServiceMonitor
+# ---------------------------------------------------------------------------
+serviceMonitor:
+  # -- Enable Prometheus ServiceMonitor (requires prometheus-operator CRDs)
+  enabled: false
+  # -- Scrape interval
+  interval: 30s
+  # -- Metrics path
+  path: /metrics
+  # -- Additional labels for the ServiceMonitor
+  labels: {}
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+# -- Node selector
+nodeSelector: {}
+# -- Tolerations
+tolerations: []
+# -- Affinity rules
+affinity: {}
+# -- Topology spread constraints
+topologySpreadConstraints: []
+# -- Additional pod annotations
+podAnnotations: {}
+# -- Additional pod labels
+podLabels: {}
+
+# ---------------------------------------------------------------------------
+# Extra customization
+# ---------------------------------------------------------------------------
+# -- Extra environment variables for the authplane container
+extraEnv: []
+# -- Extra volumes
+extraVolumes: []
+# -- Extra volume mounts
+extraVolumeMounts: []
+# -- Extra Kubernetes manifests to deploy (escape hatch)
+extraObjects: []

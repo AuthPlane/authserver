@@ -1,0 +1,11 @@
+# CPU-pinning override (enable with LOADTEST_PIN=1).
+#
+# run.sh computes disjoint cpusets from nproc and exports LOADTEST_SERVER_CPUSET /
+# LOADTEST_K6_CPUSET, then layers this file on. Pinning the load generator off
+# the server's cores removes the contention that made Postgres N× look like 1×
+# (everything was fighting for the same cores, and the limit is CPU/bcrypt).
+services:
+  authserver:
+    cpuset: "${LOADTEST_SERVER_CPUSET}"
+  k6:
+    cpuset: "${LOADTEST_K6_CPUSET}"

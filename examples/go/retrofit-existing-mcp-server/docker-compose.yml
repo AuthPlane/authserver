@@ -1,0 +1,44 @@
+# Retrofit example: brings up Authplane + both MCP servers (unauthed `before`
+# on :8080 and authed `after` on :8090). The verify script then proves that
+# the same request returns 200 to one and 401 to the other.
+#
+# Keep this `authserver` service block in sync with
+# `../../_shared/docker-compose.authserver.yml`; we inline it for the same
+# reason the tier examples do (compose `include:` keeps relative paths
+# relative to the included file).
+services:
+  authserver:
+    image: authplane/authserver:latest
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ../../_shared/config.example.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    restart: unless-stopped
+
+  before:
+    build: ./before
+    ports:
+      - "${BEFORE_HOST_PORT:-8080}:8080"   # UNAUTHED server — accepts anything
+    restart: unless-stopped
+
+  after:
+    build: ./after
+    env_file:
+      - .env
+    environment:
+      # The audience is the `Resource` you pass to authplanemcp.Options{...}.
+      # The verify script registers the Resource with this exact URI.
+      AUTHPLANE_RESOURCE: http://localhost:${AFTER_HOST_PORT:-8090}/mcp
+    ports:
+      - "${AFTER_HOST_PORT:-8090}:8080"    # AUTHED server — same code + 5-line auth block
+    depends_on:
+      - authserver
+    restart: unless-stopped
+
+volumes:
+  authserver-data:

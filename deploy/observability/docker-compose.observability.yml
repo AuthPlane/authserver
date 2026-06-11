@@ -1,0 +1,99 @@
+# Reusable LGTM observability stack.
+# Included by the main docker-compose files via `include:`.
+#
+# Services: alloy, tempo, loki, mimir, prometheus, grafana
+# Grafana: http://localhost:${GRAFANA_PORT:-3000} (admin/admin)
+
+services:
+  alloy:
+    image: grafana/alloy:v1.15.1
+    container_name: alloy
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --server.http.listen-addr=0.0.0.0:12345
+    volumes:
+      - ./alloy-config.alloy:/etc/alloy/config.alloy:ro
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "12345:12345"  # Alloy UI
+    depends_on:
+      - tempo
+      - loki
+      - mimir
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.10.4
+    container_name: tempo
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.7.1
+    container_name: loki
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  mimir:
+    image: grafana/mimir:3.0.5
+    container_name: mimir
+    command: ["-config.file=/etc/mimir/config.yaml", "-target=all"]
+    volumes:
+      - ./mimir.yaml:/etc/mimir/config.yaml:ro
+      - mimir-data:/data/mimir
+    ports:
+      - "9009:9009"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.11.2
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-remote-write-receiver"
+      - "--enable-feature=native-histograms"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.4.3
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - tempo
+      - loki
+      - mimir
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  tempo-data:
+  loki-data:
+  mimir-data:
+  prometheus-data:
+  grafana-data:

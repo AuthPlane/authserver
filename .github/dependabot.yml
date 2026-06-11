@@ -1,0 +1,53 @@
+version: 2
+
+updates:
+  # Go modules
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 10
+    groups:
+      go-all:
+        patterns:
+          - "*"
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 5
+    groups:
+      actions-all:
+        patterns:
+          - "*"
+
+  # npm — admin UI
+  - package-ecosystem: npm
+    directory: /web/admin
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 10
+    groups:
+      npm-all:
+        patterns:
+          - "*"

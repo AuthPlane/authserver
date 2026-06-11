@@ -1,0 +1,119 @@
+# authserver Authorization Server configuration for SDK demos.
+#
+# Minimal config — no Google OAuth, no vault.
+# Used by all SDK demo start scripts (mcp-demo-server-start.sh).
+#
+# Secrets are hardcoded for demo convenience — never use in production.
+
+server:
+  issuer: "http://localhost:9000"
+  address: ":9000"
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  shutdown_wait: 10s
+
+storage:
+  driver: sqlite
+  sqlite:
+    # Relative path — resolved from the working directory where authserver is started.
+    # mcp-demo-server-start.sh sets this to <demo-dir>/data/authserver.db.
+    path: "data/authserver.db"
+    wal: true
+
+signing:
+  algorithm: ES256
+  key_path: "data/keys"
+
+dcr:
+  mode: open
+  rate_limit: 10
+  rate_limit_burst: 20
+  default_token_expiry: 24h
+  default_refresh_expiry: 168h
+
+cimd:
+  require_https: false
+  cache_ttl: 1h
+  fetch_timeout: 10s
+
+session:
+  cookie_name: session
+  max_age: 24h
+  secure: false
+  same_site: lax
+
+admin:
+  enabled: true
+  address: ":9001"
+
+oauth:
+  require_scope: true
+
+rate_limit:
+  enabled: true
+  requests_per_second: 100
+  burst: 200
+  auth_fail_max: 10
+  auth_fail_window: 10m
+  auth_lockout: 15m
+
+observability:
+  logging:
+    level: info
+    format: json
+    outputs:
+      stdout: true
+
+data_encryption:
+  driver: aes_master
+  aes_master:
+    key_env: AUTHPLANE_ENCRYPTION_KEY
+
+dpop:
+  enabled: true
+  proof_lifetime: 60s
+  nonce_ttl: 60s
+
+client_credentials:
+  enabled: true
+  token_expiry: 1h
+
+token_exchange:
+  enabled: true
+  allow_self_exchange: true
+  max_chain_depth: 4
+  token_expiry: 1h
+
+# broker_providers + connect: support a Broker resource (google-calendar)
+# that exists solely to demo the URL elicitation flow. The credentials are
+# fake — clicking the consent_url that the AS hands back will fail at
+# Google's OAuth screen, which is fine: the SDK demo only needs to observe
+# the AS emit `consent_required` with a `consent_url` and the adapter
+# translate that into MCP `UrlElicitationRequiredError` (-32042).
+broker_providers:
+  - slug: google-calendar
+    display_name: Google Calendar (demo, fake credentials)
+    protocol: oauth
+    config_data:
+      client_id: "demo-fake-google-client-id.apps.googleusercontent.com"
+      client_secret_env: CONNECTOR_GOOGLE_SECRET
+      authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+      token_url: https://oauth2.googleapis.com/token
+      response_format: standard
+      extra_auth_params:
+        access_type: offline
+
+connect:
+  redirect_base_url: "http://localhost:9000"
+  # state_secret is injected via AUTHPLANE_CONNECT_STATE_SECRET env override
+  # (set in mcp-demo-server-start.sh).
+  allowed_return_urls:
+    - "http://localhost:9000/connections"
+
+# Resources are NOT seeded from this file. mcp-demo-server-start.sh creates
+# the calculator (Mint) and google-calendar (Broker) resources via
+# POST /admin/resources after the server boots, which mirrors how operators
+# are expected to manage resources in production (see
+# docs/deployment/standalone.md — YAML resources is optional seed data; the
+# Admin API is the canonical surface for runtime management).

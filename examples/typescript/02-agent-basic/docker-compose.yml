@@ -1,0 +1,65 @@
+# Tier 02 — Basic agent (TypeScript).
+#
+# This example is the client side of tier 01 (`../01-mcp-server-basic`). The
+# tier-01 compose project must already be running before `make verify` is
+# invoked here, because the agent reaches the AS at `localhost:9000` and the
+# MCP server at `localhost:8080`. The `agent` service below is a one-shot
+# container: `make verify` builds it, registers an OAuth client against
+# tier-01's authserver, then runs `docker compose run --rm agent` with the
+# captured client_id / client_secret in its environment.
+#
+# An `authserver` service is included for completeness, but gated behind the
+# `standalone` profile so it does NOT start by default — running it
+# alongside tier 01 would conflict on ports 9000/9001. To run tier 02 against
+# its own AS (no tier-01 server), bring it up with:
+#
+#     docker compose --profile standalone up -d
+#
+# Keep the standalone authserver block in sync with
+# `../../_shared/docker-compose.authserver.yml` when that file changes.
+services:
+  agent:
+    build: .
+    env_file:
+      - .env
+    # `make verify` invokes this via `docker compose run --rm agent` after
+    # populating AUTHPLANE_CLIENT_ID / AUTHPLANE_CLIENT_SECRET; the default
+    # entrypoint runs the agent once and exits.
+    #
+    # Join tier-01's default compose network so the agent can resolve the
+    # `authserver` and `mcp-server` service names directly. The SDK's
+    # RFC 8414 discovery enforces `metadata.issuer == config.issuer`, so
+    # the agent must use the same `http://authserver:9000` issuer the
+    # tier-01 AS was configured with (see tier-01 `.env.example`
+    # `AUTHPLANE_SERVER_ISSUER`).
+    networks:
+      - tier01
+    restart: "no"
+
+  authserver:
+    image: authplane/authserver:latest
+    profiles: ["standalone"]
+    # ---------------------------------------------------------------------
+    # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
+    # ---------------------------------------------------------------------
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ../../_shared/config.example.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    restart: unless-stopped
+
+networks:
+  tier01:
+    # The tier-01 compose project creates this network with the project
+    # name `01-mcp-server-basic` (compose's default for the dir name).
+    # `external: true` means tier 02 will fail-fast if tier 01 isn't up.
+    name: 01-mcp-server-basic_default
+    external: true
+
+volumes:
+  authserver-data:

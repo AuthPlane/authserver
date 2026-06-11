@@ -1,0 +1,83 @@
+name: docs
+
+# Docs/examples gates.
+#
+# loccount-check, loccount-budget, and docs-check are required: they are
+# deterministic and fast (no docker, no network). A failure means the docs
+# or examples are out of sync with the code and the PR must be fixed.
+#
+# docs-smoke is also required: it stands up a docker compose stack per
+# example and exercises the live OAuth flows end to end, catching drift the
+# deterministic checks can't see (mismatched admin payloads, divergent agent
+# flows across languages). The harness pre-checks host ports per example and
+# guarantees teardown; examples that aren't independently runnable opt out
+# with a `.docssmoke-skip` file (see tools/docssmoke/run.sh).
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'examples/**'
+      - 'tools/loccount/**'
+      - 'tools/docssmoke/**'
+      - 'tools/docsgen/**'
+      - 'docs/**'
+      - 'AGENTS.md'
+      - 'Makefile'
+      - '.github/workflows/docs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          # Reads the toolchain/go directive from go.mod so we never
+          # drift from the repo's pinned Go version.
+          go-version-file: go.mod
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          # Needed because docs-smoke runs invoke Python examples
+          # under examples/python/<NN-name>/.
+          python-version: '3.12'
+
+      - name: Build docs tool binaries
+        # Sanity-build so a broken tool surfaces here instead of inside
+        # a later continue-on-error step that masks the failure.
+        run: |
+          go build ./tools/loccount
+          go build ./tools/docsgen
+          bash -n tools/docssmoke/run.sh
+
+      - name: loccount --check
+        id: loccount_check
+        run: make loccount-check
+
+      - name: loccount --budget
+        id: loccount_budget
+        run: make loccount-budget
+
+      - name: docs-check
+        id: docs_check
+        run: make docs-check
+
+      - name: docs-smoke
+        id: docs_smoke
+        # Warn-only until every example passes in CI's environment.
+        continue-on-error: true
+        run: make docs-smoke

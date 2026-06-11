@@ -1,0 +1,22 @@
+{
+  "name": "authplane-example-typescript-04",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tier 04 — Broker upstream provider with RFC 8693 Token Exchange and ConsentRequiredError handling (TypeScript).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start:agent": "tsx agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@authplane/sdk": "0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.0",
+    "tsx": "4.20.6",
+    "typescript": "5.6.3"
+  }
+}

@@ -1,0 +1,76 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    # Default linters (explicit — gosimple merged into staticcheck in v2)
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+    # Bugs & correctness
+    - bodyclose
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+
+    # Security
+    - gosec
+
+    # Style & quality
+    - misspell
+    - unconvert
+    - unparam
+    - wastedassign
+    - prealloc
+
+  settings:
+    gosec:
+      excludes:
+        # We use crypto/rand, not math/rand — but some test helpers use math/rand
+        - G404
+        # OAuth server must return access_token/client_secret in JSON responses per spec
+        - G117
+        # Form parsing is already bounded by upstream middleware/timeouts
+        - G120
+        # XSS taint analysis false positives — responses are JSON, not HTML
+        - G705
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # Too noisy, marginal benefit
+    misspell:
+      locale: US
+
+  exclusions:
+    rules:
+      # Test files can use dot imports and have longer functions
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+          - prealloc
+      # Allow fmt.Print in cmd/ (CLI output)
+      - path: cmd/
+        linters:
+          - forbidigo
+    paths:
+      - vendor
+      - node_modules
+      - web/admin
+      - ".*_gen\\.go$"
+      - ".*\\.pb\\.go$"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/authplane/authserver

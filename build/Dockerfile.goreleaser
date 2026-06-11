@@ -1,0 +1,12 @@
+# Dockerfile for GoReleaser — receives a pre-built binary, no build stage needed.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY authserver /authserver
+
+USER nonroot:nonroot
+WORKDIR /data
+
+EXPOSE 9000 9001
+
+ENTRYPOINT ["/authserver"]
+CMD ["serve"]

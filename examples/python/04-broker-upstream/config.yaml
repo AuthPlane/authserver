@@ -1,0 +1,55 @@
+# Tier-04-specific AS config.
+#
+# Differences from `../../_shared/config.example.yaml`:
+#
+#   - `token_exchange.enabled: true` + `max_chain_depth` + `token_expiry`
+#     are required when the env-var `AUTHPLANE_TOKEN_EXCHANGE_ENABLED=true`
+#     is set; loader.go fills the rest from defaults but we set them
+#     explicitly here for visibility.
+#
+#   - `connect.state_secret` + `connect.redirect_base_url` are required
+#     whenever any Broker resource is registered or any connect.* key is
+#     set (internal/config/selfcheck.go:178-201). We register the Broker
+#     resource at runtime via the admin API in verify.sh, but we still set
+#     these here so the AS boots cleanly without warnings.
+#
+#   - `data_encryption.driver: aes_master` is required because Broker
+#     resources encrypt their `broker_grants.credential_data` at rest
+#     (selfcheck.go:99-110). We read the actual 32-byte key from the env
+#     var named by `data_encryption.aes_master.key_env`.
+server:
+  issuer: http://authserver:9000
+  address: ":9000"
+
+storage:
+  driver: sqlite
+  sqlite:
+    path: /data/authserver.db
+    wal: true
+
+signing:
+  algorithm: ES256
+  key_path: /data/keys
+
+dcr:
+  mode: open
+
+admin:
+  enabled: true
+  address: ":9001"
+  api_key: ${AUTHPLANE_ADMIN_API_KEY}
+
+token_exchange:
+  enabled: true
+  max_chain_depth: 4
+  token_expiry: 1h
+  allow_self_exchange: false
+
+connect:
+  state_secret: ${AUTHPLANE_CONNECT_STATE_SECRET}
+  redirect_base_url: ${AUTHPLANE_CONNECT_REDIRECT_BASE_URL}
+
+data_encryption:
+  driver: aes_master
+  aes_master:
+    key_env: AUTHPLANE_AES_MASTER_KEY

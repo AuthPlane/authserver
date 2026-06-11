@@ -1,0 +1,29 @@
+# Tier-03-specific AS config. Differs from `../../_shared/config.example.yaml`
+# in one way: the AS listens on container-port 80 (rather than 9000) so that
+# the python-sdk's outbound DPoP path (which uses SSRF-pinned requests and
+# sets `Host: <hostname-without-port>`) produces an `htu` that matches the
+# AS's reconstructed `r.Host + r.URL.Path` — otherwise the AS rejects the
+# proof with `invalid_dpop_proof: htu mismatch`. See
+# `python-sdk/authplane/net/ssrf.py` `_execute_pinned_request` where the
+# Host header is set from `parsed.hostname` (port stripped).
+server:
+  issuer: http://authserver
+  address: ":80"
+
+storage:
+  driver: sqlite
+  sqlite:
+    path: /data/authserver.db
+    wal: true
+
+signing:
+  algorithm: ES256
+  key_path: /data/keys
+
+dcr:
+  mode: open
+
+admin:
+  enabled: true
+  address: ":9001"
+  api_key: ${AUTHPLANE_ADMIN_API_KEY}

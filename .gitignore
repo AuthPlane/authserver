@@ -1,0 +1,81 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+*.prof
+
+# Build output
+/bin/
+/dist/
+/authserver
+/mcpserver
+
+# Example binaries (compiled by `go build` inside each example directory).
+# Convention: each example produces a binary named after its directory.
+# Add new examples here as they're created.
+/examples/agent-go/agent-go
+/examples/go-mcp/go-mcp
+/examples/mcp-gateway/mcp-gateway
+/examples/mcp-gateway-broker/mcp-gateway-broker
+/examples/mcpserver/mcpserver
+/examples/mcpserver/.env
+
+# repo root; the canonical invocation is `go run` instead).
+
+# Rust build artifacts
+**/target/
+
+# TypeScript/JavaScript build output (rebuilt via npm run build)
+examples/mcp-typescript/dist/
+examples/mcp-typescript/node_modules/
+examples/mcp-typescript/package-lock.json
+
+# Dependency directories
+/vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime data
+**/data/
+
+# Load-test run artifacts (keep the dir + .gitkeep; ignore generated reports/data)
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Docs
+/implementation-docs/
+
+# Node.js dependencies (all projects)
+**/node_modules/
+
+# SDK generated artifacts
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+
+# Claude
+CLAUDE.md

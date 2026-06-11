@@ -1,0 +1,123 @@
+version: 2
+
+project_name: authserver
+
+before:
+  hooks:
+    - go mod tidy
+    - make check-imports
+
+builds:
+  - id: authserver
+    main: ./cmd/authserver
+    binary: authserver
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: "🚀 Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "🐛 Bug Fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "🔒 Security"
+      regexp: '^.*?sec(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: "📦 Other"
+      order: 999
+
+release:
+  github:
+    owner: authplane
+    name: authserver
+  prerelease: auto
+  draft: false
+  name_template: "v{{ .Version }}"
+  header: |
+    ## Authplane Auth Server v{{ .Version }}
+
+    Self-hosted OAuth 2.1 Authorization Server for the Model Context Protocol.
+  footer: |
+    **Full Changelog**: https://github.com/authplane/authserver/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+dockers:
+  - id: amd64
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "authplane/authserver:{{ .Version }}-amd64"
+    dockerfile: build/Dockerfile.goreleaser
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/authplane/authserver"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+
+  - id: arm64
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "authplane/authserver:{{ .Version }}-arm64"
+    dockerfile: build/Dockerfile.goreleaser
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/authplane/authserver"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+
+docker_manifests:
+  - name_template: "authplane/authserver:{{ .Version }}"
+    image_templates:
+      - "authplane/authserver:{{ .Version }}-amd64"
+      - "authplane/authserver:{{ .Version }}-arm64"
+  - name_template: "authplane/authserver:latest"
+    image_templates:
+      - "authplane/authserver:{{ .Version }}-amd64"
+      - "authplane/authserver:{{ .Version }}-arm64"
+
+# No snapcraft, homebrew, or scoop — not yet

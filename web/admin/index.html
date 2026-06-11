@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Authplane Admin</title>
+    <script>
+      // Set CSS variables BEFORE first paint to prevent flash of wrong theme.
+      // This runs synchronously before any rendering occurs.
+      (function() {
+        var dark = {bg:"#0A0B0D",surface:"#111318",surface2:"#181B22",border:"#1E2028",border2:"#2A2D38",borderStrong:"#636A7E",text:"#F0F2F5",textDim:"#808898",textMono:"#9CA3AF",accent:"#F59E0B",danger:"#EF4444",success:"#10B981",warn:"#FBBF24",blue:"#3B82F6",purple:"#946CF7"};
+        var light = {bg:"#F6F8FA",surface:"#FFFFFF",surface2:"#EFF2F5",border:"#D0D7DE",border2:"#B8C0CC",borderStrong:"#636C76",text:"#1F2328",textDim:"#59636E",textMono:"#32383F",accent:"#8B6508",danger:"#CF222E",success:"#1A7F37",warn:"#9A6700",blue:"#0969DA",purple:"#8250DF"};
+        var sizes = {compact:{xs:10,sm:11,base:12,md:13,lg:15,xl:16,xxl:18},default:{xs:11,sm:12,base:13,md:14,lg:16,xl:18,xxl:20},large:{xs:12,sm:13,base:14,md:15,lg:17,xl:20,xxl:24}};
+        var alphas = [0x10,0x12,0x18,0x20,0x30,0x35,0x40,0x50];
+        var theme = localStorage.getItem("authplane_theme") || "dark";
+        var scale = localStorage.getItem("authplane_size_scale") || "default";
+        var palette = theme === "light" ? light : dark;
+        var s = sizes[scale] || sizes["default"];
+        var r = document.documentElement.style;
+        for (var k in palette) {
+          r.setProperty("--c-" + k, palette[k]);
+          for (var i = 0; i < alphas.length; i++) {
+            var a = alphas[i].toString(16).padStart(2, "0");
+            r.setProperty("--c-" + k + "-" + a, palette[k] + a);
+          }
+        }
+        for (var k in s) { r.setProperty("--sz-" + k, s[k] + "px"); }
+      })();
+    </script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: var(--c-bg);
+        color: var(--c-text);
+        -webkit-font-smoothing: antialiased;
+      }
+      #root { min-height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

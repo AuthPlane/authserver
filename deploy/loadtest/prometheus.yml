@@ -1,0 +1,23 @@
+# Prometheus config for the load-test observability overlay.
+#
+# Fine scrape interval (load-test runs are short). Scrapes the authserver's open
+# /metrics (admin port) and cAdvisor (per-container CPU/mem). k6 pushes its own
+# metrics via remote write (enabled with --web.enable-remote-write-receiver in
+# the compose command), so it needs no scrape job.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: authserver
+    static_configs:
+      - targets: ["authserver:9001"]
+    metrics_path: /metrics
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -1,0 +1,3 @@
+.env
+.run/
+**/*.egg-info/

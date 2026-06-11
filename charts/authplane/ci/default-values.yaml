@@ -1,0 +1,17 @@
+# Minimal PostgreSQL mode with Bitnami subchart.
+config:
+  server:
+    issuer: http://authplane.local
+  storage:
+    driver: postgres
+
+secrets:
+  sessionSecret: "ci-test-session-secret-that-is-long-enough-for-validation"
+  adminApiKey: "ci-test-admin-api-key-that-is-long-enough-for-validation"
+
+postgresql:
+  enabled: true
+  auth:
+    username: authplane
+    password: authplane-ci
+    database: authplane

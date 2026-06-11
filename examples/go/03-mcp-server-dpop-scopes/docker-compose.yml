@@ -1,0 +1,44 @@
+# NOTE: this example inlines the `authserver` service definition rather than
+# using `include: ../../_shared/docker-compose.authserver.yml`. Compose's
+# `include:` directive keeps `env_file` and bind-mount paths relative to the
+# included file's directory, which means the shared compose looks for a `.env`
+# under `examples/_shared/` and the config file at `_shared/config.example.yaml`.
+# The example's own `.env` lives here, so duplicating the service definition
+# is the least-magical fix. Keep this block in sync with
+# `../../_shared/docker-compose.authserver.yml` when that file changes.
+#
+# Topology:
+#   - authserver — AS, ports 9000 (public OIDC/OAuth) and 9001 (admin REST).
+#     DPoP enabled via AUTHPLANE_DPOP_ENABLED=true in .env.
+#   - mcp-server — the tier-03 MCP server, port 8080. Built from server/main.go.
+#   - The agent runs on the host via `go run ./agent` — it needs to generate a
+#     fresh ephemeral DPoP key per invocation, so it is not containerised.
+services:
+  authserver:
+    image: authplane/authserver:latest
+    # ---------------------------------------------------------------------
+    # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
+    # ---------------------------------------------------------------------
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ../../_shared/config.example.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    restart: unless-stopped
+
+  mcp-server:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      - authserver
+    restart: unless-stopped
+
+volumes:
+  authserver-data:

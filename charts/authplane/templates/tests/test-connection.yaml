@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "authplane.fullname" . }}-test-connection"
+  labels:
+    {{- include "authplane.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: wget
+      image: busybox:1.37
+      command:
+        - wget
+        - --spider
+        - --timeout=5
+        - http://{{ include "authplane.fullname" . }}:{{ .Values.service.port }}/.well-known/oauth-authorization-server
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+  restartPolicy: Never

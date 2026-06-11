@@ -1,0 +1,51 @@
+# Tier-04 compose. Like tiers 01/03, this file inlines the `authserver`
+# service definition rather than using `include:
+# ../../_shared/docker-compose.authserver.yml` because compose's `include:`
+# directive keeps relative paths anchored to the included file's directory.
+#
+# Tier-04 differs from tier 01 in three material ways:
+#
+#   1. `AUTHPLANE_TOKEN_EXCHANGE_ENABLED=true` (via .env) so the AS advertises
+#      RFC 8693 on the discovery endpoint and accepts
+#      `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` at
+#      `/oauth/token`.
+#
+#   2. `AUTHPLANE_DATA_ENCRYPTION_DRIVER=aes_master` (+ `KEY_ENV`/key) so the
+#      AS can persist `broker_grants` rows — mandatory whenever any Broker
+#      resource is configured (internal/config/selfcheck.go:99-110).
+#
+#   3. `AUTHPLANE_CONNECT_STATE_SECRET` + `AUTHPLANE_CONNECT_REDIRECT_BASE_URL`
+#      because once a Broker resource exists, the `connect` feature is
+#      treated as requested (selfcheck.go:88-93) and these become required.
+services:
+  authserver:
+    image: authplane/authserver:latest
+    # ---------------------------------------------------------------------
+    # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
+    # ---------------------------------------------------------------------
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    restart: unless-stopped
+
+  # Run-on-demand: the agent is a one-shot script invoked by verify.sh, not a
+  # long-lived service. `profiles: ["manual"]` keeps `make run` from starting
+  # it; `restart: "no"` keeps it from looping if it exits non-zero.
+  agent:
+    build: .
+    env_file:
+      - .env
+    command: ["python", "agent.py"]
+    depends_on:
+      - authserver
+    restart: "no"
+    profiles: ["manual"]
+
+volumes:
+  authserver-data:

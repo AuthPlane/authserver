@@ -1,0 +1,123 @@
+# authserver configuration
+# All values can be overridden with AUTHPLANE_* environment variables.
+
+server:
+  # issuer is the OAuth 2.1 issuer identifier (must match tokens).
+  issuer: "http://localhost:9000"
+  address: ":9000"
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  shutdown_wait: 10s
+
+storage:
+  # driver: "sqlite" (default, single-node) or "postgres" (production).
+  driver: sqlite
+  sqlite:
+    path: "data/authserver.db"
+    wal: true
+  postgres:
+    dsn: ""
+    max_conns: 25
+    min_conns: 5
+    max_conn_lifetime: 1h
+    max_conn_idle_time: 30m
+
+signing:
+  # algorithm: ES256 (default, recommended) or RS256.
+  algorithm: ES256
+  key_path: "data/keys"
+
+dcr:
+  # mode: "open" | "approved_redirects" | "admin_only"
+  mode: open
+  approved_redirects: []
+  rate_limit: 10        # requests per minute per IP
+  rate_limit_burst: 20
+  default_token_expiry: 15m
+  default_refresh_expiry: 168h
+
+cimd:
+  require_https: true
+  cache_ttl: 1h
+  fetch_timeout: 10s
+
+session:
+  cookie_name: authserver_session
+  max_age: 24h
+  secure: false          # set true in production (HTTPS)
+  same_site: lax
+  # secret: ""           # set via AUTHPLANE_SESSION_SECRET env var
+
+rate_limit:
+  enabled: true
+  requests_per_second: 100
+  burst: 200
+  auth_fail_max: 10      # failed auth attempts before lockout
+  auth_fail_window: 10m
+  auth_lockout: 15m
+
+admin:
+  enabled: true
+  address: ":9001"
+  # api_key: ""          # set via AUTHPLANE_ADMIN_API_KEY env var
+
+observability:
+  logging:
+    level: info          # debug | info | warn | error
+    format: json         # json | text
+    add_source: false
+    outputs:
+      stdout: true       # Structured logs to stdout (always available)
+      otel: false        # Export logs via OTLP to OTel collector
+      otel_endpoint: ""  # OTLP gRPC endpoint (e.g. otel-collector:4317)
+      insecure: false    # Allow insecure gRPC for OTel logs
+  metrics:
+    provider: prometheus # prometheus | otel | both | none
+    path: /metrics       # Prometheus scrape endpoint path
+    otel_endpoint: ""    # OTLP endpoint when provider=otel or both
+    insecure: false      # Allow insecure gRPC for OTel metrics
+  tracing:
+    enabled: false
+    endpoint: ""         # OTLP gRPC endpoint for traces
+    insecure: true
+    sample_rate: 1.0
+
+# resources: seeded into the database on startup if no row with the matching
+# slug already exists. For runtime management, use the Admin API
+# (/admin/resources) or CLI (`authserver admin resource`).
+#
+# resources:
+#   - slug: my-mcp-server
+#     uri: https://mcp.example.com
+#     backend_kind: mint
+#     display_name: My MCP Server
+#     scopes:
+#       - name: tools/read
+#         description: Read access
+#       - name: tools/write
+#         description: Write access
+#     policy:
+#       exchange:
+#         allowed_client_ids: []
+#
+# broker_providers: upstream OAuth (or other protocol) providers that Broker
+# resources reference by id or slug. config_data is adapter-shaped JSON; the
+# brokerproto adapter validates the schema lazily at first vend.
+#
+# broker_providers:
+#   - slug: github
+#     display_name: GitHub
+#     protocol: oauth
+#     config_data:
+#       client_id: "Iv1.test"
+#       client_secret_env: "CONNECTOR_GITHUB_SECRET"
+#       authorize_url: "https://github.com/login/oauth/authorize"
+#       token_url: "https://github.com/login/oauth/access_token"
+#
+# connect: shared state for the upstream-connection consent flow.
+#
+# connect:
+#   state_secret: ""           # set via AUTHPLANE_CONNECT_STATE_SECRET
+#   redirect_base_url: ""      # set via AUTHPLANE_CONNECT_REDIRECT_BASE_URL
+#   allowed_return_urls: []
