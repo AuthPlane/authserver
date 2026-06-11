@@ -50,7 +50,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           # Needed because docs-smoke runs invoke Python examples
           # under examples/python/<NN-name>/.
