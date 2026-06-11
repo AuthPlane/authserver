@@ -1,0 +1,1 @@
+not independently runnable: the tier-02 agent has no stack of its own — it authenticates against the tier-01 MCP server (bring up examples/typescript/01-mcp-server-basic first). `make run` here only prints setup instructions, so the smoke harness cannot health-check it in isolation.

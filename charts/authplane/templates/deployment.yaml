@@ -1,0 +1,275 @@
+{{- /*
+Fail fast on AES-master misconfigurations that would otherwise present as
+CrashLoopBackOff with an opaque "secret not found" at pod start. The data
+encryption loader takes the env-var NAME from config; the chart-managed
+Secret only renders when aesMasterKey is set. Catch both halves up front.
+*/ -}}
+{{- if eq (toString .Values.config.data_encryption.driver) "aes_master" -}}
+  {{- if not .Values.config.data_encryption.aes_master.key_env -}}
+    {{- fail "config.data_encryption.driver=aes_master requires config.data_encryption.aes_master.key_env (the env-var name holding the 64-hex-char master key)" -}}
+  {{- end -}}
+  {{- if and (not .Values.secrets.dataEncryption.aesMasterKey) (not .Values.secrets.dataEncryption.existingSecret) -}}
+    {{- fail "config.data_encryption.driver=aes_master requires either secrets.dataEncryption.aesMasterKey or secrets.dataEncryption.existingSecret (otherwise the pod will CrashLoopBackOff on a missing Secret)" -}}
+  {{- end -}}
+  {{- if and .Values.config.data_encryption.aes_master.old_key_env (not .Values.secrets.dataEncryption.aesMasterOldKey) (not .Values.secrets.dataEncryption.existingSecret) -}}
+    {{- fail "config.data_encryption.aes_master.old_key_env is set but no old-key material is available (set secrets.dataEncryption.aesMasterOldKey or supply secrets.dataEncryption.existingSecret with aes-master-old-key)" -}}
+  {{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "authplane.fullname" . }}
+  labels:
+    {{- include "authplane.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "authplane.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/secret-config.yaml") . | sha256sum }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/secret-env.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "authplane.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "authplane.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if eq (toString .Values.config.storage.driver) "postgres" }}
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ include "authplane.postgresHost" . }} {{ include "authplane.postgresPort" . }}; do
+                echo "Waiting for PostgreSQL at {{ include "authplane.postgresHost" . }}:{{ include "authplane.postgresPort" . }}..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready."
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "authplane.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --config
+            - /etc/authplane/config.yaml
+          env:
+            - name: AUTHPLANE_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.secretsName" . }}
+                  key: session-secret
+            - name: AUTHPLANE_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.secretsName" . }}
+                  key: admin-api-key
+            {{- if or .Values.secrets.connectStateSecret .Values.secrets.existingSecret }}
+            - name: AUTHPLANE_CONNECT_STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.secretsName" . }}
+                  key: connect-state-secret
+                  optional: true
+            {{- end }}
+            {{- if eq (toString .Values.config.storage.driver) "postgres" }}
+            {{- if and (not .Values.externalDatabase.existingSecret) (or .Values.postgresql.enabled .Values.externalDatabase.host) }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.postgresql.enabled }}
+                  name: {{ .Values.postgresql.auth.existingSecret | default (printf "%s-postgresql" .Release.Name) }}
+                  key: {{ if .Values.postgresql.auth.existingSecret }}password{{ else }}password{{ end }}
+                  {{- else }}
+                  name: {{ printf "%s-extdb" (include "authplane.fullname" .) }}
+                  key: password
+                  {{- end }}
+            - name: AUTHPLANE_STORAGE_POSTGRES_DSN
+              value: {{ include "authplane.postgresDSN" . }}
+            {{- else if .Values.externalDatabase.existingSecret }}
+            - name: AUTHPLANE_STORAGE_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalDatabase.existingSecret }}
+                  key: {{ .Values.externalDatabase.existingSecretKey }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.vault.signing.enabled }}
+            - name: AUTHPLANE_SIGNING_KEY_STORE
+              value: vault_transit
+            - name: AUTHPLANE_VAULT_ADDR
+              value: {{ .Values.vault.signing.address | quote }}
+            - name: AUTHPLANE_VAULT_TRANSIT_MOUNT
+              value: {{ .Values.vault.signing.mount | quote }}
+            - name: AUTHPLANE_VAULT_TRANSIT_KEY_NAME
+              value: {{ .Values.vault.signing.keyName | quote }}
+            - name: AUTHPLANE_VAULT_TIMEOUT
+              value: {{ .Values.vault.signing.timeout | quote }}
+            {{- if eq .Values.vault.signing.auth.method "token" }}
+            - name: AUTHPLANE_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.vaultSigningSecretName" . }}
+                  key: vault-token
+            {{- else if eq .Values.vault.signing.auth.method "approle" }}
+            - name: AUTHPLANE_VAULT_APPROLE_ROLE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.vaultSigningSecretName" . }}
+                  key: vault-approle-role-id
+            - name: AUTHPLANE_VAULT_APPROLE_SECRET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.vaultSigningSecretName" . }}
+                  key: vault-approle-secret-id
+            - name: AUTHPLANE_VAULT_APPROLE_MOUNT
+              value: {{ .Values.vault.signing.auth.approle.mount | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if and (eq (toString .Values.config.data_encryption.driver) "aes_master") .Values.config.data_encryption.aes_master.key_env }}
+            - name: {{ .Values.config.data_encryption.aes_master.key_env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.aesMasterSecretName" . }}
+                  key: aes-master-key
+            {{- if .Values.config.data_encryption.aes_master.old_key_env }}
+            - name: {{ .Values.config.data_encryption.aes_master.old_key_env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "authplane.aesMasterSecretName" . }}
+                  key: aes-master-old-key
+                  optional: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.vault.dataEncryption.enabled }}
+            - name: AUTHPLANE_DATA_ENCRYPTION_DRIVER
+              value: vault_transit_encrypt
+            - name: AUTHPLANE_DATA_ENCRYPTION_VAULT_ADDRESS
+              value: {{ .Values.vault.dataEncryption.address | quote }}
+            - name: AUTHPLANE_DATA_ENCRYPTION_VAULT_MOUNT_PATH
+              value: {{ .Values.vault.dataEncryption.mountPath | quote }}
+            - name: AUTHPLANE_DATA_ENCRYPTION_VAULT_KEY_NAME
+              value: {{ .Values.vault.dataEncryption.keyName | quote }}
+            - name: AUTHPLANE_DATA_ENCRYPTION_VAULT_AUTH_METHOD
+              value: {{ .Values.vault.dataEncryption.auth.method | quote }}
+            {{- if eq .Values.vault.dataEncryption.auth.method "token" }}
+            - name: AUTHPLANE_DATA_ENCRYPTION_VAULT_TOKEN_ENV
+              value: {{ .Values.vault.dataEncryption.auth.tokenEnv | quote }}
+            {{- else if eq .Values.vault.dataEncryption.auth.method "approle" }}
+            - name: AUTHPLANE_DATA_ENCRYPTION_VAULT_ROLE_ID_ENV
+              value: {{ .Values.vault.dataEncryption.auth.approle.roleIdEnv | quote }}
+            - name: AUTHPLANE_DATA_ENCRYPTION_VAULT_SECRET_ID_ENV
+              value: {{ .Values.vault.dataEncryption.auth.approle.secretIdEnv | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 9000
+              protocol: TCP
+            - name: admin
+              containerPort: 9001
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /.well-known/oauth-authorization-server
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /.well-known/oauth-authorization-server
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/authplane
+              readOnly: true
+            - name: data
+              mountPath: /data
+            {{- if .Values.serviceAccount.projectedToken.enabled }}
+            - name: sa-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "authplane.configSecretName" . }}
+        {{- if .Values.serviceAccount.projectedToken.enabled }}
+        - name: sa-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.serviceAccount.projectedToken.audience | quote }}
+                  expirationSeconds: {{ .Values.serviceAccount.projectedToken.expirationSeconds }}
+        {{- end }}
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "authplane.fullname" .)) }}
+        {{- else }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

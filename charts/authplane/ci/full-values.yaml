@@ -1,0 +1,117 @@
+# Full-featured configuration for testing all template conditionals.
+replicaCount: 2
+
+config:
+  server:
+    issuer: https://auth.example.com
+  storage:
+    driver: postgres
+  signing:
+    algorithm: ES256
+    key_store: keyfile
+    key_path: /data/keys
+  observability:
+    logging:
+      level: info
+      format: json
+      outputs:
+        stdout: true
+        otel: true
+        otel_endpoint: otel-collector:4317
+        insecure: true
+    metrics:
+      provider: both
+      path: /metrics
+      otel_endpoint: otel-collector:4317
+      insecure: true
+    tracing:
+      enabled: true
+      endpoint: otel-collector:4317
+      insecure: true
+      sample_rate: 1.0
+
+secrets:
+  sessionSecret: "ci-test-session-secret-that-is-long-enough-for-validation"
+  adminApiKey: "ci-test-admin-api-key-that-is-long-enough-for-validation"
+
+externalDatabase:
+  host: postgres.database.svc
+  port: 5432
+  user: authplane
+  password: ci-test-password
+  database: authplane
+  sslmode: require
+
+persistence:
+  enabled: true
+  size: 1Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: auth.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: auth-tls
+      hosts:
+        - auth.example.com
+
+adminIngress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+  hosts:
+    - host: auth-admin.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: auth-admin-tls
+      hosts:
+        - auth-admin.example.com
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  path: /metrics
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfied: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: authplane

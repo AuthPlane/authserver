@@ -1,0 +1,93 @@
+name: Live-Stack Smoke
+
+# Live-stack smoke test. Spins the canonical operator stack from
+# deploy/docker-compose.sqlite.yml and asserts the discovery + admin
+# surfaces respond on a freshly-booted instance — proving the deployed
+# compose file actually works as advertised.
+#
+# Cadence: workflow_dispatch (manual) for the MVP, AND on changes to
+# deploy/. Once the smoke is stable, switch to nightly schedule per
+# the plan ("CI: nightly + on changes to deploy/"). The schedule
+# block below is commented out until the manual runs prove green.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - '.github/workflows/live-stack.yml'
+  # schedule:
+  #   - cron: '0 6 * * *'  # 06:00 UTC daily — uncomment once stable.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-smoke:
+    name: SQLite stack smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      # Required env vars for the compose stack — generate ephemeral
+      # values per run so secrets never leak into CI logs. The compose
+      # ?:set-or-fail syntax in deploy/docker-compose.sqlite.yml
+      # would block boot if these were unset.
+      - name: Generate ephemeral secrets
+        run: |
+          {
+            echo "AUTHPLANE_SESSION_SECRET=$(openssl rand -hex 32)"
+            echo "AUTHPLANE_ADMIN_API_KEY=$(openssl rand -hex 32)"
+            echo "AUTHPLANE_CONNECT_STATE_SECRET=$(openssl rand -hex 32)"
+            echo "AUTHPLANE_DATA_ENCRYPTION_KEY=$(openssl rand -hex 32)"
+          } >> "$GITHUB_ENV"
+
+      - name: Boot the compose stack
+        run: |
+          cd deploy
+          docker compose -f docker-compose.sqlite.yml up -d --wait
+
+      - name: Wait for /health to respond
+        run: |
+          # docker-compose --wait above waits for healthchecks if
+          # defined; this loop is the belt-and-suspenders fallback
+          # for stacks that don't define one.
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/.well-known/oauth-authorization-server >/dev/null; then
+              echo "AS metadata reachable after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "AS metadata never came up; dumping logs:"
+          cd deploy && docker compose -f docker-compose.sqlite.yml logs
+          exit 1
+
+      - name: Assert AS metadata shape
+        run: |
+          # RFC 8414 §2: a valid AS metadata document MUST include
+          # issuer, authorization_endpoint, token_endpoint, response_types_supported.
+          # Use jq -e to fail the step when any of those are missing.
+          curl -fsS http://localhost:9000/.well-known/oauth-authorization-server \
+            | jq -e '.issuer and .authorization_endpoint and .token_endpoint and (.response_types_supported | length > 0)' \
+              > /dev/null
+
+      - name: Tear down
+        if: always()
+        run: |
+          cd deploy
+          docker compose -f docker-compose.sqlite.yml logs > /tmp/live-stack.log || true
+          docker compose -f docker-compose.sqlite.yml down -v
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-stack-logs
+          path: /tmp/live-stack.log
+          retention-days: 7

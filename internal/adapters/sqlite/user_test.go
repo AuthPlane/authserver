@@ -1,0 +1,16 @@
+//go:build integration
+
+package sqlite_test
+
+import (
+	"testing"
+
+	"github.com/authplane/authserver/internal/ports/output"
+	"github.com/authplane/authserver/testdata"
+)
+
+func TestUserStore(t *testing.T) {
+	testdata.RunUserStoreTests(t, func(t *testing.T) output.UserStore {
+		return testdata.SetupTestStores(t).User
+	})
+}

@@ -1,0 +1,77 @@
+# Authplane
+
+> Self-hosted OAuth 2.1 + Model Context Protocol (spec 2025-11-25) authorization server delivered as a single Go binary. Use it to add MCP-spec-compliant authorization to an MCP server, federate to an existing IdP, broker upstream provider OAuth (GitHub, Slack, Google, Linear, ...), and record agent-on-behalf-of-user delegation chains. AGPL-3.0.
+
+This file follows the [llms.txt](https://llmstxt.org/) convention so AI agents can navigate the project without a clone. The deterministic workflow for adding Authplane to an existing MCP server lives in `AGENTS.md`; everything below is the link map.
+
+## Start here
+
+- [Root README](README.md): product pitch, SDK matrix, status & roadmap, RFC inventory.
+- [AGENTS.md](AGENTS.md): deterministic workflow for AI coding agents — SDK pins per stack, three byte-for-byte rules, retrofit recipe.
+- [Documentation index](docs/README.md): persona-shaped entry points (Evaluator / Builder / Operator / Architect / Contributor).
+
+## Retrofit an existing MCP server (highest-leverage path)
+
+- [Go retrofit](examples/go/retrofit-existing-mcp-server/): before/after diff, runnable.
+- [TypeScript retrofit](examples/typescript/retrofit-existing-mcp-server/): before/after diff, runnable.
+- [Python retrofit](examples/python/retrofit-existing-mcp-server/): before/after diff, runnable.
+
+## SDK packages (pin these by stack)
+
+- Go: `github.com/authplane/go-sdk` ([repo](https://github.com/authplane/go-sdk)) — core + MCP-SDK adapter + FastMCP adapter.
+- TypeScript: `@authplane/sdk`, `@authplane/mcp`, `@authplane/fastmcp` (npm) — ESM-only, Node.js 22+.
+- Python: `authplane`, `authplane-mcp`, `authplane-fastmcp` (PyPI) — requires Python 3.12+.
+
+## Tiered runnable examples (Go · TypeScript · Python)
+
+- Tier 01 — basic MCP server: [Go](examples/go/01-mcp-server-basic/) · [TypeScript](examples/typescript/01-mcp-server-basic/) · [Python](examples/python/01-mcp-server-basic/)
+- Tier 02 — agent calling an MCP server: [Go](examples/go/02-agent-basic/) · [TypeScript](examples/typescript/02-agent-basic/) · [Python](examples/python/02-agent-basic/)
+- Tier 03 — DPoP + per-tool scopes: [Go](examples/go/03-mcp-server-dpop-scopes/) · [TypeScript](examples/typescript/03-mcp-server-fastmcp-dpop/) · [Python](examples/python/03-mcp-server-dpop-scopes/)
+- Tier 04 — broker upstream + RFC 8693 token exchange: [Go](examples/go/04-broker-upstream/) · [TypeScript](examples/typescript/04-broker-upstream/) · [Python](examples/python/04-broker-upstream/)
+
+## Generated references (canonical wire & config truth)
+
+These are regenerated from source by `make docs-gen`; never infer wire shapes from older blog posts or training data.
+
+- [HTTP API](docs/reference/http-api.md): every endpoint, every DTO, with source-file line refs.
+- [CLI](docs/reference/cli.md): every `authserver` subcommand, every flag.
+- [Configuration](docs/reference/configuration.md): every YAML key.
+- [Environment variables](docs/reference/env-vars.md): every `AUTHPLANE_*`.
+- [Metrics](docs/reference/metrics.md): every Prometheus / OTel instrument.
+- [Audit events](docs/reference/audit-events.md): every audit action key.
+- [Flows](docs/reference/flows.md): pointer index for OAuth / MCP / DPoP / Broker / federation flows.
+- [Compliance matrix](docs/reference/compliance.md): RFC-by-RFC support.
+- [MCP client compatibility](docs/reference/mcp-client-compatibility.md): tested clients.
+
+## Concepts (mental model)
+
+- [What is Authplane?](docs/concepts/what-is-authplane.md): 60-second overview.
+- [Resources and scopes](docs/concepts/resources-and-scopes.md): the unit Authplane authorizes.
+- [Tokens and claims](docs/concepts/tokens-and-claims.md): JWT shapes, `act` chains, audience binding.
+- [Broker vs Mint](docs/concepts/broker-vs-mint.md): the central topology choice.
+- [Delegation and agent chains](docs/concepts/delegation-and-agent-chains.md): RFC 8693 in this codebase.
+- [Threat model](docs/concepts/threat-model.md): what Authplane defends against (and what it doesn't).
+- [Architecture](docs/concepts/architecture.md): hexagonal layout and request lifecycle.
+- [Glossary](docs/concepts/glossary.md): every internal term.
+
+## Guides — integrate
+
+- [Connect an MCP server](docs/guides/integrate/connect-mcp-server.md): register a Resource, publish PRM, validate JWTs.
+- [Resource Server SDK](docs/guides/integrate/sdk-resource-server.md): drop-in JWT validation in Go / TS / Python.
+- [Auth Client SDK](docs/guides/integrate/sdk-auth-client.md): outbound — mint client-credentials, attach DPoP, exchange.
+- [Client Credentials grant](docs/guides/integrate/client-credentials-grant.md): machine-to-machine.
+- [Runtime client binding](docs/guides/integrate/runtime-client-binding.md): `policy.runtime.client_ids`.
+- [Debugging 401s](docs/guides/integrate/debugging-401s.md): the three byte-for-byte rules + diagnostic ladder.
+
+## Guides — deploy & operate
+
+- [Deploy index](docs/guides/deploy/README.md): Docker Compose · Helm · systemd · cross-cutting rules.
+- [Operate index](docs/guides/operate/README.md): admin CLI · key rotation · audit · runbook.
+- [Observability (Prometheus + OTel)](docs/guides/deploy/observability-prometheus-otel.md): metrics, traces, alerts.
+
+## Optional
+
+- [Topology decision tree](docs/topologies/): pick a deployment shape.
+- [Contribute](docs/contribute/): repo tour, hexagonal layers, add an upstream provider, add a grant type.
+- [Examples catalog](examples/README.md): full ladder with cross-language tier matrix.
+- [Standards inventory](README.md#standards--specifications): RFC list (OAuth 2.1, OIDC, DPoP, PAR, JWT Bearer, Token Exchange, RFC 8707, ...).

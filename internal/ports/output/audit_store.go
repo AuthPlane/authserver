@@ -1,0 +1,27 @@
+package output
+
+import (
+	"context"
+
+	"github.com/authplane/authserver/internal/domain/audit"
+)
+
+// AuditStore persists security audit events.
+type AuditStore interface {
+	// Record stores an audit event.
+	Record(ctx context.Context, e *audit.Event) error
+
+	// Query returns audit events matching the filter.
+	Query(ctx context.Context, filter AuditFilter) ([]audit.Event, error)
+}
+
+// AuditFilter constrains audit event queries.
+type AuditFilter struct {
+	Action    string
+	ActorID   string
+	ClientID  string
+	SinceUnix int64 // 0 = no lower bound
+	UntilUnix int64 // 0 = no upper bound
+	Limit     int
+	Offset    int
+}

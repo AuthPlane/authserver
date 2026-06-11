@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+# Local docker-compose override (e.g. for alternate host ports on a
+# developer machine that already has another authserver on :9000).
+docker-compose.override.yml

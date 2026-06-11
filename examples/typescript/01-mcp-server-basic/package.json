@@ -1,0 +1,27 @@
+{
+  "name": "authplane-example-typescript-01",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tier 01 — Basic MCP server protected by Authplane (TypeScript).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "tsx server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@authplane/mcp": "0.2.0",
+    "@authplane/sdk": "0.2.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "express": "4.22.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "22.10.0",
+    "tsx": "4.20.6",
+    "typescript": "5.6.3"
+  }
+}

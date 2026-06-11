@@ -1,0 +1,140 @@
+# Authplane MCP Authorization Server — full infrastructure stack.
+#
+# PostgreSQL + authserver + full LGTM observability.
+#
+# Usage:
+#   ./deploy/start.sh up --build
+#
+# Or manually:
+#   export AUTHPLANE_SESSION_SECRET="$(openssl rand -hex 32)"
+#   export AUTHPLANE_ADMIN_API_KEY="$(openssl rand -hex 32)"
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+# Then build and run a demo MCP server on the host — pick a language and
+# follow its example README:
+#   examples/go/01-mcp-server-basic/      (or retrofit-existing-mcp-server/)
+#   examples/python/01-mcp-server-basic/
+#   examples/typescript/01-mcp-server-basic/
+#
+# Services:
+#   postgres   — Database (PostgreSQL 18)
+#   authserver    — Authorization Server (HTTP :9000, Admin :9001)
+#   setup      — One-shot: creates demo user (demo@example.com / demo-password)
+#   + LGTM observability stack (see observability/docker-compose.observability.yml)
+
+include:
+  - path: observability/docker-compose.observability.yml
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: authserver
+      POSTGRES_USER: authserver
+      POSTGRES_PASSWORD: authserver
+    ports:
+      - "5432:5432"
+    volumes:
+      # PG18's image stores data in a version subdir and rejects a mount at the
+      # legacy /var/lib/postgresql/data; mount the parent instead.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authserver"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  authserver:
+    build:
+      context: ..
+      dockerfile: build/Dockerfile
+    container_name: authserver
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      AUTHPLANE_SERVER_ISSUER: http://localhost:9000
+      AUTHPLANE_SESSION_SECRET: ${AUTHPLANE_SESSION_SECRET:?set AUTHPLANE_SESSION_SECRET (e.g. openssl rand -hex 32)}
+      AUTHPLANE_SESSION_SECURE: "false"
+      AUTHPLANE_SERVER_ALLOWED_ORIGINS: "*"
+      AUTHPLANE_ADMIN_API_KEY: ${AUTHPLANE_ADMIN_API_KEY:?set AUTHPLANE_ADMIN_API_KEY (e.g. openssl rand -hex 32)}
+      # Storage — PostgreSQL.
+      AUTHPLANE_STORAGE_DRIVER: postgres
+      AUTHPLANE_STORAGE_POSTGRES_DSN: postgres://authserver:authserver@postgres:5432/authserver?sslmode=disable
+      # Signing — local keyfile.
+      AUTHPLANE_SIGNING_KEY_PATH: /data/keys
+      # Observability — full OTLP pipeline.
+      AUTHPLANE_LOG_FORMAT: json
+      AUTHPLANE_LOG_LEVEL: debug
+      AUTHPLANE_LOG_STDOUT: "true"
+      AUTHPLANE_LOG_OTEL: "true"
+      AUTHPLANE_LOG_OTEL_ENDPOINT: alloy:4317
+      AUTHPLANE_LOG_OTEL_INSECURE: "true"
+      AUTHPLANE_TRACING_ENABLED: "true"
+      AUTHPLANE_TRACING_ENDPOINT: alloy:4317
+      AUTHPLANE_TRACING_INSECURE: "true"
+      AUTHPLANE_TRACING_SAMPLE_RATE: "1.0"
+      AUTHPLANE_METRICS_PROVIDER: both
+      AUTHPLANE_METRICS_OTEL_ENDPOINT: alloy:4317
+      AUTHPLANE_METRICS_INSECURE: "true"
+      # OAuth features.
+      AUTHPLANE_CLIENT_CREDENTIALS_ENABLED: "true"
+      AUTHPLANE_DPOP_ENABLED: "true"
+      AUTHPLANE_DPOP_NONCE_TTL: "5m"
+      AUTHPLANE_DPOP_PROOF_LIFETIME: "120s"
+      AUTHPLANE_DPOP_PURGE_INTERVAL: "10m"
+      AUTHPLANE_TOKEN_EXCHANGE_ENABLED: "true"
+      AUTHPLANE_TOKEN_EXCHANGE_MAX_CHAIN_DEPTH: "5"
+    volumes:
+      - keydata:/data/keys
+    healthcheck:
+      test: ["CMD", "/authserver", "version"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      alloy:
+        condition: service_started
+    restart: unless-stopped
+
+  setup:
+    image: curlimages/curl:8.19.0
+    container_name: authserver-setup
+    volumes:
+      - ./setup.sh:/setup.sh:ro
+    entrypoint: ["sh", "/setup.sh"]
+    environment:
+      AUTHPLANE_ADMIN_API_KEY: ${AUTHPLANE_ADMIN_API_KEY}
+    depends_on:
+      authserver:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot purge of expired rows. Not started by default — schedule via host cron:
+  #   0 * * * * docker compose -f deploy/docker-compose.yml run --rm authserver-purge
+  # or invoke on demand: `docker compose --profile purge run --rm authserver-purge`.
+  # See docs/deployment/purge.md for systemd timer and Kubernetes CronJob recipes.
+  authserver-purge:
+    build:
+      context: ..
+      dockerfile: build/Dockerfile
+    container_name: authserver-purge
+    command: ["purge"]
+    environment:
+      AUTHPLANE_STORAGE_DRIVER: postgres
+      AUTHPLANE_STORAGE_POSTGRES_DSN: postgres://authserver:authserver@postgres:5432/authserver?sslmode=disable
+      AUTHPLANE_LOG_FORMAT: json
+      AUTHPLANE_LOG_STDOUT: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["purge"]
+    restart: "no"
+
+volumes:
+  pgdata:
+  keydata:

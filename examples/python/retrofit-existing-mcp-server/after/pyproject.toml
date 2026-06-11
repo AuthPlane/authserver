@@ -1,0 +1,10 @@
+[project]
+name = "retrofit-after"
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = [
+    # Same FastMCP as before/. The only new dep is the Authplane adapter.
+    "fastmcp>=3.0,<4",
+    "authplane-sdk==0.2.0",
+    "authplane-fastmcp==0.2.0",
+]

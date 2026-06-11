@@ -1,0 +1,8 @@
+[project]
+name = "retrofit-before"
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = [
+    # Just FastMCP — no auth deps. This is the "before" state.
+    "fastmcp>=3.0,<4",
+]

@@ -1,0 +1,54 @@
+# Authplane does not accept external code contributions (see CONTRIBUTING.md).
+#
+# AuthPlane employees have write access and push branches directly to this repo,
+# so any PR opened from a *fork* is an outside contribution and is closed here.
+#
+# NOTE: this assumes employees do NOT open PRs from personal forks. If that ever
+# changes, add an allowlist / org-membership check to the `if` condition below.
+#
+# Uses `pull_request_target` so the job runs with the base repo's token (fork PRs
+# would otherwise get a read-only token). Fork code is never checked out or run —
+# only the GitHub API is called — so this is not vulnerable to pwn-request attacks.
+name: Close external PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  close-external-pr:
+    # Only PRs whose head branch lives in a different repo (i.e. a fork).
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const body = [
+              "Thanks for your interest in Authplane! 🙏",
+              "",
+              "Authplane is **open source (AGPL-3.0) but not currently open to external code contributions** while we finalize our CLA strategy, so we're closing this PR automatically. This is about copyright provenance, not the quality of your change — please don't take it personally.",
+              "",
+              "You're very welcome to:",
+              "- 🐛 Report bugs via [issues](https://github.com/authplane/authserver/issues)",
+              "- 🔒 Report security issues via [SECURITY.md](https://github.com/authplane/authserver/blob/main/SECURITY.md)",
+              "- 💬 Ask questions in [discussions](https://github.com/authplane/authserver/discussions)",
+              "- 🍴 Fork and modify Authplane under the AGPL-3.0 license",
+              "",
+              "See [CONTRIBUTING.md](https://github.com/authplane/authserver/blob/main/CONTRIBUTING.md) for the full policy.",
+            ].join("\n");
+
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            await github.rest.pulls.update({
+              owner,
+              repo,
+              pull_number: issue_number,
+              state: "closed",
+            });

@@ -1,0 +1,65 @@
+Authplane MCP Authorization Server has been deployed.
+
+{{- if not .Values.config.server.issuer }}
+
+WARNING: config.server.issuer is not set!
+  You MUST set this to your external URL for OAuth to work correctly.
+  Example: helm upgrade {{ .Release.Name }} authplane --set config.server.issuer=https://auth.example.com
+
+{{- end }}
+
+{{- if and (not .Values.secrets.sessionSecret) (not .Values.secrets.existingSecret) }}
+
+WARNING: Session secret was auto-generated.
+  Auto-generated secrets do NOT persist across helm upgrade.
+  For production, set secrets.sessionSecret or use secrets.existingSecret.
+
+{{- end }}
+
+{{- if and (not .Values.secrets.adminApiKey) (not .Values.secrets.existingSecret) }}
+
+WARNING: Admin API key was auto-generated.
+  Auto-generated secrets do NOT persist across helm upgrade.
+  For production, set secrets.adminApiKey or use secrets.existingSecret.
+
+{{- end }}
+
+{{- if and (eq (toString .Values.config.storage.driver) "sqlite") (gt (int .Values.replicaCount) 1) }}
+
+WARNING: SQLite storage does not support multiple replicas.
+  You have replicaCount={{ .Values.replicaCount }} with driver=sqlite.
+  Set replicaCount=1 or switch to driver=postgres for HA.
+
+{{- end }}
+
+{{- if and (eq (toString .Values.config.storage.driver) "sqlite") (not .Values.persistence.enabled) }}
+
+WARNING: SQLite storage without persistence enabled!
+  Data will be lost on pod restart. Set persistence.enabled=true.
+
+{{- end }}
+
+NOTE: Liveness/readiness probes hit /.well-known/oauth-authorization-server,
+  which is a static metadata endpoint. It does NOT exercise the database or
+  the signing key store, so a pod can be reported "ready" while its backing
+  store is unreachable. Pair with PodDisruptionBudget + a real DB monitor.
+
+OAuth Endpoint:
+{{- if .Values.ingress.enabled }}
+  {{- range .Values.ingress.hosts }}
+  https://{{ .host }}/.well-known/oauth-authorization-server
+  {{- end }}
+{{- else }}
+  kubectl port-forward svc/{{ include "authplane.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  http://localhost:{{ .Values.service.port }}/.well-known/oauth-authorization-server
+{{- end }}
+
+Admin API:
+{{- if .Values.adminIngress.enabled }}
+  {{- range .Values.adminIngress.hosts }}
+  https://{{ .host }}
+  {{- end }}
+{{- else }}
+  kubectl port-forward svc/{{ include "authplane.fullname" . }} {{ .Values.service.adminPort }}:{{ .Values.service.adminPort }}
+  http://localhost:{{ .Values.service.adminPort }}/admin
+{{- end }}

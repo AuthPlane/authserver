@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "authplane-example-python-01"
+version = "0.1.0"
+description = "Tier 01 — Basic MCP server protected by Authplane (Python)."
+requires-python = ">=3.12"
+dependencies = [
+  # fastmcp 3.x is required because the authplane-fastmcp adapter passes
+  # `scopes_supported=` to `RemoteAuthProvider`, a kwarg added in 3.0.0.
+  "fastmcp>=3.0,<4",
+  # Authplane SDK + FastMCP adapter (PyPI). Pinned to the exact version the
+  # example was developed and verified against; bump together with the SDK.
+  "authplane-sdk==0.2.0",
+  "authplane-fastmcp==0.2.0",
+]
+
+[tool.setuptools]
+py-modules = ["server"]

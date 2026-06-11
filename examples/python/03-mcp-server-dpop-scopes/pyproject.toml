@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "authplane-example-python-03"
+version = "0.1.0"
+description = "Tier 03 — DPoP-bound MCP server + agent with per-tool scopes (Python)."
+requires-python = ">=3.12"
+dependencies = [
+  # fastmcp 3.x is required because the authplane-fastmcp adapter passes
+  # `scopes_supported=` to `RemoteAuthProvider`, a kwarg added in 3.0.0.
+  "fastmcp>=3.0,<4",
+  # Authplane SDK + FastMCP adapter (PyPI). Pinned to the exact version
+  # the example was developed and verified against; bump together with
+  # the SDK. The agent depends on the core SDK for the DPoPProvider /
+  # DPoPKeyMaterial outbound helpers and for client_credentials.
+  "authplane-sdk==0.2.0",
+  "authplane-fastmcp==0.2.0",
+  # `cryptography` provides the EC P-256 keypair generator used by the
+  # agent to produce DPoP signing material. It's a transitive dep of
+  # `authlib` (which authplane-sdk pulls in) but we pin it explicitly
+  # because agent.py imports `cryptography.hazmat.primitives` directly.
+  "cryptography>=42,<46",
+  # httpx is already a transitive dep of authplane-sdk, but pin it
+  # explicitly because agent.py uses it directly to POST to the MCP server.
+  "httpx>=0.27,<1",
+]
+
+[tool.setuptools]
+py-modules = ["server", "agent"]

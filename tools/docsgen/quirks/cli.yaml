@@ -1,0 +1,88 @@
+# cli quirks — operator-friendly notes that augment the auto-generated
+# flag tables in docs/reference/cli.md.
+#
+# Cobra metadata (Use/Short/Long, flag usage strings) cannot express
+# format syntax like `name|upstream|description` or `src:tgt+tgt2,src2:tgt3`.
+# Each entry here adds a "Notes" cell for the matching flag in the
+# generated reference. Anything not listed is rendered with its raw
+# cobra flag-usage string.
+#
+# Path key = full cobra path WITHOUT the `authserver` prefix, e.g.
+# `admin resource create`. Flag key = the long flag with leading `--`.
+
+commands:
+  "admin resource create":
+    flags:
+      "--scopes":
+        notes: |
+          Format: `name|upstream|description`. Repeatable.
+          For `broker` resources upstream maps the local scope name to the
+          upstream OAuth scope (e.g. `repo|repo|Repository read/write`).
+          For `mint` resources upstream is conventionally empty —
+          double-pipe: `tasks:summarize||Summarise tasks`.
+          Mutually exclusive with `--scopes-file`.
+
+  "admin resource update":
+    flags:
+      "--scopes":
+        notes: |
+          Same `name|upstream|description` tuple grammar as
+          `admin resource create --scopes`. Replaces the existing scope
+          set wholesale; use `--scopes-clear` to set the empty list.
+
+  "admin fronting create":
+    flags:
+      "--scope-map":
+        notes: |
+          Source→target scope translation. Comma separates entries;
+          colon separates source from targets; `+` fans out one source
+          to multiple targets.
+          Examples:
+            `A:AA,B:BB`             — `A → [AA]`, `B → [BB]`
+            `read:repo+org,write:repo` — `read → [repo, org]`, `write → [repo]`
+
+  "admin fronting update":
+    flags:
+      "--scope-map":
+        notes: |
+          Same `src:tgt[+tgt2],src2:tgt3` grammar as
+          `admin fronting create --scope-map`. Omitting the flag leaves
+          the existing map untouched.
+
+  "admin client create":
+    flags:
+      "--grant-types":
+        notes: |
+          Comma-separated grant-type identifiers
+          (e.g. `authorization_code,refresh_token,client_credentials`).
+      "--redirect-uris":
+        notes: |
+          Comma-separated full URLs. Each must include a scheme.
+
+  "admin client update":
+    flags:
+      "--grant-types":
+        notes: "Comma-separated grant-type identifiers."
+      "--redirect-uris":
+        notes: "Comma-separated full URLs."
+
+  "purge":
+    flags:
+      "--only":
+        notes: |
+          Comma-separated target names. Run `authserver purge --help` to
+          see the live target list; common values include
+          `refresh-tokens`, `sessions`, `consent-grants`,
+          `broker-grants`, `issuances`, `dpop-nonces`.
+      "--timeout":
+        notes: |
+          Go duration (e.g. `30s`, `5m`, `1h`). `--timeout=0` disables
+          the internal deadline; the run still aborts on SIGINT/SIGTERM.
+
+  "admin issuance list":
+    flags:
+      "--since":
+        notes: |
+          Go duration plus `d`/`w` suffixes (e.g. `7d`, `2w`, `30m`).
+          Default `24h`, max `30d` (720h). Ignored when `--jti` is set
+          (point-query).

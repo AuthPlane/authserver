@@ -1,0 +1,52 @@
+# Optional observability overlay for the load-test stacks (enable with LOADTEST_OBS=1).
+#
+# Layered onto a stack in the same project/network:
+#   docker compose -f docker-compose.loadtest-<cfg>.yml \
+#                  -f docker-compose.loadtest-observability.yml -p <proj> up -d
+#
+# Deliberately lightweight and CPU-capped: a heavy stack (Loki/Tempo/Mimir) would
+# steal cores from a CPU-bound test and skew the very result we're measuring.
+# Prometheus scrapes the server's open /metrics + cAdvisor and receives k6's
+# metrics via remote write; Grafana serves a provisioned load-test dashboard.
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+      - --storage.tsdb.retention.time=2h
+      - --log.level=warn
+    ports:
+      - "${LOADTEST_PROM_PORT:-9090}:9090"
+    volumes:
+      - ./loadtest/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    cpus: "1.0"
+
+  # Per-container CPU/memory. Linux-oriented mounts (the user's load-test host);
+  # on Docker Desktop / macOS cAdvisor's container CPU is limited.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    command: ["--housekeeping_interval=2s", "--docker_only=true"]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    cpus: "1.0"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      # Local-only: no login, anonymous admin so the dashboard opens immediately.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_LOG_LEVEL: warn
+    ports:
+      - "${LOADTEST_GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./loadtest/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on: [prometheus]
+    cpus: "1.0"

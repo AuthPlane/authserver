@@ -1,0 +1,4 @@
+github.com/authplane/go-sdk/core v0.1.1 h1:trmUFLNvCmnAGv1/WkrWKB5QbvfuigjTBJh3+vTpeWU=
+github.com/authplane/go-sdk/core v0.1.1/go.mod h1:ROwq9u49obzrUqPUcZ9JCNM+391VnhQUdnWyhh14ukY=
+github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
+github.com/go-jose/go-jose/v4 v4.1.4/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=

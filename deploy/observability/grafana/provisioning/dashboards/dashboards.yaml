@@ -1,0 +1,13 @@
+# Auto-provisioned Grafana dashboards for the Authplane observability stack.
+apiVersion: 1
+
+providers:
+  - name: Authplane
+    orgId: 1
+    folder: Authplane
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

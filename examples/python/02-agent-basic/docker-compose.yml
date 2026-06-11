@@ -1,0 +1,27 @@
+# Tier 02 compose — ONLY the agent service. The Authplane authserver and the
+# protected MCP server it talks to both come from tier 01
+# (`examples/python/01-mcp-server-basic`); tier 02 cannot bring up its own
+# authserver because that would clash with tier 01's published ports
+# (:9000 / :9001) and confuse discovery. Bring tier 01 up first, then run
+# `make run && make verify` here.
+#
+# The agent attaches to tier 01's compose network so it can reach the AS at
+# its in-network hostname (`authserver:9000`); the `external: true` flag
+# tells compose not to try to manage that network's lifecycle.
+services:
+  agent:
+    build: .
+    env_file:
+      - .env
+    networks:
+      - tier01
+    # Run-on-demand: the agent is a one-shot script invoked by verify.sh,
+    # not a long-lived service. `restart: "no"` keeps it from looping if it
+    # exits non-zero during a debug run.
+    restart: "no"
+    profiles: ["manual"]
+
+networks:
+  tier01:
+    name: 01-mcp-server-basic_default
+    external: true

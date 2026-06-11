@@ -1,0 +1,32 @@
+# OTel Collector configuration for authserver observability stack.
+# Receives OTLP gRPC from authserver, exports to Tempo (traces), Loki (logs), Mimir (metrics).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+  otlphttp/mimir:
+    endpoint: http://mimir:9009/otlp
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/loki]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/mimir]

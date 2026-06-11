@@ -1,0 +1,61 @@
+services:
+  authserver:
+    build:
+      context: ..
+      dockerfile: build/Dockerfile
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      AUTHPLANE_SERVER_ISSUER: http://localhost:9000
+      AUTHPLANE_STORAGE_SQLITE_PATH: /data/authserver.db
+      AUTHPLANE_SIGNING_KEY_PATH: /data/keys
+      AUTHPLANE_SESSION_SECRET: ${AUTHPLANE_SESSION_SECRET:?set AUTHPLANE_SESSION_SECRET to a strong random value (e.g. openssl rand -hex 32)}
+      AUTHPLANE_ADMIN_API_KEY: ${AUTHPLANE_ADMIN_API_KEY:?set AUTHPLANE_ADMIN_API_KEY to a strong random value (e.g. openssl rand -hex 32)}
+      # CORS — required so browser-based MCP clients (MCP Inspector, Claude Code,
+      # Claude Desktop) can complete the OAuth code → token exchange and the
+      # discovery preflights without being blocked by the browser. "*" is fine
+      # for local dev; set to your front-end origins (e.g. https://app.example.com)
+      # in production. Default is empty, which disables CORS entirely.
+      AUTHPLANE_SERVER_ALLOWED_ORIGINS: ${AUTHPLANE_SERVER_ALLOWED_ORIGINS:-*}
+      AUTHPLANE_SESSION_SECURE: ${AUTHPLANE_SESSION_SECURE:-false}
+      # Short token lifetimes for the dev stack — makes revoke/refresh/re-login
+      # loops fast enough to feel during testing. Production deployments
+      # leave these unset so the defaults (15 min access / 7 day refresh) apply.
+      #
+      # Tokens issued via Authorization Code grant (the path MCP Inspector +
+      # Claude Code take):
+      AUTHPLANE_DCR_DEFAULT_TOKEN_EXPIRY: ${AUTHPLANE_DCR_DEFAULT_TOKEN_EXPIRY:-5m}
+      AUTHPLANE_DCR_DEFAULT_REFRESH_EXPIRY: ${AUTHPLANE_DCR_DEFAULT_REFRESH_EXPIRY:-30m}
+      # Optional OAuth grants — defaulted ON in the dev stack so every
+      # MCP flow (auth-code, client-credentials, token-exchange / Broker
+      # vending, DPoP) works out of the box. Production deployments should
+      # leave them off unless they're needed (the binary defaults are off
+      # for safety; this compose only flips them on for the demo).
+      AUTHPLANE_CLIENT_CREDENTIALS_ENABLED: ${AUTHPLANE_CLIENT_CREDENTIALS_ENABLED:-true}
+      AUTHPLANE_DPOP_ENABLED: ${AUTHPLANE_DPOP_ENABLED:-true}
+      AUTHPLANE_TOKEN_EXCHANGE_ENABLED: ${AUTHPLANE_TOKEN_EXCHANGE_ENABLED:-true}
+      # Connect flow — required for upstream-provider Broker resources
+      # (Google Calendar, GitHub, Slack, etc.). The state secret signs the
+      # CSRF tokens that bind the upstream callback to the user's session.
+      # Data encryption is also REQUIRED — the Connect flow silently
+      # disables itself if no data encryptor is configured (the upstream
+      # refresh-grants must be encrypted at rest). aes_master is the
+      # simplest dev driver; production uses HashiCorp Vault Transit.
+      AUTHPLANE_CONNECT_STATE_SECRET: ${AUTHPLANE_CONNECT_STATE_SECRET:?set AUTHPLANE_CONNECT_STATE_SECRET to a strong random value (e.g. openssl rand -hex 32)}
+      AUTHPLANE_CONNECT_REDIRECT_BASE_URL: ${AUTHPLANE_CONNECT_REDIRECT_BASE_URL:-http://localhost:9000}
+      AUTHPLANE_CONNECT_ALLOWED_RETURN_URLS: ${AUTHPLANE_CONNECT_ALLOWED_RETURN_URLS:-http://localhost:*,http://127.0.0.1:*}
+      AUTHPLANE_DATA_ENCRYPTION_DRIVER: ${AUTHPLANE_DATA_ENCRYPTION_DRIVER:-aes_master}
+      AUTHPLANE_DATA_ENCRYPTION_KEY_ENV: AUTHPLANE_DATA_ENCRYPTION_KEY
+      AUTHPLANE_DATA_ENCRYPTION_KEY: ${AUTHPLANE_DATA_ENCRYPTION_KEY:?set AUTHPLANE_DATA_ENCRYPTION_KEY to a 32-byte hex value (e.g. openssl rand -hex 32)}
+      # Google Broker provider credentials — picked up by the demo MCP server
+      # when it auto-registers the google-calendar Broker resource. Set in
+      # .e2e/env after creating an OAuth client at
+      # https://console.cloud.google.com/apis/credentials with the redirect
+      # URI http://localhost:9000/connect/google/callback.
+      CONNECTOR_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    volumes:
+      - data:/data
+
+volumes:
+  data:

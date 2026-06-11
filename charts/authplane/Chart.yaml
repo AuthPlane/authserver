@@ -1,0 +1,50 @@
+apiVersion: v2
+name: authplane
+description: OAuth 2.1 Authorization Server for the Model Context Protocol (MCP)
+type: application
+version: 0.2.0
+appVersion: "0.1.0-rc1"
+kubeVersion: ">=1.26.0-0"
+home: https://github.com/authplane/authserver
+icon: https://raw.githubusercontent.com/authplane/authserver/main/web/admin/public/favicon.svg
+keywords:
+  - oauth
+  - oauth2
+  - mcp
+  - authorization-server
+  - model-context-protocol
+  - openid-connect
+sources:
+  - https://github.com/authplane/authserver
+maintainers:
+  - name: diegob
+    url: https://github.com/authplane
+annotations:
+  artifacthub.io/changes: |
+    - kind: fixed
+      description: "ServiceMonitor scrapes the admin port (9000 had no /metrics handler)"
+    - kind: changed
+      description: "config.oauth.require_scope default flipped to true (matches DefaultConfig)"
+    - kind: added
+      description: "config.signing.vault_transit + postgres_key sub-blocks"
+    - kind: added
+      description: "config.resources / broker_providers / connect blocks (Inc 70 / 71)"
+    - kind: added
+      description: "AES master-key data-encryption secret rendering and env-var pass-through"
+    - kind: added
+      description: "secrets.connectStateSecret with AUTHPLANE_CONNECT_STATE_SECRET wiring"
+    - kind: added
+      description: "values.schema.json blocking known retired Inc 70 keys"
+    - kind: added
+      description: "networkPolicy.egress, serviceAccount.projectedToken (IRSA), xaa.require_resource, oidc.connector_id"
+    - kind: changed
+      description: "postgres DSN helper urlquery-escapes user/db; appVersion bumped to 0.1.0-rc1"
+  artifacthub.io/images: |
+    - name: authplane
+      image: authplane/authserver:0.1.0-rc1
+  artifacthub.io/license: AGPL-3.0-or-later
+dependencies:
+  - name: postgresql
+    version: "16.4.7"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled

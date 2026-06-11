@@ -1,0 +1,41 @@
+{{- if .Values.adminIngress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "authplane.fullname" . }}-admin
+  labels:
+    {{- include "authplane.labels" . | nindent 4 }}
+  {{- with .Values.adminIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.adminIngress.className }}
+  ingressClassName: {{ .Values.adminIngress.className }}
+  {{- end }}
+  {{- if .Values.adminIngress.tls }}
+  tls:
+    {{- range .Values.adminIngress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.adminIngress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "authplane.fullname" $ }}
+                port:
+                  name: admin
+          {{- end }}
+    {{- end }}
+{{- end }}

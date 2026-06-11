@@ -1,0 +1,17 @@
+# Minimal PostgreSQL for integration tests.
+# Usage: docker compose -f deploy/docker-compose.test-postgres.yml up -d --wait
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: authserver-test-postgres
+    environment:
+      POSTGRES_DB: authserver
+      POSTGRES_USER: authserver
+      POSTGRES_PASSWORD: authserver
+    ports:
+      - "${AUTHSERVER_TEST_PG_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authserver"]
+      interval: 2s
+      timeout: 3s
+      retries: 10

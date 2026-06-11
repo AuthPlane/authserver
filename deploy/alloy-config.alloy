@@ -1,0 +1,49 @@
+// Alloy configuration for authserver observability stack.
+// Single telemetry pipeline: receives OTLP gRPC from authserver,
+// exports traces → Tempo, logs → Loki, metrics → Mimir.
+
+// --- OTLP gRPC receiver (replaces standalone otel-collector) ---
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  output {
+    traces  = [otelcol.exporter.otlp.tempo.input]
+    logs    = [otelcol.exporter.otlphttp.loki.input]
+    metrics = [otelcol.exporter.otlphttp.mimir.input]
+  }
+}
+
+// --- Exporters ---
+
+// Traces → Tempo via OTLP gRPC
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// Logs → Loki via OTLP HTTP
+otelcol.exporter.otlphttp "loki" {
+  client {
+    endpoint = "http://loki:3100/otlp"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// Metrics → Mimir via OTLP HTTP
+otelcol.exporter.otlphttp "mimir" {
+  client {
+    endpoint = "http://mimir:9009/otlp"
+    tls {
+      insecure = true
+    }
+  }
+}

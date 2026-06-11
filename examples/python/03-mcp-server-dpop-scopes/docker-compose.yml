@@ -1,0 +1,67 @@
+# Tier-03 compose. Like tier 01, this file inlines the `authserver` service
+# definition rather than using `include: ../../_shared/docker-compose.authserver.yml`
+# because compose's `include:` directive keeps relative paths anchored to the
+# included file's directory.
+#
+# Tier-03 differs from tier 01 in two material ways:
+#
+#   1. `AUTHPLANE_DPOP_ENABLED=true` (via .env) so the AS issues sender-
+#      constrained (`cnf.jkt`-bound) access tokens when a client presents a
+#      DPoP proof on the token endpoint.
+#
+#   2. The AS listens on container-port 80 (rather than 9000) per
+#      `./config.yaml`. This works around an outbound-DPoP wart in
+#      python-sdk 0.1.0: `python-sdk/authplane/net/ssrf.py`
+#      `_execute_pinned_request` sets the request's `Host:` header to
+#      `parsed.hostname` (port stripped). The AS reconstructs the request
+#      URL for the DPoP `htu` check as `r.Host + r.URL.Path` — and with the
+#      port stripped from the Host header on a non-standard port (9000),
+#      the proof's `htu = http://authserver:9000/oauth/token` never matches
+#      the AS's reconstructed `http://authserver/oauth/token`. By moving the
+#      AS to port 80 inside the container we keep the host header
+#      port-omitted but make the URLs match. The example still exposes the
+#      AS on the canonical host ports 9000/9001 so the operator-facing curl
+#      commands from the README continue to work.
+services:
+  authserver:
+    image: authplane/authserver:latest
+    # ---------------------------------------------------------------------
+    # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
+    # ---------------------------------------------------------------------
+    env_file:
+      - .env
+    ports:
+      - "9000:80"
+      - "9001:9001"
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    restart: unless-stopped
+
+  mcp-server:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      - authserver
+    restart: unless-stopped
+
+  # Run-on-demand: the agent is a one-shot script invoked by verify.sh, not a
+  # long-lived service. `profiles: ["manual"]` keeps `make run` from starting
+  # it; `restart: "no"` keeps it from looping if it exits non-zero.
+  agent:
+    build: .
+    env_file:
+      - .env
+    command: ["python", "agent.py"]
+    depends_on:
+      - authserver
+      - mcp-server
+    restart: "no"
+    profiles: ["manual"]
+
+volumes:
+  authserver-data:

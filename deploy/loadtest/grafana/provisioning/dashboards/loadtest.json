@@ -1,0 +1,108 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "tags": ["loadtest"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "title": "authserver load test",
+  "uid": "authserver-loadtest",
+  "panels": [
+    { "type": "row", "id": 1, "title": "Overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "type": "stat", "id": 2, "title": "Token issuance / s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "expr": "sum(rate(authplane_client_credentials_issued_total[$__rate_interval]))", "legendFormat": "tokens/s" } ]
+    },
+    {
+      "type": "stat", "id": 3, "title": "Token error %",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 10 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "expr": "100 * sum(rate(authserver_http_requests_total{http_route=~\"(POST )?/oauth/token\",http_status_code!~\"2..\"}[$__rate_interval])) / clamp_min(sum(rate(authserver_http_requests_total{http_route=~\"(POST )?/oauth/token\"}[$__rate_interval])), 0.001)", "legendFormat": "error %" } ]
+    },
+    {
+      "type": "stat", "id": 4, "title": "Server CPU (cores)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 2 }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "expr": "sum(rate(process_cpu_seconds_total{job=\"authserver\"}[$__rate_interval]))", "legendFormat": "cores" } ]
+    },
+    {
+      "type": "stat", "id": 5, "title": "k6 VUs",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [ { "refId": "A", "expr": "max(k6_vus)", "legendFormat": "VUs" } ]
+    },
+
+    { "type": "row", "id": 10, "title": "Throughput & latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 } },
+    {
+      "type": "timeseries", "id": 11, "title": "Token endpoint — req/s by status",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [ { "refId": "A", "expr": "sum by (http_status_code) (rate(authserver_http_requests_total{http_route=~\"(POST )?/oauth/token\"}[$__rate_interval]))", "legendFormat": "{{http_status_code}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 12, "title": "Token endpoint latency (server-measured)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(authserver_http_request_duration_seconds_bucket{http_route=~\"(POST )?/oauth/token\"}[$__rate_interval])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(authserver_http_request_duration_seconds_bucket{http_route=~\"(POST )?/oauth/token\"}[$__rate_interval])) by (le))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(authserver_http_request_duration_seconds_bucket{http_route=~\"(POST )?/oauth/token\"}[$__rate_interval])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+
+    { "type": "row", "id": 20, "title": "CPU & memory (cAdvisor)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 } },
+    {
+      "type": "timeseries", "id": 21, "title": "CPU cores per container",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 2, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [ { "refId": "A", "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name!=\"\"}[$__rate_interval]))", "legendFormat": "{{name}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 22, "title": "Memory per container",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [ { "refId": "A", "expr": "sum by (name) (container_memory_usage_bytes{name!=\"\"})", "legendFormat": "{{name}}" } ]
+    },
+
+    { "type": "row", "id": 30, "title": "Server internals", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 } },
+    {
+      "type": "timeseries", "id": 31, "title": "DB operation p99 by op",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] } },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.99, sum(rate(authserver_db_operation_duration_seconds_bucket[$__rate_interval])) by (le, operation))", "legendFormat": "{{operation}}" } ]
+    },
+    {
+      "type": "timeseries", "id": 32, "title": "Goroutines & heap",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [ { "matcher": { "id": "byName", "options": "heap" }, "properties": [ { "id": "unit", "value": "bytes" }, { "id": "custom.axisPlacement", "value": "right" } ] } ] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "refId": "A", "expr": "go_goroutines{job=\"authserver\"}", "legendFormat": "goroutines" },
+        { "refId": "B", "expr": "go_memstats_heap_inuse_bytes{job=\"authserver\"}", "legendFormat": "heap" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+# Minimal authserver config shared by every example.
+# Individual examples may layer additional config via env vars or by mounting
+# their own override file; this file is the common baseline.
+
+server:
+  # `AUTHPLANE_SERVER_ISSUER` env overrides this value. The docker-compose
+  # examples set it to `http://authserver:9000` (the docker network name)
+  # so the SDK inside the MCP container can reach the AS and pass the
+  # `metadata.issuer == config.issuer` check.
+  issuer: http://localhost:9000
+  address: ":9000"
+
+storage:
+  driver: sqlite
+  sqlite:
+    path: /data/authserver.db
+    wal: true
+
+signing:
+  algorithm: ES256
+  key_path: /data/keys
+
+dcr:
+  mode: open
+
+admin:
+  enabled: true
+  address: ":9001"
+  api_key: ${AUTHPLANE_ADMIN_API_KEY}
+
+# Grant enables. Every grant is `enabled: false` by default; turn on only
+# what your clients will actually use. The examples set these via the
+# matching `AUTHPLANE_<NAME>_ENABLED` env vars in `.env` (the env value
+# overrides whatever's in this file).
+# Full reference: docs/reference/configuration.md § client_credentials,
+# § dpop, § token_exchange.
+client_credentials:
+  enabled: false       # AUTHPLANE_CLIENT_CREDENTIALS_ENABLED — machine-to-machine
+dpop:
+  enabled: false       # AUTHPLANE_DPOP_ENABLED — RFC 9449 proof-of-possession
+token_exchange:
+  enabled: false       # AUTHPLANE_TOKEN_EXCHANGE_ENABLED — RFC 8693 token exchange

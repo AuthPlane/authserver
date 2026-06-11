@@ -1,0 +1,96 @@
+# Load-test stack — CONFIG 2 & 3: PostgreSQL + 1..N services behind a load balancer.
+#
+# The `authserver` service has no container_name and no published port, so it
+# scales: run.sh brings up ONE replica first (so migrations + the signing-key
+# bootstrap happen once), then `--scale authserver=N`. Caddy fronts the replicas
+# with round-robin over Docker-DNS A records, and k6 drives the Caddy entrypoint.
+#
+# Signing keys are shared across replicas via the postgres_key HA key store
+# (internal/adapters/postgres/hakeystore.go) so every instance issues
+# consistently-signed tokens. postgres_key requires data_encryption, so a fixed
+# throwaway aes_master key is set below (load-test only — never use in prod).
+#
+# Driven by tools/loadtest/run.sh:
+#   make loadtest-postgres            # N=1
+#   make loadtest-postgres-scale N=3  # N replicas
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: authserver
+      POSTGRES_USER: authserver
+      POSTGRES_PASSWORD: authserver
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authserver"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      # PG18's image stores data in a version subdir and rejects a mount at the
+      # legacy /var/lib/postgresql/data; mount the parent instead.
+      - pgdata:/var/lib/postgresql
+
+  authserver:
+    build:
+      context: ..
+      dockerfile: build/Dockerfile
+    environment:
+      # Issuer is the Caddy entrypoint (localhost ⇒ no session-secret
+      # requirement). Functionally irrelevant to client_credentials throughput.
+      AUTHPLANE_SERVER_ISSUER: http://localhost:8080
+      AUTHPLANE_ADMIN_API_KEY: ${AUTHPLANE_ADMIN_API_KEY:-loadtest-admin-key}
+      AUTHPLANE_STORAGE_DRIVER: postgres
+      AUTHPLANE_STORAGE_POSTGRES_DSN: postgres://authserver:authserver@postgres:5432/authserver?sslmode=disable
+      # Shared signing keys across replicas (HA key store) — first replica
+      # generates, the rest read via DB + LISTEN/NOTIFY.
+      AUTHPLANE_SIGNING_KEY_STORE: postgres_key
+      # Required by postgres_key. Fixed throwaway key — LOAD TEST ONLY.
+      # Quoted so YAML keeps it a 64-char hex string (an unquoted all-digit value
+      # would be coerced to a number).
+      AUTHPLANE_DATA_ENCRYPTION_DRIVER: aes_master
+      AUTHPLANE_DATA_ENCRYPTION_KEY_ENV: AUTHPLANE_DATA_ENCRYPTION_KEY
+      AUTHPLANE_DATA_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      AUTHPLANE_DPOP_ENABLED: "false"
+      AUTHPLANE_CLIENT_CREDENTIALS_ENABLED: "true"
+      # Per-IP rate limiter OFF — defaults ON at 100 rps/IP, which throttles all
+      # load from k6's single source IP (429s) and caps the measurement.
+      AUTHPLANE_RATE_LIMIT_ENABLED: "false"
+      # Client-secret hashing: HMAC-SHA256 (fast) when a pepper is set, vs bcrypt
+      # (~hundreds of ms/req). Defaulted ON so the test measures the real ceiling,
+      # not the bcrypt cost. A/B against bcrypt with LOADTEST_PEPPER="".
+      AUTHPLANE_CLIENT_SECRET_PEPPER: ${LOADTEST_PEPPER-loadtest-client-secret-pepper-not-for-prod}
+      AUTHPLANE_LOG_FORMAT: json
+      AUTHPLANE_LOG_LEVEL: ${AUTHPLANE_LOG_LEVEL:-warn}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Load balancer — only started for N>1 (run.sh sets COMPOSE_PROFILES=lb when
+  # scaling). For a single instance k6 hits authserver:9000 directly, so a LB
+  # would only add an artifact.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["lb"]
+    depends_on: [authserver]
+    ports:
+      # Host publish is for manual debugging only — k6 reaches caddy:80 over the
+      # compose network. Override LOADTEST_HTTP_PORT if 8080 is busy on the host.
+      - "${LOADTEST_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./loadtest/Caddyfile:/etc/caddy/Caddyfile:ro
+
+  provisioner:
+    image: curlimages/curl:8.19.0
+    profiles: ["tools"]
+    depends_on: [authserver]
+
+  k6:
+    image: grafana/k6:latest
+    profiles: ["tools"]
+    depends_on: [authserver]
+    volumes:
+      - ../tools/loadtest/scenarios:/scripts:ro
+      - ../tools/loadtest/results:/out
+
+volumes:
+  pgdata:

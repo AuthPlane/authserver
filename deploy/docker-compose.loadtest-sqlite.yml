@@ -1,0 +1,66 @@
+# Load-test stack — CONFIG 1: single service + SQLite.
+#
+# One authserver instance backed by SQLite (the default single-binary
+# deployment). SQLite is pinned to a single DB connection
+# (internal/adapters/sqlite/db.go), so every token-issuance write serialises —
+# this stack is what exposes that single-writer ceiling.
+#
+# Driven by tools/loadtest/run.sh (do not `up` this directly for a real run):
+#   make loadtest-sqlite
+#
+# The `provisioner` and `k6` services are profile-gated so `up` starts only the
+# server; run.sh invokes them with `docker compose run` on the same network.
+services:
+  authserver:
+    build:
+      context: ..
+      dockerfile: build/Dockerfile
+    environment:
+      # localhost issuer ⇒ session secret / secure cookies not required (see
+      # internal/config/validate.go), keeping this stack lean.
+      AUTHPLANE_SERVER_ISSUER: http://localhost:9000
+      AUTHPLANE_ADMIN_API_KEY: ${AUTHPLANE_ADMIN_API_KEY:-loadtest-admin-key}
+      AUTHPLANE_STORAGE_DRIVER: sqlite
+      AUTHPLANE_STORAGE_SQLITE_PATH: /data/authserver.db
+      AUTHPLANE_SIGNING_KEY_PATH: /data/keys
+      # Clean throughput baseline: DPoP off (no nonce round-trips), the
+      # client_credentials grant on (it defaults off in the binary), and the
+      # per-IP rate limiter OFF. The limiter defaults ON at 100 rps/IP, and
+      # since all k6 load comes from one container IP it would throttle the
+      # whole test (429s) and cap the measurement at the limit, not real capacity.
+      AUTHPLANE_DPOP_ENABLED: "false"
+      AUTHPLANE_CLIENT_CREDENTIALS_ENABLED: "true"
+      AUTHPLANE_RATE_LIMIT_ENABLED: "false"
+      # Client-secret hashing: HMAC-SHA256 (fast) when a pepper is set, vs bcrypt
+      # (~hundreds of ms/req). Defaulted ON here so the test measures the real
+      # ceiling, not the bcrypt cost. A/B against bcrypt with
+      # LOADTEST_PEPPER="" (e.g. `LOADTEST_PEPPER="" make loadtest-sqlite`).
+      AUTHPLANE_CLIENT_SECRET_PEPPER: ${LOADTEST_PEPPER-loadtest-client-secret-pepper-not-for-prod}
+      AUTHPLANE_LOG_FORMAT: json
+      AUTHPLANE_LOG_LEVEL: ${AUTHPLANE_LOG_LEVEL:-warn}
+    ports:
+      # Published for manual debugging only; run.sh reaches the server by service
+      # name over the compose network, not via this. Override LOADTEST_PUBLIC_PORT
+      # if 9000 is busy on the host.
+      - "${LOADTEST_PUBLIC_PORT:-9000}:9000"
+    volumes:
+      # Disk-backed (not tmpfs) so SQLite's per-commit fsync cost is real — the
+      # single-writer latency is the whole point of this config. run.sh resets it
+      # with `down -v` each run.
+      - sqlite_data:/data
+
+  provisioner:
+    image: curlimages/curl:8.19.0
+    profiles: ["tools"]
+    depends_on: [authserver]
+
+  k6:
+    image: grafana/k6:latest
+    profiles: ["tools"]
+    depends_on: [authserver]
+    volumes:
+      - ../tools/loadtest/scenarios:/scripts:ro
+      - ../tools/loadtest/results:/out
+
+volumes:
+  sqlite_data:

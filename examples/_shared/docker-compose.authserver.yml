@@ -1,0 +1,32 @@
+services:
+  authserver:
+    image: authplane/authserver:latest
+    # ---------------------------------------------------------------------
+    # LOCAL BUILD ESCAPE HATCH
+    # ---------------------------------------------------------------------
+    # To build the image from this checkout instead of pulling the published
+    # tag, comment out the `image:` line above and uncomment the block below.
+    # The build context points at the repo root so the Dockerfile can COPY
+    # the full source tree.
+    #
+    # build:
+    #   context: ../../..
+    #   dockerfile: build/Dockerfile
+    # ---------------------------------------------------------------------
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./config.example.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    # No container-level healthcheck: the published image is distroless (no
+    # shell, no wget, no curl). Readiness is polled externally by
+    # tools/docssmoke/ and by per-example Makefile `verify` targets, both of
+    # which hit /.well-known/oauth-authorization-server from the host.
+    restart: unless-stopped
+
+volumes:
+  authserver-data:

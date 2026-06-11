@@ -1,0 +1,37 @@
+# NOTE: this example inlines the `authserver` service definition rather than
+# using `include: ../../_shared/docker-compose.authserver.yml`. Compose's
+# `include:` directive keeps `env_file` and bind-mount paths relative to the
+# included file's directory, which means the shared compose looks for a `.env`
+# under `examples/_shared/` and the config file at `_shared/config.example.yaml`.
+# The example's own `.env` lives here, so duplicating the service definition
+# is the least-magical fix. Keep this block in sync with
+# `../../_shared/docker-compose.authserver.yml` when that file changes.
+#
+# The tier-02 agent depends on the tier-01 MCP server, which the tier-01
+# docker-compose.yml brings up alongside its own authserver. The pragmatic
+# topology is:
+#   1) `cd ../01-mcp-server-basic && make run && make verify`
+#   2) reuse the running authserver + MCP server from this directory by
+#      pointing the agent at the same `:9000` / `:8080` endpoints on the host
+#
+# This file is provided for parity with tier-01 and for operators who want to
+# stand up the AS in isolation (e.g. to register additional clients).
+services:
+  authserver:
+    image: authplane/authserver:latest
+    # ---------------------------------------------------------------------
+    # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
+    # ---------------------------------------------------------------------
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ../../_shared/config.example.yaml:/config.yaml:ro
+      - authserver-data:/data
+    command: ["serve", "--config", "/config.yaml"]
+    restart: unless-stopped
+
+volumes:
+  authserver-data:
