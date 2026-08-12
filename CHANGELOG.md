@@ -4,6 +4,30 @@ All notable, user-facing changes to authserver are documented here —
 operator-impact and wire-shape changes only. The format follows
 [Keep a Changelog](https://keepachangelog.com/); dates are ISO 8601.
 
+## [0.1.1] — 2026-08-11
+
+Security maintenance release — Go toolchain and dependency updates only, no
+functional or wire-shape changes.
+
+### Security
+
+- Build with Go 1.26.5, picking up the crypto/tls Encrypted Client Hello
+  privacy fix (GO-2026-5856), net/textproto error-escaping fix
+  (GO-2026-5039), and crypto/x509 hostname-parsing fix (GO-2026-5037).
+- `github.com/jackc/pgx/v5` v5.9.1 → v5.10.0 — fixes SQL injection via
+  placeholder confusion with dollar-quoted string literals (GO-2026-5004).
+- `google.golang.org/grpc` v1.80.0 → v1.83.0 — fixes HTTP/2 transport
+  server and xDS RBAC vulnerabilities (GO-2026-6061).
+- `golang.org/x/text` v0.35.0 → v0.40.0 — fixes infinite loop on invalid
+  input (GO-2026-5970).
+- OpenTelemetry modules v1.43.0 → v1.45.0 — restores the baggage-parsing
+  raw-header length cap (GO-2026-5158).
+
+### Changed
+
+- OpenTelemetry resource attributes now use semantic-conventions schema
+  1.43.0 (previously 1.40.0). Telemetry attribute names are unchanged.
+
 ## [0.1.0] — 2026-06-10
 
 Initial public release of the Authplane Authorization Server: a self-hosted
