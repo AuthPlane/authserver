@@ -27,6 +27,8 @@ functional or wire-shape changes.
 
 - OpenTelemetry resource attributes now use semantic-conventions schema
   1.43.0 (previously 1.40.0). Telemetry attribute names are unchanged.
+- Helm chart 0.2.1: default image tag (`appVersion`) now 0.1.1 — a default
+  install previously deployed the stale `0.1.0-rc1` image.
 
 ## [0.1.0] — 2026-06-10
 

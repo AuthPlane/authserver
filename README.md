@@ -134,7 +134,7 @@ Authplane is in active development. `v0.1.x` is production-shaped — the OAuth 
 - **Upstream-provider connections** (Broker flow) require manual configuration of at-rest encryption (`aes_master` or HashiCorp Vault Transit) before they activate — covered in [`docs/guides/upstream-providers/connecting-providers.md`](docs/guides/upstream-providers/connecting-providers.md).
 - **Multi-tenant isolation** today means running separate instances per tenant. A first-class tenant abstraction is post-`v1.0`.
 - **Public dynamic-registration signup UI** is not in `v0.1`; Dynamic Client Registration works over HTTP today, a hosted signup page is a follow-up.
-- **Helm chart (`charts/authplane`)** is at `v0.1.0`; tested for single-instance and basic HA, expect tuning for large fleets.
+- **Helm chart (`charts/authplane`)** is at `v0.2.1`; tested for single-instance and basic HA, expect tuning for large fleets.
 
 If something here blocks your deployment, open an issue — the priority list is informed by what you're trying to ship.
 
