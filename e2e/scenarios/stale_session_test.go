@@ -44,7 +44,7 @@ func TestStaleSession_ConnectRejected(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",

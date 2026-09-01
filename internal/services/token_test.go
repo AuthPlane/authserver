@@ -14,6 +14,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/sqlite"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/audit"
@@ -35,10 +37,49 @@ type tokenTestSetup struct {
 	h        *testdata.TestHelper
 }
 
+// tokenTestOverrides lets a test substitute the stores or the observability
+// provider the token service is built with. Nil fields keep the defaults.
+// A test that wraps one store (e.g. to inject a failure) passes the same
+// *sqlite.Stores it built the wrapper from, so the wrapper and the rest of
+// the service share one database.
+type tokenTestOverrides struct {
+	stores     *sqlite.Stores          // nil → testdata.SetupTestStores(t)
+	tokens     output.TokenStore       // nil → stores.Token
+	revocation output.RevocationStore  // nil → stores.Revocation
+	obs        *observability.Provider // nil → testObs()
+}
+
 func newTokenTestSetup(t *testing.T) *tokenTestSetup {
 	t.Helper()
-	stores := testdata.SetupTestStores(t)
-	obs := testObs()
+	return newTokenTestSetupWithTokenConfig(t, static.NewTokenConfigProvider(output.TokenConfig{
+		AccessTokenExpiry:  15 * time.Minute,
+		RefreshTokenExpiry: 24 * time.Hour,
+	}))
+}
+
+func newTokenTestSetupWithTokenConfig(t *testing.T, tokenConfig output.TokenConfigProvider) *tokenTestSetup {
+	t.Helper()
+	return newTokenTestSetupWithOverrides(t, tokenConfig, tokenTestOverrides{})
+}
+
+func newTokenTestSetupWithOverrides(t *testing.T, tokenConfig output.TokenConfigProvider, ov tokenTestOverrides) *tokenTestSetup {
+	t.Helper()
+	stores := ov.stores
+	if stores == nil {
+		stores = testdata.SetupTestStores(t)
+	}
+	obs := ov.obs
+	if obs == nil {
+		obs = testObs()
+	}
+	var tokens output.TokenStore = stores.Token
+	if ov.tokens != nil {
+		tokens = ov.tokens
+	}
+	var revocation output.RevocationStore = stores.Revocation
+	if ov.revocation != nil {
+		revocation = ov.revocation
+	}
 
 	// Create the test user referenced by createSessionWithCode (UserID: "user-42").
 	now := time.Now().UTC()
@@ -61,20 +102,15 @@ func newTokenTestSetup(t *testing.T) *tokenTestSetup {
 		t.Fatalf("keyfile: %v", err)
 	}
 
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
-	cfg := services.TokenConfig{
-		AccessTokenExpiry:  15 * time.Minute,
-		RefreshTokenExpiry: 24 * time.Hour,
-	}
-
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, "https://auth.example.com", obs)
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest("https://auth.example.com"), obs)
 
 	tokenSvc := services.NewTokenService(
-		stores.Session, stores.Token, stores.Client, stores.User,
-		jwksSvc, mintIssuer, "https://auth.example.com", cfg, obs, auditSvc,
-		stores.Revocation, services.NewStaticResourceLister(nil),
+		stores.Session, tokens, stores.Client, stores.User,
+		jwksSvc, mintIssuer, tokenConfig, obs, auditSvc,
+		revocation, services.NewStaticResourceLister(nil),
 	)
 
 	return &tokenTestSetup{
@@ -146,6 +182,94 @@ func (s *tokenTestSetup) createSessionWithCode(t *testing.T, isPublic bool) (*cl
 	}
 
 	return c, sess, code, verifier
+}
+
+// failingTokenConfigProvider is an output.TokenConfigProvider whose Config
+// always errors, used to assert TokenService fails closed on a token-config
+// resolution error rather than minting with a zero (never-expiring) TTL.
+type failingTokenConfigProvider struct{ err error }
+
+func (p failingTokenConfigProvider) Config(context.Context) (output.TokenConfig, error) {
+	return output.TokenConfig{}, p.err
+}
+
+func TestToken_ExchangeCode_TokenConfigError_FailsClosed(t *testing.T) {
+	wantErr := errors.New("token config unavailable")
+	setup := newTokenTestSetupWithTokenConfig(t, failingTokenConfigProvider{err: wantErr})
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	resp, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err == nil {
+		t.Fatal("expected error when token config resolution fails, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected error wrapping %v, got %v", wantErr, err)
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response on failure, got %+v", resp)
+	}
+}
+
+// toggleTokenConfigProvider returns cfg until *failNow is set, then errors.
+// Lets a test mint tokens with a working config, then flip resolution to fail.
+type toggleTokenConfigProvider struct {
+	cfg     output.TokenConfig
+	failNow *bool
+	err     error
+}
+
+func (p *toggleTokenConfigProvider) Config(context.Context) (output.TokenConfig, error) {
+	if *p.failNow {
+		return output.TokenConfig{}, p.err
+	}
+	return p.cfg, nil
+}
+
+// TestToken_Refresh_TokenConfigError_DoesNotConsumeRefresh asserts the
+// resolve-before-consume invariant on the refresh path: a token-config
+// resolution error must fail the request WITHOUT burning the old refresh token,
+// so the same token still rotates once config recovers. (The default build is
+// byte-identical since the static provider never errors; this guards the
+// substitute-provider path.)
+func TestToken_Refresh_TokenConfigError_DoesNotConsumeRefresh(t *testing.T) {
+	failNow := false
+	wantErr := errors.New("token config unavailable")
+	prov := &toggleTokenConfigProvider{
+		cfg:     output.TokenConfig{AccessTokenExpiry: 15 * time.Minute, RefreshTokenExpiry: 24 * time.Hour},
+		failNow: &failNow,
+		err:     wantErr,
+	}
+	setup := newTokenTestSetupWithTokenConfig(t, prov)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+
+	// Config resolution fails: refresh must error and must NOT consume the token.
+	failNow = true
+	if _, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	}); err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected error wrapping %v on config failure, got %v", wantErr, err)
+	}
+
+	// Recover config: the SAME refresh token must still rotate, proving the
+	// failed attempt did not burn it (had it been consumed, this would surface
+	// as reuse detection / ErrFamilyRevoked).
+	failNow = false
+	rotated, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if err != nil {
+		t.Fatalf("refresh token was consumed by the failed attempt: %v", err)
+	}
+	if rotated.AccessToken == "" || rotated.RefreshToken == "" {
+		t.Fatal("expected new access + refresh tokens after config recovery")
+	}
 }
 
 func TestToken_ExchangeCode_FullFlow(t *testing.T) {
@@ -234,6 +358,32 @@ func TestToken_ExchangeCode_FullFlow(t *testing.T) {
 	}
 }
 
+// TestToken_ExchangeCode_LinksFamilyToSession proves the code→family link is
+// written on the happy path. Everything the code-reuse revocation path does
+// on a replay depends on it.
+func TestToken_ExchangeCode_LinksFamilyToSession(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	ctx := context.Background()
+	c, sess, code, verifier := setup.createSessionWithCode(t, true)
+
+	if _, err := setup.tokenSvc.ExchangeCode(ctx, input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	}); err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+
+	fam, err := setup.h.Stores.Token.GetFamilyByAuthSessionID(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("no family linked to session %s: %v", sess.ID, err)
+	}
+	if fam.AuthSessionID != sess.ID {
+		t.Errorf("auth_session_id: got %q, want %q", fam.AuthSessionID, sess.ID)
+	}
+}
+
 func TestToken_ExchangeCode_JWTTypHeader(t *testing.T) {
 	setup := newTokenTestSetup(t)
 	c, _, code, verifier := setup.createSessionWithCode(t, true)
@@ -271,6 +421,40 @@ func TestToken_ExchangeCode_PKCEMismatch(t *testing.T) {
 	})
 	if !errors.Is(err, domain.ErrInvalidPKCE) {
 		t.Errorf("expected ErrInvalidPKCE, got: %v", err)
+	}
+}
+
+// TestToken_ExchangeCode_FailedPKCEBurnsCode locks down the deliberate
+// consume-before-validate ordering documented at step 6.5 in exchangeCode
+// (internal/services/token.go): the code is spent at step 1, so a refused
+// PKCE check must NOT leave it redeemable. If this test ever fails, an
+// attacker can brute-force the verifier against a live code.
+func TestToken_ExchangeCode_FailedPKCEBurnsCode(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	// Wrong verifier: refused at step 6, but the code already burned at step 1.
+	_, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: crypto.GenerateVerifier(),
+	})
+	if !errors.Is(err, domain.ErrInvalidPKCE) {
+		t.Fatalf("first exchange: got %v, want ErrInvalidPKCE", err)
+	}
+
+	// Retry with the CORRECT verifier: must still be refused as consumed.
+	_, err = setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if !errors.Is(err, domain.ErrCodeConsumed) {
+		t.Fatalf("retry after failed PKCE: got %v, want ErrCodeConsumed — "+
+			"consume-before-validate is deliberate; a failed PKCE check must still "+
+			"spend the code or the verifier becomes brute-forceable", err)
 	}
 }
 
@@ -1322,19 +1506,19 @@ func newTokenTestSetupWithResources(t *testing.T, resources []services.ResourceI
 		t.Fatalf("keyfile: %v", err)
 	}
 
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
-	cfg := services.TokenConfig{
+	cfg := static.NewTokenConfigProvider(output.TokenConfig{
 		AccessTokenExpiry:  15 * time.Minute,
 		RefreshTokenExpiry: 24 * time.Hour,
-	}
+	})
 
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, "https://auth.example.com", obs)
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest("https://auth.example.com"), obs)
 
 	tokenSvc := services.NewTokenService(
 		stores.Session, stores.Token, stores.Client, stores.User,
-		jwksSvc, mintIssuer, "https://auth.example.com", cfg, obs, auditSvc,
+		jwksSvc, mintIssuer, cfg, obs, auditSvc,
 		stores.Revocation, services.NewStaticResourceLister(resources),
 	)
 
@@ -1579,3 +1763,463 @@ func TestRefresh_UnauthenticatedReuse_DoesNotRevokeFamily(t *testing.T) {
 	}
 }
 
+func TestToken_ExchangeCode_DisabledUser_Rejected(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	ctx := context.Background()
+	u, err := setup.h.Stores.User.GetByID(ctx, "user-42")
+	if err != nil {
+		t.Fatalf("get test user: %v", err)
+	}
+	if disableErr := u.Disable(); disableErr != nil {
+		t.Fatalf("disable: %v", disableErr)
+	}
+	if updateErr := setup.h.Stores.User.Update(ctx, u); updateErr != nil {
+		t.Fatalf("update user: %v", updateErr)
+	}
+
+	resp, err := setup.tokenSvc.ExchangeCode(ctx, input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant — a disabled subject must not be issued a token", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}
+
+func TestToken_ExchangeCode_ActiveUser_StillSucceeds(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	resp, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if resp == nil || resp.AccessToken == "" {
+		t.Fatal("expected an access token for an active user")
+	}
+}
+
+// failingUserStore forces GetByID to fail with err. Every other method
+// delegates to the embedded store, so a test can break exactly one call
+// without stubbing the whole interface.
+type failingUserStore struct {
+	output.UserStore
+	err error
+}
+
+func (s failingUserStore) GetByID(context.Context, string) (*user.User, error) {
+	return nil, s.err
+}
+
+// toggleUserStore fails GetByID while *failNow is true and delegates to the
+// embedded store otherwise. Mirrors toggleTokenConfigProvider so one service
+// can fail a call and succeed on the next, which is what proving "the failed
+// attempt did not burn the token" requires.
+type toggleUserStore struct {
+	output.UserStore
+	failNow *bool
+	err     error
+}
+
+func (s toggleUserStore) GetByID(ctx context.Context, id string) (*user.User, error) {
+	if *s.failNow {
+		return nil, s.err
+	}
+	return s.UserStore.GetByID(ctx, id)
+}
+
+// contractBreakingUserStore returns (nil, nil) from GetByID — no user and no
+// error — which output.UserStore does not permit. It exists so the callers'
+// `u == nil` guards are reachable from the suite: without it those guards are
+// dead code that could be deleted with every test still green, and the next
+// simplification that collapses them turns an alternative store's misbehaviour
+// into a nil dereference on the token endpoint.
+type contractBreakingUserStore struct {
+	output.UserStore
+}
+
+func (s contractBreakingUserStore) GetByID(context.Context, string) (*user.User, error) {
+	return nil, nil
+}
+
+// tokenSvcWithUserStore rebuilds this setup's TokenService with us swapped in
+// for the user store. One construction site, so a test that substitutes a
+// store still exercises the same wiring as every other test in the file — a
+// hand-copied constructor drifts from the real one and can pass while the
+// production path breaks.
+func (s *tokenTestSetup) tokenSvcWithUserStore(us output.UserStore) *services.TokenService {
+	return services.NewTokenService(
+		s.h.Stores.Session, s.h.Stores.Token, s.h.Stores.Client, us,
+		s.jwksSvc,
+		services.NewMintIssuer(s.jwksSvc, s.h.Stores.Issuance,
+			staticIssuerForTest("https://auth.example.com"), testObs()),
+		static.NewTokenConfigProvider(output.TokenConfig{
+			AccessTokenExpiry:  15 * time.Minute,
+			RefreshTokenExpiry: 24 * time.Hour,
+		}),
+		testObs(), s.auditSvc, s.h.Stores.Revocation,
+		services.NewStaticResourceLister(nil),
+	)
+}
+
+// disableTestUser flips the shared "user-42" fixture to disabled.
+func (s *tokenTestSetup) disableTestUser(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := s.h.Stores.User.GetByID(ctx, "user-42")
+	if err != nil {
+		t.Fatalf("get test user: %v", err)
+	}
+	if disableErr := u.Disable(); disableErr != nil {
+		t.Fatalf("disable: %v", disableErr)
+	}
+	if updateErr := s.h.Stores.User.Update(ctx, u); updateErr != nil {
+		t.Fatalf("update user: %v", updateErr)
+	}
+}
+
+func TestToken_ExchangeCode_NilUserStore_SkipsSubjectCheck(t *testing.T) {
+	// The s.users != nil guard is not decoration: tests and alternative
+	// wirings construct a TokenService without a user store, and the exchange
+	// must keep working there rather than panicking.
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+	setup.disableTestUser(t)
+
+	resp, err := setup.tokenSvcWithUserStore(nil).ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("ExchangeCode with nil UserStore: %v", err)
+	}
+	if resp == nil || resp.AccessToken == "" {
+		t.Fatal("expected a token: with no user store there is no subject check to fail")
+	}
+}
+
+func TestToken_ExchangeCode_TransientUserStoreError_IsServerErrorNotInvalidGrant(t *testing.T) {
+	// A store outage is not a bad grant. Reporting it as invalid_grant blames
+	// the caller for a server defect and tells a client its code was rejected
+	// when it never got that far, so a 5xx is what it must be.
+	//
+	// The re-authorization happens either way — the code was consumed at step 1
+	// and stays consumed, which the CHANGELOG says plainly. What the status buys
+	// is retry semantics and an honest cause, not a saved login. Note this is
+	// the opposite conclusion from refreshToken's arms, which all stay
+	// invalid_grant precisely because that token is already spent and a 5xx
+	// would invite the retry that revokes the family.
+	wantErr := errors.New("user store unavailable")
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	svc := setup.tokenSvcWithUserStore(failingUserStore{
+		UserStore: setup.h.Stores.User,
+		err:       wantErr,
+	})
+
+	resp, err := svc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the user store is unreachable")
+	}
+	if errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, must NOT be ErrInvalidGrant: a store outage is not a bad grant", err)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want it to wrap %v so the handler maps it to a 5xx", err, wantErr)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}
+
+func TestToken_ExchangeCode_UserNotFound_IsInvalidGrant(t *testing.T) {
+	// The counterpart to the test above: a definitive "no such user" IS a bad
+	// grant and must stay a 400, not get swept into the server-fault branch.
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	svc := setup.tokenSvcWithUserStore(failingUserStore{
+		UserStore: setup.h.Stores.User,
+		err:       domain.ErrUserNotFound,
+	})
+
+	resp, err := svc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant for a missing subject", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}
+
+// A store answering with neither user nor error decided nothing about the
+// account, so it is a server fault rather than a denial — the same answer the
+// caller gets when the store is unreachable, and the same one cachedUserStore
+// produces by converting the nil to ErrStoreReturnedNoUser. The wrapped and
+// unwrapped paths have to agree; telling a client its grant was invalid would
+// blame the caller for a defect in the deployment, with no operator signal.
+//
+// Reaching the assertion at all is the other half: without the u == nil guard
+// the call panics inside IsActive and never returns.
+func TestToken_ExchangeCode_StoreReturnsNilUser_IsServerFaultNotInvalidGrant(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	svc := setup.tokenSvcWithUserStore(contractBreakingUserStore{UserStore: setup.h.Stores.User})
+
+	resp, err := svc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, must NOT be ErrInvalidGrant: a broken store is not a bad grant", err)
+	}
+	if !errors.Is(err, domain.ErrStoreReturnedNoUser) {
+		t.Fatalf("err = %v, want it to wrap ErrStoreReturnedNoUser so the handler maps it to a 5xx", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}
+
+// A replayed refresh token is a theft signal regardless of the subject's status.
+//
+// These two pass trivially against the current ordering: the consume runs
+// before the subject check, so reuse detection fires before anything can
+// return early. They are kept as a guard on that ordering, not as coverage of
+// it — move the subject check above the consume without adding a pre-check and
+// both fail, because the replay would stop at invalid_grant with the family
+// still active and no audit row, metric or warning emitted. That reordering is
+// a tracked decision, and these are what stop it from silently taking reuse
+// detection with it.
+func TestRefresh_ReuseDetection_FiresWhenSubjectIsDisabled(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+
+	// Legitimate refresh — rotates the initial token, family stays active.
+	if _, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+	}); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+
+	setup.disableTestUser(t)
+
+	// Replay the rotated-out token. The subject is disabled, so the subject
+	// check would deny with invalid_grant — but the token is spent, and that
+	// takes precedence.
+	_, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+	})
+	if errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatal("replay of a spent token reported as invalid_grant: reuse detection did not fire")
+	}
+	if !errors.Is(err, domain.ErrFamilyRevoked) {
+		t.Fatalf("err = %v, want ErrFamilyRevoked", err)
+	}
+
+	rt, err := setup.h.Stores.Token.GetRefreshTokenByHash(context.Background(),
+		crypto.HashSHA256(initial.RefreshToken))
+	if err != nil {
+		t.Fatalf("read replayed token: %v", err)
+	}
+	family, err := setup.h.Stores.Token.GetFamily(context.Background(), rt.FamilyID)
+	if err != nil {
+		t.Fatalf("get family: %v", err)
+	}
+	if family.IsActive() {
+		t.Errorf("family status = %q, want revoked — the theft was detected but not acted on", family.Status)
+	}
+}
+
+// Same property on the other early-return path: a store outage must not blind
+// reuse detection either. The theft is a fact about the token, and the token
+// row was already read before the user store was ever consulted.
+func TestRefresh_ReuseDetection_FiresWhileUserStoreIsDown(t *testing.T) {
+	failNow := false
+	wantErr := errors.New("user store unavailable")
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+
+	svc := setup.tokenSvcWithUserStore(toggleUserStore{
+		UserStore: setup.h.Stores.User,
+		failNow:   &failNow,
+		err:       wantErr,
+	})
+
+	if _, err := svc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	}); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+
+	failNow = true
+	_, err := svc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if errors.Is(err, wantErr) {
+		t.Fatal("replay of a spent token surfaced as the store error: reuse detection did not fire")
+	}
+	if !errors.Is(err, domain.ErrFamilyRevoked) {
+		t.Fatalf("err = %v, want ErrFamilyRevoked", err)
+	}
+}
+
+// A store answering with neither user nor error breaks its contract. It is
+// denied like any other unresolvable subject — the caller must not be able to
+// tell the reasons apart — and reaching this assertion at all is the other half
+// of the test: the collapsed condition this replaced evaluated u.IsActive()
+// whenever userErr was nil, so a nil user panicked the token endpoint.
+func TestToken_RefreshToken_StoreReturnsNilUser_DeniesWithoutPanicking(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+
+	svc := setup.tokenSvcWithUserStore(contractBreakingUserStore{UserStore: setup.h.Stores.User})
+
+	resp, err := svc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}
+
+// The transient arm. A store outage is not a bad grant, but the refresh token
+// was already consumed at step 3, so answering 5xx would invite a retry that
+// presents a spent token and revokes the family. It therefore denies with the
+// same invalid_grant as every other arm, and only the span says what happened.
+// Splitting that apart means moving the check above the consume, which is a
+// tracked decision rather than an omission here.
+//
+// So this pins the outcome — denied, not panicked, not a 5xx — and not the arm:
+// with every arm returning the same error, only the span tells them apart, and
+// spans are not observable from here (testObs is a noop provider). Deleting the
+// arm would fall through to the u == nil arm and this would still pass.
+func TestToken_RefreshToken_TransientStoreError_IsInvalidGrant(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+
+	svc := setup.tokenSvcWithUserStore(failingUserStore{
+		UserStore: setup.h.Stores.User,
+		err:       errors.New("user store unavailable"),
+	})
+
+	resp, err := svc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}
+
+// storage.WithUserCache turns a store's (nil, nil) into ErrStoreReturnedNoUser,
+// so production never reaches the u == nil arm — the error does. Both grants
+// grew a matching arm so the span names the defect instead of reporting a
+// lookup failure. The span is not observable from here; what these pin is that
+// routing it to its own arm did not change what the caller sees.
+func TestToken_SubjectCheck_StoreReturnedNoUserError_AnswersLikeTheNilUser(t *testing.T) {
+	t.Run("exchange is a server fault", func(t *testing.T) {
+		setup := newTokenTestSetup(t)
+		c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+		svc := setup.tokenSvcWithUserStore(failingUserStore{
+			UserStore: setup.h.Stores.User,
+			err:       domain.ErrStoreReturnedNoUser,
+		})
+
+		_, err := svc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+			Code:         code,
+			RedirectURI:  "https://app.example.com/callback",
+			ClientID:     c.ID,
+			CodeVerifier: verifier,
+		})
+		if errors.Is(err, domain.ErrInvalidGrant) {
+			t.Fatalf("err = %v, must not be ErrInvalidGrant: a broken store decided nothing "+
+				"about the account, so it is a server fault", err)
+		}
+		if !errors.Is(err, domain.ErrStoreReturnedNoUser) {
+			t.Fatalf("err = %v, want it to wrap ErrStoreReturnedNoUser", err)
+		}
+	})
+
+	t.Run("refresh stays invalid_grant", func(t *testing.T) {
+		setup := newTokenTestSetup(t)
+		initial, c, _ := setup.exchangeForTokens(t, true)
+
+		svc := setup.tokenSvcWithUserStore(failingUserStore{
+			UserStore: setup.h.Stores.User,
+			err:       domain.ErrStoreReturnedNoUser,
+		})
+
+		_, err := svc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+			RefreshToken: initial.RefreshToken,
+			ClientID:     c.ID,
+		})
+		if !errors.Is(err, domain.ErrInvalidGrant) {
+			t.Fatalf("err = %v, want ErrInvalidGrant — the refresh grant answers every "+
+				"subject-check outcome the same way on the wire", err)
+		}
+	})
+}
+
+func TestToken_RefreshToken_UserNotFound_IsInvalidGrant(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+
+	svc := setup.tokenSvcWithUserStore(failingUserStore{
+		UserStore: setup.h.Stores.User,
+		err:       domain.ErrUserNotFound,
+	})
+
+	resp, err := svc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant for a missing subject", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}

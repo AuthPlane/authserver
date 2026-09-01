@@ -698,7 +698,7 @@ export default function Resources() {
           onClose={() => setConfirmingClearAllowlist(false)}
         >
           <div style={{ fontSize: sz.base, color: C.textDim, lineHeight: 1.7, marginBottom: 14 }}>
-            This will allow <strong style={{ color: C.danger }}>any</strong> consented client to act for this resource. Use this only when the resource intentionally has no per-client restriction.
+            This will allow <strong style={{ color: C.danger }}>any</strong> client to act for this resource (user consent still applies, except for Mint self-exchange and fronted exchanges). Use this only when the resource intentionally has no per-client restriction.
           </div>
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <Btn secondary small onClick={() => setConfirmingClearAllowlist(false)}>Cancel</Btn>
@@ -956,7 +956,7 @@ function ResourceFormBody({
       <div>
         <Label>Cross-client allowlist (Exchange policy)</Label>
         <div style={{ fontSize: sz.sm, color: C.textDim, marginBottom: 8 }}>
-          Clients allowed to act for this resource via token exchange. Empty = any consented client may act.
+          Clients allowed to act for this resource via token exchange. Empty = any client may act (user consent still applies, except for Mint self-exchange and fronted exchanges).
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
           {form.allowed_client_ids.map((id) => (
@@ -980,7 +980,7 @@ function ResourceFormBody({
           ))}
           {form.allowed_client_ids.length === 0 && (
             <span style={{ fontSize: sz.sm, color: C.textDim, fontStyle: "italic" }}>
-              (none — any consented client may act)
+              (none — any client may act)
             </span>
           )}
         </div>

@@ -183,7 +183,7 @@ resources:
       - { name: tools/summarize_my_prs, description: "Summarise the user's open PRs" }
     policy:
       exchange:
-        # any consented client may exchange tokens for this Mint
+        # any client may exchange tokens for this Mint (consent is a separate gate)
         allowed_client_ids: []
 
   - slug: github

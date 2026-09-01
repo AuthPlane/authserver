@@ -31,6 +31,7 @@ type ServerConfig struct {
 	Issuer       string        ` + "`yaml:\"issuer\"`" + `
 	Address      string        ` + "`yaml:\"address\"`" + ` // host:port
 	ReadTimeout  time.Duration ` + "`yaml:\"read_timeout\"`" + `
+	StateTTL     time.Duration ` + "`yaml:\"state_ttl\"`" + ` // strict-parsed knob
 }
 
 // StorageConfig configures the database.
@@ -58,6 +59,7 @@ func DefaultConfig() *Config {
 			Issuer:      "http://localhost:9000",
 			Address:     ":9000",
 			ReadTimeout: 30 * time.Second,
+			StateTTL:    10 * time.Minute,
 		},
 		Storage: StorageConfig{
 			Driver: "sqlite",
@@ -73,6 +75,9 @@ func loadServerFromEnv(cfg *ServerConfig) {
 	cfg.Issuer = getEnv("AUTHPLANE_SERVER_ISSUER", cfg.Issuer)
 	cfg.Address = getEnv("AUTHPLANE_SERVER_ADDRESS", cfg.Address)
 	cfg.ReadTimeout = getEnvDuration("AUTHPLANE_SERVER_READ_TIMEOUT", cfg.ReadTimeout)
+	// strict two-value form: (value, error) — path resolves from the default arg
+	d, _ := getEnvDurationE("AUTHPLANE_SERVER_STATE_TTL", cfg.StateTTL)
+	cfg.StateTTL = d
 }
 
 func loadStorageFromEnv(cfg *StorageConfig) {
@@ -87,6 +92,7 @@ func loadStorageFromEnv(cfg *StorageConfig) {
 func getEnv(k, d string) string             { return "" }
 func getEnvBool(k string, d bool) bool       { return d }
 func getEnvDuration(k string, d time.Duration) time.Duration { return d }
+func getEnvDurationE(k string, d time.Duration) (time.Duration, error) { return d, nil }
 `
 
 	validateGo := `package config
@@ -136,6 +142,7 @@ func TestParse_FieldsAndDefaults(t *testing.T) {
 		"server.issuer":       {"string", "http://localhost:9000", "AUTHPLANE_SERVER_ISSUER", "server"},
 		"server.address":      {"string", ":9000", "AUTHPLANE_SERVER_ADDRESS", "server"},
 		"server.read_timeout": {"duration", "30s", "AUTHPLANE_SERVER_READ_TIMEOUT", "server"},
+		"server.state_ttl":    {"duration", "10m", "AUTHPLANE_SERVER_STATE_TTL", "server"},
 		"storage.driver":      {"string", "sqlite", "AUTHPLANE_STORAGE_DRIVER", "storage"},
 		"storage.sqlite.path": {"string", "data/authserver.db", "AUTHPLANE_STORAGE_SQLITE_PATH", "storage"},
 		"storage.sqlite.wal":  {"bool", "true", "AUTHPLANE_STORAGE_SQLITE_WAL", "storage"},
@@ -191,6 +198,7 @@ func TestParse_EnvVarsContainsAllNames(t *testing.T) {
 		"AUTHPLANE_SERVER_ISSUER",
 		"AUTHPLANE_SERVER_ADDRESS",
 		"AUTHPLANE_SERVER_READ_TIMEOUT",
+		"AUTHPLANE_SERVER_STATE_TTL",
 		"AUTHPLANE_STORAGE_DRIVER",
 		"AUTHPLANE_STORAGE_SQLITE_PATH",
 		"AUTHPLANE_STORAGE_SQLITE_WAL",

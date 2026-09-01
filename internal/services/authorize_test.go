@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/authplane/authserver/internal/adapters/cimd"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/client"
@@ -34,7 +35,9 @@ func newAuthorizeService(t *testing.T) (*services.AuthorizeService, *testdata.Te
 
 	svc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		nil, newTestRegistry(stores), false, obs,
+		nil, newTestRegistry(stores),
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
 	)
 
 	return svc, &testdata.TestHelper{Stores: stores}
@@ -327,7 +330,9 @@ func TestAuthorize_RequireScope_MissingScope_Rejected(t *testing.T) {
 
 	svc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		nil, newTestRegistry(stores), true, obs,
+		nil, newTestRegistry(stores),
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: true}),
+		obs,
 	)
 
 	h := &testdata.TestHelper{Stores: stores}
@@ -342,6 +347,42 @@ func TestAuthorize_RequireScope_MissingScope_Rejected(t *testing.T) {
 	}
 	if !errors.Is(err, domain.ErrInvalidScope) {
 		t.Errorf("error should be ErrInvalidScope, got: %v", err)
+	}
+}
+
+// failingOAuthConfigProvider always errors, to assert authorize fails closed on
+// an OAuth config-resolution error (only reachable when scope is absent).
+type failingOAuthConfigProvider struct{ err error }
+
+func (p failingOAuthConfigProvider) Config(context.Context) (output.OAuthConfig, error) {
+	return output.OAuthConfig{}, p.err
+}
+
+func TestAuthorize_OAuthConfigError_FailsClosed(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+
+	seedMintResource(t, stores, "mcp-cfg-err", "Cfg Err", "https://mcp.example.com",
+		resource.Scope{Name: "tools/query", Description: "Query"},
+	)
+
+	wantErr := errors.New("oauth config unavailable")
+	svc := services.NewAuthorizeService(
+		stores.Client, stores.Session, stores.ConsentGrant,
+		nil, newTestRegistry(stores),
+		failingOAuthConfigProvider{err: wantErr},
+		obs,
+	)
+
+	h := &testdata.TestHelper{Stores: stores}
+	c := createTestClient(t, h)
+
+	req := validAuthorizeRequest(c)
+	req.Scope = "" // absent scope forces the OAuth config resolution
+
+	_, err := svc.StartAuthorization(context.Background(), req)
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected error wrapping %v on config failure, got %v", wantErr, err)
 	}
 }
 
@@ -365,7 +406,9 @@ func newAuthorizeServiceWithScopes(t *testing.T, resourceURI string, scopes ...s
 
 	svc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		nil, newTestRegistry(stores), false, obs,
+		nil, newTestRegistry(stores),
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
 	)
 	return svc, &testdata.TestHelper{Stores: stores}
 }
@@ -437,7 +480,9 @@ func TestAuthorize_RequireScope_False_DefaultsScope(t *testing.T) {
 
 	svc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		nil, newTestRegistry(stores), false, obs,
+		nil, newTestRegistry(stores),
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
 	)
 
 	h := &testdata.TestHelper{Stores: stores}
@@ -469,9 +514,9 @@ func newAuthorizeServiceWithCIMD(t *testing.T, cimdServer *httptest.Server) (*se
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 
-	fetcher := cimd.New(false, time.Hour, 10*time.Second, obs)
+	fetcher := cimd.New(obs)
 	fetcher.SetAllowLoopback(true)
-	cimdSvc := services.NewCIMDService(stores.Client, fetcher, services.DCRMode{Mode: "open"}, obs.WithComponent("cimd"))
+	cimdSvc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	seedMintResource(t, stores, "mcp-cimd", "CIMD MCP", "https://mcp.example.com",
 		resource.Scope{Name: "tools/query", Description: "Query"},
@@ -480,7 +525,9 @@ func newAuthorizeServiceWithCIMD(t *testing.T, cimdServer *httptest.Server) (*se
 
 	svc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		cimdSvc, newTestRegistry(stores), false, obs,
+		cimdSvc, newTestRegistry(stores),
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
 	)
 
 	return svc, &testdata.TestHelper{Stores: stores}
@@ -692,14 +739,14 @@ func TestAuthorize_URLClientID_SuspendedCIMDClient(t *testing.T) {
 // --- Adversarial: CIMD + DCR cross-feature authorize integration ---
 
 // newAuthorizeServiceWithCIMDAndDCR creates an authorize service with a specific DCR mode.
-func newAuthorizeServiceWithCIMDAndDCR(t *testing.T, cimdServer *httptest.Server, dcrMode services.DCRMode) *services.AuthorizeService {
+func newAuthorizeServiceWithCIMDAndDCR(t *testing.T, cimdServer *httptest.Server, dcrMode output.DCRModeProvider) *services.AuthorizeService {
 	t.Helper()
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 
-	fetcher := cimd.New(false, time.Hour, 10*time.Second, obs)
+	fetcher := cimd.New(obs)
 	fetcher.SetAllowLoopback(true)
-	cimdSvc := services.NewCIMDService(stores.Client, fetcher, dcrMode, obs.WithComponent("cimd"))
+	cimdSvc := services.NewCIMDService(stores.Client, fetcher, dcrMode, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	seedMintResource(t, stores, "mcp-cimd-dcr", "CIMD DCR MCP", "https://mcp.example.com",
 		resource.Scope{Name: "tools/query", Description: "Query"},
@@ -708,7 +755,9 @@ func newAuthorizeServiceWithCIMDAndDCR(t *testing.T, cimdServer *httptest.Server
 
 	return services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		cimdSvc, newTestRegistry(stores), false, obs,
+		cimdSvc, newTestRegistry(stores),
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
 	)
 }
 
@@ -727,7 +776,7 @@ func TestAuthorize_URLClientID_CIMDBlockedByAdminOnly(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := newAuthorizeServiceWithCIMDAndDCR(t, ts, services.DCRMode{Mode: "admin_only"})
+	svc := newAuthorizeServiceWithCIMDAndDCR(t, ts, staticDCRModeForTest{Mode: "admin_only"})
 
 	req := validCIMDAuthorizeRequest(ts.URL, "https://evil.example.com/callback")
 	_, err := svc.StartAuthorization(context.Background(), req)
@@ -750,7 +799,7 @@ func TestAuthorize_URLClientID_CIMDBlockedByApprovedRedirects(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := newAuthorizeServiceWithCIMDAndDCR(t, ts, services.DCRMode{
+	svc := newAuthorizeServiceWithCIMDAndDCR(t, ts, staticDCRModeForTest{
 		Mode:              "approved_redirects",
 		ApprovedRedirects: []string{"https://trusted.example.com/callback"},
 	})
@@ -777,7 +826,7 @@ func TestAuthorize_URLClientID_CIMDAllowedByApprovedRedirects(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	svc := newAuthorizeServiceWithCIMDAndDCR(t, ts, services.DCRMode{
+	svc := newAuthorizeServiceWithCIMDAndDCR(t, ts, staticDCRModeForTest{
 		Mode:              "approved_redirects",
 		ApprovedRedirects: []string{redirectURI},
 	})
@@ -789,5 +838,72 @@ func TestAuthorize_URLClientID_CIMDAllowedByApprovedRedirects(t *testing.T) {
 	}
 	if result.Session == nil {
 		t.Fatal("session should have been created")
+	}
+}
+
+// resourceStoreListErrs resolves a single Mint resource but fails List. It lets a
+// test drive StartAuthorization past resource resolution and into validateScopes,
+// where the resource-list read then fails.
+type resourceStoreListErrs struct{ uri string }
+
+func (s resourceStoreListErrs) Resolve(_ context.Context, slugOrURI string) ([]*resource.Resource, error) {
+	if slugOrURI == s.uri {
+		return []*resource.Resource{{ID: "r-listerr", Slug: "listerr", URI: s.uri, BackendKind: resource.BackendMint}}, nil
+	}
+	return nil, nil
+}
+
+func (s resourceStoreListErrs) List(_ context.Context, _ output.ResourceFilter) ([]*resource.Resource, error) {
+	return nil, errors.New("resource store unavailable")
+}
+
+func (resourceStoreListErrs) GetByID(context.Context, string) (*resource.Resource, error) {
+	return nil, domain.ErrResourceNotFound
+}
+
+func (resourceStoreListErrs) GetBySlug(context.Context, string) (*resource.Resource, error) {
+	return nil, domain.ErrResourceNotFound
+}
+
+func (resourceStoreListErrs) Create(context.Context, *resource.Resource) error { return nil }
+func (resourceStoreListErrs) Update(context.Context, *resource.Resource) error { return nil }
+func (resourceStoreListErrs) Delete(context.Context, string) error             { return nil }
+
+func (resourceStoreListErrs) FindByRuntimeClientID(context.Context, string) (*resource.Resource, error) {
+	return nil, domain.ErrResourceNotFound
+}
+
+// A resource-store failure during scope validation must surface as a non-domain
+// error so the authorize handler maps it to server_error — not fall through to
+// invalid_scope (which is what an empty registry produced before List started
+// propagating its error). Guards the authorize → server_error path.
+func TestAuthorize_ResourceStoreError_MapsToServerError(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+	const uri = "https://mcp.example.com"
+	registry := services.NewResourceRegistry(resourceStoreListErrs{uri: uri}, stores.BrokerProvider, obs)
+	svc := services.NewAuthorizeService(
+		stores.Client, stores.Session, stores.ConsentGrant,
+		nil, registry,
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
+	)
+	c := createTestClient(t, &testdata.TestHelper{Stores: stores})
+
+	req := validAuthorizeRequest(c)
+	req.Resource = uri
+	req.Scope = "tools/echo"
+
+	_, err := svc.StartAuthorization(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error when the resource store fails during scope validation")
+	}
+	// Must not collapse to invalid_scope (the pre-change behavior on an empty
+	// registry), and must be a non-domain error so the handler emits server_error.
+	if errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("store failure must not surface as invalid_scope, got: %v", err)
+	}
+	if domain.IsError(err) {
+		t.Fatalf("store failure must be a non-domain error (maps to server_error), got domain error: %v", err)
 	}
 }

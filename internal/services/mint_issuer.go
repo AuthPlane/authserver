@@ -36,11 +36,11 @@ import (
 // (caller-side) are the observability surfaces here — matches
 // BrokerIssuer.
 type MintIssuer struct {
-	keys      JWKSSigningKeyProvider
-	issuances output.IssuanceStore
-	issuer    string
-	logger    *slog.Logger
-	tracer    trace.Tracer
+	keys           JWKSSigningKeyProvider
+	issuances      output.IssuanceStore
+	issuerProvider output.IssuerProvider
+	logger         *slog.Logger
+	tracer         trace.Tracer
 }
 
 // Compile-time substitution gate: MintIssuer must satisfy the unified
@@ -48,21 +48,24 @@ type MintIssuer struct {
 var _ Issuer = (*MintIssuer)(nil)
 
 // NewMintIssuer constructs a MintIssuer over the given signing-key
-// provider and issuance store. issuer is the AS issuer URL (used as the
-// 'iss' claim and as the audience fallback when the request supplies
-// neither Audience nor Resource).
+// provider and issuance store. issuerProvider resolves the AS issuer URL
+// (used as the 'iss' claim and as the audience fallback when the request
+// supplies neither Audience nor Resource).
 func NewMintIssuer(
 	keys JWKSSigningKeyProvider,
 	issuances output.IssuanceStore,
-	issuer string,
+	issuerProvider output.IssuerProvider,
 	obs *observability.Provider,
 ) *MintIssuer {
+	if issuerProvider == nil {
+		panic("services.NewMintIssuer: issuerProvider is required")
+	}
 	return &MintIssuer{
-		keys:      keys,
-		issuances: issuances,
-		issuer:    issuer,
-		logger:    obs.Logger.With("component", "mint_issuer"),
-		tracer:    obs.Tracer,
+		keys:           keys,
+		issuances:      issuances,
+		issuerProvider: issuerProvider,
+		logger:         obs.Logger.With("component", "mint_issuer"),
+		tracer:         obs.Tracer,
 	}
 }
 
@@ -94,7 +97,11 @@ func (m *MintIssuer) Issue(ctx context.Context, req IssueRequest) (*IssueRespons
 		notBefore = now
 	}
 
-	aud := mintAudience(req, m.issuer)
+	issuer, err := m.issuerProvider.Issuer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve issuer: %w", err)
+	}
+	aud := mintAudience(req, issuer)
 
 	span.SetAttributes(
 		attribute.String("subject_user_id", req.SubjectUserID),
@@ -131,7 +138,7 @@ func (m *MintIssuer) Issue(ctx context.Context, req IssueRequest) (*IssueRespons
 	}
 
 	claims := crypto.AccessTokenClaims{
-		Issuer:     m.issuer,
+		Issuer:     issuer,
 		Subject:    req.SubjectUserID,
 		Audience:   aud,
 		ClientID:   req.ActorClientID,

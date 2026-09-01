@@ -25,9 +25,11 @@ func TestTransactionManager(t *testing.T) {
 	testdata.RunTransactionManagerTests(t, func(t *testing.T) testdata.TransactionStores {
 		stores := testdata.SetupTestStores(t)
 		return testdata.TransactionStores{
-			Client:      stores.Client,
-			User:        stores.User,
-			Transaction: stores.TransactionMgr,
+			Client:         stores.Client,
+			User:           stores.User,
+			BrokerProvider: stores.BrokerProvider,
+			BrokerGrant:    stores.BrokerGrant,
+			Transaction:    stores.TransactionMgr,
 		}
 	})
 }

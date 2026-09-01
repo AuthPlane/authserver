@@ -12,8 +12,10 @@
 // or any rename that breaks an existing one will fail the build.
 //
 // Scope:
-//   - Files: README.md, AGENTS.md, CONTRIBUTING.md, llms.txt, every
-//     **/*.md under docs/ and examples/.
+//   - Files: every Markdown root maintained in this repo — enumerated
+//     once, in discoverFiles — plus every **/*.md under docs/ and
+//     examples/. A root left off that list goes unchecked; that is how
+//     SECURITY.md came to carry three dead links.
 //   - Inline Markdown links only (`[text](href)`). Reference-style and
 //     auto-links are out of scope — the docs don't use them.
 //   - Local relative paths. URLs (http/https/mailto/etc) are skipped.
@@ -307,7 +309,9 @@ func looksLikeMarkdown(path string) bool {
 func discoverFiles(repoRoot string) ([]string, error) {
 	var out []string
 	roots := []string{
-		"README.md", "AGENTS.md", "CONTRIBUTING.md", "llms.txt",
+		"README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md",
+		"CODE_OF_CONDUCT.md", "CHANGELOG.md",
+		"PROJECT_LAYOUT_DATA_ENCRYPTION.md", "llms.txt",
 		"docs", "examples",
 	}
 	for _, r := range roots {

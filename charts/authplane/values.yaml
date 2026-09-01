@@ -113,6 +113,7 @@ config:
     auth_fail_max: 10
     auth_fail_window: 10m
     auth_lockout: 15m
+    max_tracked_identities: 250000
   admin:
     enabled: true
     address: ":9001"
@@ -126,11 +127,11 @@ config:
     issuer: ""
     # -- OAuth client ID from the upstream provider
     client_id: ""
-    # -- OAuth client secret (prefer existingSecret or client_secret_env for production)
+    # -- OAuth client secret (prefer existingSecret or client_secret_ref for production)
     client_secret: ""
     # -- Env var name holding the client secret (takes precedence over client_secret).
     # Leave empty when using client_secret directly.
-    client_secret_env: ""
+    client_secret_ref: ""
     # -- Button text on the login page
     display_name: ""
     # -- OIDC scopes to request
@@ -140,7 +141,7 @@ config:
       - profile
     # -- Callback URL. Defaults to {server.issuer}/oidc/callback
     redirect_uri: ""
-    # -- Show local email/password login alongside the OIDC button
+    # -- Local email/password login alongside the OIDC button. false disables it entirely: the form is hidden and POST /login answers 404.
     show_local_login: true
     # -- Auto-add "groups" scope if upstream supports it (Okta: yes, Google: no)
     include_groups_scope: false
@@ -174,7 +175,9 @@ config:
     enabled: false
     token_expiry: 1h
     max_assertion_age: 5m
-    # -- Require the `resource` claim in incoming ID-JAG assertions.
+    # -- Refuse exchanges that name no resource, on the ID-JAG assertion
+    # or the token request. Needs an appVersion that ships the check;
+    # earlier images parse this key and ignore it.
     require_resource: false
     subject_mode: auto_map
     jwks_cache_ttl: 1h
@@ -233,7 +236,7 @@ config:
   #    protocol: oauth
   #    config_data:
   #      client_id: "Iv1.test"
-  #      client_secret_env: "CONNECTOR_GITHUB_SECRET"
+  #      client_secret_ref: "CONNECTOR_GITHUB_SECRET"
   #      authorize_url: "https://github.com/login/oauth/authorize"
   #      token_url: "https://github.com/login/oauth/access_token"
 

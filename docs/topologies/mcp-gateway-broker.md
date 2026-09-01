@@ -170,7 +170,7 @@ and the keyring/encryptor are configured
 
 **Env var name allowlist.** The upstream OAuth client secret is
 **not** stored in the AS database — authserver reads it via
-`client_secret_env`. The brokerproto/oauth adapter rejects any value
+`client_secret_ref`. The brokerproto/oauth adapter rejects any value
 that does not match
 `^(CONNECTOR_|AUTHPLANE_VAULT_)[A-Z][A-Z0-9_]*$`
 (`internal/brokerproto/secretrules.go`). The prefix prevents
@@ -215,7 +215,7 @@ refresh tokens unconditionally.
 cat >/tmp/provider-google.json <<EOF
 {
   "client_id": "<google-oauth-client-id>",
-  "client_secret_env": "CONNECTOR_GOOGLE_SECRET",
+  "client_secret_ref": "CONNECTOR_GOOGLE_SECRET",
   "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
   "token_url": "https://oauth2.googleapis.com/token",
   "extra_auth_params": {
@@ -288,7 +288,7 @@ curl -X POST "$ADMIN/admin/broker-providers" \
   -d '{"slug":"google","display_name":"Google","protocol":"oauth",
        "config_data":{
          "client_id":"<google-oauth-client-id>",
-         "client_secret_env":"CONNECTOR_GOOGLE_SECRET",
+         "client_secret_ref":"CONNECTOR_GOOGLE_SECRET",
          "authorize_url":"https://accounts.google.com/o/oauth2/v2/auth",
          "token_url":"https://oauth2.googleapis.com/token",
          "extra_auth_params":{"access_type":"offline","prompt":"consent"}
@@ -353,13 +353,13 @@ Tables touched: `resources`, `clients`, `broker_providers`,
 `fronting_links`, `consent_grants` (lookup), `broker_grants`,
 `connect_pending_states`, `issuances`, `audit_events`.
 
-### v0.1.x limitation: static `return_url`
+### Current limitation: static `return_url`
 
 The gateway's `--connect-return-url` flag is a process-level config —
 every `consent_required` response uses the same URL. A production
 gateway would encode the originating request path so the user lands
-back on the right page, but that requires GW-supplied `return_url`,
-deferred to v0.2.
+back on the right page, but that requires a GW-supplied `return_url`,
+which is not implemented yet.
 
 ### Operator triage
 

@@ -97,9 +97,6 @@ func TestHAKeyStore_SaveRotatesCorrectly(t *testing.T) {
 		t.Fatalf("save key 2: %v", err)
 	}
 
-	// Invalidate cache to force DB reads.
-	store.InvalidateCache()
-
 	current, err := store.LoadCurrent(ctx)
 	if err != nil {
 		t.Fatalf("load current: %v", err)
@@ -157,7 +154,6 @@ func TestHAKeyStore_ListActive(t *testing.T) {
 		t.Fatalf("save key 1: %v", err)
 	}
 
-	store.InvalidateCache()
 	keys, err = store.ListActive(ctx)
 	if err != nil {
 		t.Fatalf("list active (1 key): %v", err)
@@ -175,7 +171,6 @@ func TestHAKeyStore_ListActive(t *testing.T) {
 		t.Fatalf("save key 2: %v", err)
 	}
 
-	store.InvalidateCache()
 	keys, err = store.ListActive(ctx)
 	if err != nil {
 		t.Fatalf("list active (2 keys): %v", err)
@@ -252,7 +247,6 @@ func TestHAKeyStore_WrongEncryptionKeyFails(t *testing.T) {
 		t.Fatalf("create encryptor 2: %v", err)
 	}
 	store2 := pgadapter.NewHAKeyStore(db.Pool, enc2, obs)
-	store2.InvalidateCache()
 
 	_, err = store2.LoadCurrent(ctx)
 	if err == nil {
@@ -271,8 +265,6 @@ func TestHAKeyStore_TripleRotation_PrunesOldKeys(t *testing.T) {
 			t.Fatalf("save %s: %v", kid, err)
 		}
 	}
-
-	store.InvalidateCache()
 
 	current, err := store.LoadCurrent(ctx)
 	if err != nil {
@@ -303,49 +295,9 @@ func TestHAKeyStore_TripleRotation_PrunesOldKeys(t *testing.T) {
 	}
 }
 
-func TestHAKeyStore_CacheInvalidation(t *testing.T) {
-	store := newHAKeyStore(t)
-	ctx := context.Background()
-
-	k1 := newHATestSigningKey(t, "kid-cache-1")
-	if err := store.Save(ctx, k1); err != nil {
-		t.Fatalf("save key 1: %v", err)
-	}
-
-	// LoadCurrent should populate cache.
-	current1, err := store.LoadCurrent(ctx)
-	if err != nil {
-		t.Fatalf("load current: %v", err)
-	}
-	if current1.KeyID != "kid-cache-1" {
-		t.Errorf("expected kid-cache-1, got %q", current1.KeyID)
-	}
-
-	// Save a second key (this also updates cache).
-	k2 := newHATestSigningKey(t, "kid-cache-2")
-	if err := store.Save(ctx, k2); err != nil {
-		t.Fatalf("save key 2: %v", err)
-	}
-
-	// Without invalidation, cache should have the new key (Save updates cache).
-	current2, err := store.LoadCurrent(ctx)
-	if err != nil {
-		t.Fatalf("load current after rotation: %v", err)
-	}
-	if current2.KeyID != "kid-cache-2" {
-		t.Errorf("cache should have new key: got %q, want kid-cache-2", current2.KeyID)
-	}
-
-	// Invalidate and verify it re-reads from DB.
-	store.InvalidateCache()
-	current3, err := store.LoadCurrent(ctx)
-	if err != nil {
-		t.Fatalf("load current after invalidation: %v", err)
-	}
-	if current3.KeyID != "kid-cache-2" {
-		t.Errorf("after invalidation should get DB value: got %q, want kid-cache-2", current3.KeyID)
-	}
-}
+// Caching is no longer a concern of HAKeyStore — the signing.WrapKeyStore
+// decorator owns the fast-path cache and its invalidation. See
+// TestWrapKeyStore_* in the signing package.
 
 func TestHAKeyStore_ConcurrentRotation_OnlyOneSucceeds(t *testing.T) {
 	db := testdata.SetupTestPGDB(t, pgContainerDSN)

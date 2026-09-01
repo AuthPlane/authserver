@@ -144,11 +144,11 @@ the agent will pass on `/authorize`.
 
 The upstream OAuth client secret is **not** stored in the AS database
 — authserver reads it from an environment variable named via
-`client_secret_env`. Export the secret in the AS process environment
+`client_secret_ref`. Export the secret in the AS process environment
 before any of the three modes below.
 
 **Env var name allowlist.** The brokerproto/oauth adapter rejects any
-`client_secret_env` value that does not match
+`client_secret_ref` value that does not match
 `^(CONNECTOR_|AUTHPLANE_VAULT_)[A-Z][A-Z0-9_]*$`
 (`internal/brokerproto/secretrules.go`). The prefix prevents
 operator-supplied config from naming arbitrary process env vars
@@ -202,7 +202,7 @@ file:
 cat >/tmp/provider-google.json <<EOF
 {
   "client_id": "<google-oauth-client-id>",
-  "client_secret_env": "CONNECTOR_GOOGLE_SECRET",
+  "client_secret_ref": "CONNECTOR_GOOGLE_SECRET",
   "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
   "token_url": "https://oauth2.googleapis.com/token",
   "extra_auth_params": {
@@ -252,7 +252,7 @@ curl -X POST "$ADMIN/admin/broker-providers" \
        "protocol":"oauth",
        "config_data":{
          "client_id":"<google-oauth-client-id>",
-         "client_secret_env":"CONNECTOR_GOOGLE_SECRET",
+         "client_secret_ref":"CONNECTOR_GOOGLE_SECRET",
          "authorize_url":"https://accounts.google.com/o/oauth2/v2/auth",
          "token_url":"https://oauth2.googleapis.com/token",
          "extra_auth_params":{"access_type":"offline","prompt":"consent"}

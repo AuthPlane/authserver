@@ -51,7 +51,7 @@ func TestConnectFlow_RoundTrip(t *testing.T) {
 	mockBase := h.MockUpstreamURL("github")
 	configData := map[string]any{
 		"client_id":         "mock-client-id",
-		"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+		"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 		"authorize_url":     mockBase + "/authorize",
 		"token_url":         mockBase + "/token",
 		"response_format":   "standard",
@@ -79,7 +79,7 @@ func TestConnectFlow_RoundTrip(t *testing.T) {
 
 	// 3. Trigger StartConnect — the AS persists a pending state and
 	// redirects the user to the mock upstream's /authorize.
-	returnURL := h.Issuer + "/connections" // AS-self bypass per 
+	returnURL := h.Issuer + "/connections" // AS-self bypass per
 	startResp, err := httpClient.Get(h.Issuer + "/connect/github?return_url=" + url.QueryEscape(returnURL))
 	if err != nil {
 		t.Fatalf("GET /connect/github: %v", err)

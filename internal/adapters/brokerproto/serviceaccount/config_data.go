@@ -37,15 +37,18 @@ const maxTokenTTLSeconds = 3600
 // by this adapter: the core code never parses it. See
 // the resource-unification design and the architecture doc
 //
-// The SA private key is referenced by env-var name (SAKeyEnv), not stored
+// The SA private key is referenced by name (SAKeyRef), not stored
 // inline. The KeyStore port handles AS-issued (mint) signing keys; SA keys
-// are upstream credentials and live in the operator's process environment.
+// are upstream credentials and live in the operator's secret store.
 type configData struct {
 	TokenURL        string `json:"token_url"`
 	SAEmail         string `json:"sa_email"`
-	SAKeyEnv        string `json:"sa_key_env"`
+	SAKeyRef        string `json:"sa_key_ref"`
 	TokenTTLSeconds int    `json:"token_ttl_seconds,omitempty"`
 	Algorithm       string `json:"algorithm,omitempty"`
+	// SAKeyEnvLegacy carries the pre-v0.1.2 spelling of SAKeyRef, folded
+	// forward at parse time for rows written by v0.1.x. Never written back.
+	SAKeyEnvLegacy string `json:"sa_key_env,omitempty"`
 }
 
 // parseConfigData unmarshals the raw bytes from broker_providers.config_data
@@ -61,14 +64,19 @@ func parseConfigData(raw []byte) (configData, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return configData{}, fmt.Errorf("service_account config_data: %w", err)
 	}
+	// Fold the pre-v0.1.2 key forward so providers created by v0.1.x keep
+	// working after an upgrade; no migration rewrites config_data.
+	if cfg.SAKeyRef == "" && cfg.SAKeyEnvLegacy != "" {
+		cfg.SAKeyRef = cfg.SAKeyEnvLegacy
+	}
 	if cfg.TokenURL == "" {
 		return configData{}, fmt.Errorf("service_account config_data: token_url is required")
 	}
 	if cfg.SAEmail == "" {
 		return configData{}, fmt.Errorf("service_account config_data: sa_email is required")
 	}
-	if cfg.SAKeyEnv == "" {
-		return configData{}, fmt.Errorf("service_account config_data: sa_key_env is required")
+	if cfg.SAKeyRef == "" {
+		return configData{}, fmt.Errorf("service_account config_data: sa_key_ref is required")
 	}
 	if cfg.Algorithm == "" {
 		cfg.Algorithm = algorithmRS256

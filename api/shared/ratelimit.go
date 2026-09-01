@@ -12,22 +12,17 @@ import (
 	"github.com/authplane/authserver/internal/config"
 )
 
-// LockoutCallback is called when a request is blocked by lockout.
-type LockoutCallback func(ip string)
-
-// RateLimiter provides per-IP rate limiting and auth failure lockout.
+// RateLimiter provides per-IP request throughput limiting.
+//
+// It deliberately does NOT handle auth-failure lockout — see AuthLockout.
+// Throughput is a property of the connection and applies to every public
+// endpoint; a lockout is a property of an account and belongs on the
+// authentication route only. Conflating them is what let ten failed logins
+// return 429 from JWKS.
 type RateLimiter struct {
-	cfg            config.RateLimitConfig
-	visitors       map[string]*visitorState
-	mu             sync.Mutex
-	OnLockoutBlock LockoutCallback
-}
-
-type visitorState struct {
-	limiter      *rate.Limiter
-	failCount    int
-	firstFailure time.Time
-	lockedUntil  time.Time
+	cfg      config.RateLimitConfig
+	visitors map[string]*rate.Limiter
+	mu       sync.Mutex
 }
 
 // NewRateLimiter creates a new rate limiter from the given config.
@@ -35,7 +30,7 @@ type visitorState struct {
 func NewRateLimiter(ctx context.Context, cfg config.RateLimitConfig) *RateLimiter {
 	rl := &RateLimiter{
 		cfg:      cfg,
-		visitors: make(map[string]*visitorState),
+		visitors: make(map[string]*rate.Limiter),
 	}
 	// Background cleanup of stale visitor entries every 5 minutes.
 	go rl.cleanupLoop(ctx)
@@ -59,10 +54,9 @@ func (rl *RateLimiter) cleanupLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			rl.mu.Lock()
-			now := time.Now()
 			for key, v := range rl.visitors {
-				// Remove visitors whose lockout has expired and have no recent failures.
-				if now.After(v.lockedUntil) && v.failCount == 0 {
+				// A limiter back at full burst is equivalent to a fresh one.
+				if v.Tokens() >= float64(rl.cfg.Burst) {
 					delete(rl.visitors, key)
 				}
 			}
@@ -71,15 +65,13 @@ func (rl *RateLimiter) cleanupLoop(ctx context.Context) {
 	}
 }
 
-func (rl *RateLimiter) getVisitor(key string) *visitorState {
+func (rl *RateLimiter) getVisitor(key string) *rate.Limiter {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	v, ok := rl.visitors[key]
 	if !ok {
-		v = &visitorState{
-			limiter: rate.NewLimiter(rate.Limit(rl.cfg.RequestsPerSecond), rl.cfg.Burst),
-		}
+		v = rate.NewLimiter(rate.Limit(rl.cfg.RequestsPerSecond), rl.cfg.Burst)
 		rl.visitors[key] = v
 	}
 	return v
@@ -88,75 +80,13 @@ func (rl *RateLimiter) getVisitor(key string) *visitorState {
 // Middleware wraps an HTTP handler with rate limiting.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := ClientIP(r)
-		v := rl.getVisitor(ip)
-
-		// Check lockout.
-		if rl.IsLockedOut(ip) {
-			if rl.OnLockoutBlock != nil {
-				rl.OnLockoutBlock(ip)
-			}
-			w.Header().Set("Retry-After", "60")
-			WriteOAuthError(w, http.StatusTooManyRequests, "slow_down", "too many failed attempts, try again later")
-			return
-		}
-
-		// Check rate limit.
-		if !v.limiter.Allow() {
+		if !rl.getVisitor(ClientIP(r)).Allow() {
 			w.Header().Set("Retry-After", "1")
 			WriteOAuthError(w, http.StatusTooManyRequests, "slow_down", "rate limit exceeded")
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
-}
-
-// RecordAuthFailure tracks a failed authentication attempt for the given key.
-func (rl *RateLimiter) RecordAuthFailure(key string) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	v, ok := rl.visitors[key]
-	if !ok {
-		v = &visitorState{
-			limiter: rate.NewLimiter(rate.Limit(rl.cfg.RequestsPerSecond), rl.cfg.Burst),
-		}
-		rl.visitors[key] = v
-	}
-
-	now := time.Now()
-
-	// Reset counter if outside the failure window.
-	if v.failCount > 0 && now.Sub(v.firstFailure) > rl.cfg.AuthFailWindow {
-		v.failCount = 0
-	}
-
-	if v.failCount == 0 {
-		v.firstFailure = now
-	}
-	v.failCount++
-
-	if v.failCount >= rl.cfg.AuthFailMax {
-		v.lockedUntil = now.Add(rl.cfg.AuthLockout)
-		v.failCount = 0 // reset after lockout
-	}
-}
-
-// IsLockedOut checks if a key is currently locked out due to too many failures.
-func (rl *RateLimiter) IsLockedOut(key string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	v, ok := rl.visitors[key]
-	if !ok {
-		return false
-	}
-
-	if time.Now().Before(v.lockedUntil) {
-		return true
-	}
-	return false
 }
 
 // ClientIP extracts the client IP from the request.

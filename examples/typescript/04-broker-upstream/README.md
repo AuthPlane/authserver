@@ -1,7 +1,7 @@
 # Tier 04 — MCP server fronting a Broker (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 21 lines · Total example: 59 lines · SDK: ts-sdk 0.2.0**
+**Auth-specific code: 21 lines · Total example: 59 lines · SDK: ts-sdk 0.3.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call a third-party API on the user's
@@ -51,7 +51,7 @@ has the end-to-end sequence diagram.
 |---|---|
 | **Time to run** | ~2 minutes (first build is ~90s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, Node.js 22+ (only if you run outside Docker) |
-| **SDK** | `@authplane/sdk` 0.2.0 (npm) |
+| **SDK** | `@authplane/sdk` 0.3.0 (npm) |
 | **Wire grant** | `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693) |
 | **Stops at** | the agent catching `ConsentRequiredError` and printing the `consentUrl` — there is no real upstream provider in this example |
 
@@ -115,7 +115,7 @@ describe what's happening so you can reproduce the flow by hand.
        "protocol": "oauth",
        "config_data": {
          "client_id": "Iv1.fakeoauthapp_abc123",
-         "client_secret_env": "AUTHPLANE_ADMIN_API_KEY",
+         "client_secret_ref": "AUTHPLANE_ADMIN_API_KEY",
          "authorize_url": "https://github.example.invalid/login/oauth/authorize",
          "token_url": "https://github.example.invalid/login/oauth/access_token"
        }

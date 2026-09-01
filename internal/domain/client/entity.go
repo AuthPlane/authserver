@@ -40,12 +40,21 @@ type Client struct {
 	Status                  Status
 	RegistrationSource      RegistrationSource
 	CIMDURL                 string // non-empty for CIMD-registered clients
-	Scope                   string // space-separated list of allowed scopes (RFC 7591); empty = no restriction
-	IsAgent                 bool   // true for agent clients (Authplane extension)
-	AgentDescription        string // human-readable agent description (max 255 chars)
-	Version                 int64  // optimistic locking — starts at 1, increments on each Update
-	IssuedAt                time.Time
-	UpdatedAt               time.Time
+	// Scope is the space-separated per-client scope ceiling (RFC 7591). Only
+	// the admin surface sets it; dynamic registration and CIMD never do,
+	// because those doors create user-delegated clients whose scopes come from
+	// consent.
+	//
+	// Only client_credentials and jwt-bearer read it, and for them an empty
+	// value is a ceiling of zero, not "no ceiling" — how each refuses is
+	// documented at the grant (services/client_credentials.go,
+	// services/jwt_bearer.go). authorization_code never consults it.
+	Scope            string
+	IsAgent          bool   // true for agent clients (Authplane extension)
+	AgentDescription string // human-readable agent description (max 255 chars)
+	Version          int64  // optimistic locking — starts at 1, increments on each Update
+	IssuedAt         time.Time
+	UpdatedAt        time.Time
 }
 
 // IsPublic returns true if the client has no secret (public client).

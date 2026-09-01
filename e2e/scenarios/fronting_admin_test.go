@@ -18,21 +18,23 @@ import (
 // (no internal/* imports, no store accessors). Two distinct properties
 // are pinned:
 //
-// 1. Wire-shape: every operation returns the / view shape
+//  1. Wire-shape: every operation returns the / view shape
 //     (source_slug/target_slug/scope_map/created_at/created_by). The
 //     POST request body uses the abbreviated source/target field names;
 //     the response always uses the suffixed *_slug names. The drift
-// between request and response shapes is intentional (per
-//     review notes) so this test pins it.
 //
-//  2. Runtime impact: the fronted-path runtime consults the same
-//     fronting_links rows admin writes, so DELETE here must collapse
-//     the next /oauth/token exchange back onto the direct path. The
-//     direct path's consent gate fires (consent_required) because no
-//     consent_grants row was ever recorded for the gateway client at
-//     the rest-api resource — this matches the merge-gate test (Task C)
-//     no-link branch and proves admin and runtime stay in sync without
-//     any cache invalidation step.
+// between request and response shapes is intentional (per
+//
+//	   review notes) so this test pins it.
+//
+//	2. Runtime impact: the fronted-path runtime consults the same
+//	   fronting_links rows admin writes, so DELETE here must collapse
+//	   the next /oauth/token exchange back onto the direct path. The
+//	   direct path's consent gate fires (consent_required) because no
+//	   consent_grants row was ever recorded for the gateway client at
+//	   the rest-api resource — this matches the merge-gate test (Task C)
+//	   no-link branch and proves admin and runtime stay in sync without
+//	   any cache invalidation step.
 //
 // Audit assertion mirrors auditDetailContainsAll from the merge-gate
 // test: poll GET /admin/audit?action=<action> and look for the row by

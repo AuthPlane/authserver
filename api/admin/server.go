@@ -33,11 +33,15 @@ type OptionalDeps struct {
 	Grants          *GrantAdminDeps
 	Issuances       *IssuanceAdminDeps
 	Fronting        *FrontingAdminDeps
+	Auth            AuthWrapper  // optional external auth strategy; when set, replaces the API-key gate. Must be non-nil if set (a typed-nil defeats the presence check and panics at construction).
+	ExtraRoutes     []ExtraRoute // optional downstream-supplied admin routes, registered behind the same auth gate and middleware chain as built-in routes; nil in the default binary
 }
 
 // NewServer creates the admin HTTP server with routes wired.
-// opts fields are all optional (nil if not configured).
-func NewServer(ctx context.Context, cfg config.AdminConfig, admin Provider, obs *observability.Provider, opts OptionalDeps) *Server {
+// opts fields are all optional (nil if not configured). It returns an error
+// when a downstream-supplied extra route is malformed (see registerRoutes);
+// the default binary supplies none and never sees a non-nil error.
+func NewServer(ctx context.Context, cfg config.AdminConfig, admin Provider, obs *observability.Provider, opts OptionalDeps) (*Server, error) {
 	mux := http.NewServeMux()
 
 	s := &Server{
@@ -74,14 +78,24 @@ func NewServer(ctx context.Context, cfg config.AdminConfig, admin Provider, obs 
 	}
 
 	// Auth middleware + route registration.
-	authMW := newAPIKeyMiddleware(cfg.APIKey)
-	registerRoutes(mux, authMW, admin, obs, opts.System, opts.Keys, opts.DCR, opts.XAA, opts.Resources, opts.BrokerProviders, opts.Grants, opts.Issuances, opts.Fronting)
+	// Auth strategy: use the injected AuthWrapper when one is supplied
+	// (external authentication); otherwise the API-key gate built from
+	// cfg.APIKey. A server fronted by external auth that injects no wrapper and
+	// sets no api_key falls back to an empty-key gate that rejects all →
+	// fail-closed.
+	authMW := opts.Auth
+	if authMW == nil {
+		authMW = newAPIKeyMiddleware(cfg.APIKey)
+	}
+	if err := registerRoutes(mux, authMW, admin, obs, opts.System, opts.Keys, opts.DCR, opts.XAA, opts.Resources, opts.BrokerProviders, opts.Grants, opts.Issuances, opts.Fronting, opts.ExtraRoutes); err != nil {
+		return nil, err
+	}
 
 	// UI routes — no auth middleware. The SPA manages its own auth
 	// via the /admin/auth/verify endpoint.
 	registerUIRoutes(mux)
 
-	return s
+	return s, nil
 }
 
 // Handler returns the server's HTTP handler for testing.

@@ -163,8 +163,9 @@ func TestValidateAdminAPIKeyRequiredForProduction(t *testing.T) {
 	cfg.Server.Issuer = "https://auth.example.com"
 	cfg.Session.Secret = "test-secret-long-enough"
 	cfg.Session.Secure = true
+	cfg.Admin.Enabled = true
 	cfg.Admin.APIKey = ""
-	err := cfg.Validate()
+	err := cfg.ValidateAdminAPIKey()
 	if err == nil {
 		t.Fatal("expected error for empty admin.api_key in production")
 	}
@@ -458,8 +459,32 @@ func TestValidate_OIDCEnabled_MissingClientSecret(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for OIDC enabled with missing client_secret")
 	}
-	if !strings.Contains(err.Error(), "oidc.client_secret") {
-		t.Errorf("error should mention oidc.client_secret: %v", err)
+	// Structural check: error must mention both secret fields so the operator
+	// knows either client_secret or client_secret_ref satisfies the requirement.
+	if !strings.Contains(err.Error(), "client_secret") {
+		t.Errorf("error should mention client_secret: %v", err)
+	}
+	if !strings.Contains(err.Error(), "client_secret_ref") {
+		t.Errorf("error should mention client_secret_ref: %v", err)
+	}
+}
+
+func TestValidate_OIDCEnabled_BothSecretsRejected(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.OIDC.Enabled = true
+	cfg.OIDC.Issuer = "https://accounts.google.com"
+	cfg.OIDC.ClientID = "my-client"
+	cfg.OIDC.RedirectURI = "https://app.example.com/oidc/callback"
+	// Both set → mutually exclusive, must be rejected rather than resolved by
+	// precedence.
+	cfg.OIDC.ClientSecret = "inline-value"
+	cfg.OIDC.ClientSecretRef = "CONNECTOR_OIDC_SECRET"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when both client_secret and client_secret_ref are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should state the fields are mutually exclusive: %v", err)
 	}
 }
 
@@ -823,6 +848,24 @@ func TestEnvOverrideOAuthRequireScope(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_OAuthStateMaxAge(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.OAuth.StateMaxAge != 10*time.Minute {
+		t.Errorf("OAuth.StateMaxAge default = %v, want 10m", cfg.OAuth.StateMaxAge)
+	}
+}
+
+func TestEnvOverrideOAuthStateMaxAge(t *testing.T) {
+	t.Setenv("AUTHPLANE_OAUTH_STATE_MAX_AGE", "2m")
+	cfg := DefaultConfig()
+	if err := loadFromEnv(cfg); err != nil {
+		t.Fatalf("loadFromEnv: %v", err)
+	}
+	if cfg.OAuth.StateMaxAge != 2*time.Minute {
+		t.Errorf("OAuth.StateMaxAge after env = %v, want 2m", cfg.OAuth.StateMaxAge)
+	}
+}
+
 func TestIsLocalhostIssuer(t *testing.T) {
 	tests := []struct {
 		issuer string
@@ -977,8 +1020,9 @@ func TestValidate_WeakAdminAPIKey_Rejected(t *testing.T) {
 	for _, weak := range []string{"dev-admin-key", "changeme", "secret", "password", "admin", "test"} {
 		t.Run(weak, func(t *testing.T) {
 			cfg := DefaultConfig()
+			cfg.Admin.Enabled = true
 			cfg.Admin.APIKey = weak
-			err := cfg.Validate()
+			err := cfg.ValidateAdminAPIKey()
 			if err == nil {
 				t.Fatalf("expected error for weak admin API key %q", weak)
 			}
@@ -1009,8 +1053,9 @@ func TestValidate_ShortAdminAPIKey_RejectedInProduction(t *testing.T) {
 	cfg.Server.Issuer = "https://auth.example.com"
 	cfg.Session.Secret = "test-secret-long-enough"
 	cfg.Session.Secure = true
+	cfg.Admin.Enabled = true
 	cfg.Admin.APIKey = "short" // Only 5 chars
-	err := cfg.Validate()
+	err := cfg.ValidateAdminAPIKey()
 	if err == nil {
 		t.Fatal("expected error for short admin API key in production")
 	}
@@ -1064,7 +1109,7 @@ func TestConfig_LoadResources_RoundTripsUnifiedShape(t *testing.T) {
     protocol: oauth
     config_data:
       client_id: "Iv1.test"
-      client_secret_env: "CONNECTOR_GITHUB_SECRET"
+      client_secret_ref: "CONNECTOR_GITHUB_SECRET"
 
 resources:
   - slug: tasks-mcp
@@ -1246,7 +1291,7 @@ func TestLoadBrokerProviderFromEnv_PopulatesBrokerProvidersList(t *testing.T) {
 	t.Setenv("AUTHPLANE_BROKER_PROVIDER_SLUG", "github")
 	t.Setenv("AUTHPLANE_BROKER_PROVIDER_DISPLAY_NAME", "GitHub")
 	t.Setenv("AUTHPLANE_BROKER_PROVIDER_CLIENT_ID", "Iv1.test")
-	t.Setenv("AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_ENV", "CONNECTOR_GITHUB_SECRET")
+	t.Setenv("AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_REF", "CONNECTOR_GITHUB_SECRET")
 	t.Setenv("AUTHPLANE_BROKER_PROVIDER_AUTHORIZE_URL", "https://github.com/login/oauth/authorize")
 	t.Setenv("AUTHPLANE_BROKER_PROVIDER_TOKEN_URL", "https://github.com/login/oauth/access_token")
 
@@ -1261,8 +1306,8 @@ func TestLoadBrokerProviderFromEnv_PopulatesBrokerProvidersList(t *testing.T) {
 	if bp.Slug != "github" || bp.DisplayName != "GitHub" || bp.Protocol != "oauth" {
 		t.Errorf("provider meta: got %+v", bp)
 	}
-	if bp.ConfigData["client_secret_env"] != "CONNECTOR_GITHUB_SECRET" {
-		t.Errorf("client_secret_env: got %v", bp.ConfigData["client_secret_env"])
+	if bp.ConfigData["client_secret_ref"] != "CONNECTOR_GITHUB_SECRET" {
+		t.Errorf("client_secret_ref: got %v", bp.ConfigData["client_secret_ref"])
 	}
 	if bp.ConfigData["client_id"] != "Iv1.test" {
 		t.Errorf("client_id: got %v", bp.ConfigData["client_id"])
@@ -1336,5 +1381,255 @@ func TestHasYAMLKey_TableDriven(t *testing.T) {
 		if got := hasYAMLKey(raw, c.path); got != c.want {
 			t.Errorf("hasYAMLKey(%q): got %v, want %v", c.path, got, c.want)
 		}
+	}
+}
+
+func TestValidateAdminAPIKey_ValidCases(t *testing.T) {
+	// Strong key in production → ok.
+	prod := DefaultConfig()
+	prod.Server.Issuer = "https://auth.example.com"
+	prod.Admin.Enabled = true
+	prod.Admin.APIKey = "a-very-strong-production-admin-key"
+	if err := prod.ValidateAdminAPIKey(); err != nil {
+		t.Errorf("strong admin api_key in production should pass, got: %v", err)
+	}
+
+	// Localhost issuer with no key → ok (dev).
+	dev := DefaultConfig()
+	dev.Server.Issuer = "http://localhost:8080"
+	dev.Admin.Enabled = true
+	dev.Admin.APIKey = ""
+	if err := dev.ValidateAdminAPIKey(); err != nil {
+		t.Errorf("empty admin api_key on localhost should pass, got: %v", err)
+	}
+}
+
+// TestValidate_OmitsAdminAPIKey confirms the shared Validate() no longer
+// enforces the admin api_key policy — that is the OSS binary's job via
+// ValidateAdminAPIKey, so a deployment fronted by external auth can reuse
+// Validate() without setting an api_key.
+func TestValidate_OmitsAdminAPIKey(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Server.Issuer = "https://auth.example.com"
+	cfg.Session.Secret = "test-secret-long-enough"
+	cfg.Session.Secure = true
+	cfg.Admin.Enabled = true
+	cfg.Admin.APIKey = ""
+	if err := cfg.Validate(); err != nil && strings.Contains(err.Error(), "admin.api_key") {
+		t.Errorf("Validate() must not enforce admin.api_key: %v", err)
+	}
+}
+
+// A unit-less AUTHPLANE_OAUTH_STATE_MAX_AGE (e.g. the seconds form "120" that
+// time.ParseDuration rejects) must be a boot failure, not a silent revert to
+// the 10m default — otherwise the security knob appears to tighten the state
+// replay window and doesn't.
+func TestEnvOAuthStateMaxAge_UnparseableIsBootError(t *testing.T) {
+	t.Setenv("AUTHPLANE_OAUTH_STATE_MAX_AGE", "120")
+	cfg := DefaultConfig()
+	if err := loadFromEnv(cfg); err == nil {
+		t.Fatal("expected a boot error for a unit-less duration, got nil (silent revert)")
+	} else if !strings.Contains(err.Error(), "AUTHPLANE_OAUTH_STATE_MAX_AGE") {
+		t.Errorf("error should name the offending env var: %v", err)
+	}
+}
+
+// A valid duration still loads.
+func TestEnvOAuthStateMaxAge_ValidDurationLoads(t *testing.T) {
+	t.Setenv("AUTHPLANE_OAUTH_STATE_MAX_AGE", "2m")
+	cfg := DefaultConfig()
+	if err := loadFromEnv(cfg); err != nil {
+		t.Fatalf("loadFromEnv: %v", err)
+	}
+	if cfg.OAuth.StateMaxAge != 2*time.Minute {
+		t.Errorf("StateMaxAge = %v, want 2m", cfg.OAuth.StateMaxAge)
+	}
+}
+
+// An explicit zero/negative (from YAML, which the strict env parse doesn't see)
+// is caught by Validate rather than silently clamped back to the default.
+func TestValidateRejectsNonPositiveOAuthStateMaxAge(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Minute} {
+		cfg := DefaultConfig()
+		cfg.OAuth.StateMaxAge = d
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("StateMaxAge=%v: expected a validation error", d)
+		}
+		if !strings.Contains(err.Error(), "oauth.state_max_age") {
+			t.Errorf("StateMaxAge=%v: error should mention oauth.state_max_age: %v", d, err)
+		}
+	}
+}
+
+// Sibling of the oauth.state_max_age hardening: a unit-less
+// AUTHPLANE_SESSION_MAX_AGE (e.g. a bare seconds value like "28800") must be a
+// boot error, not a silent revert to 24h. The middleware clamps a zero/negative
+// MaxAge up to DefaultSessionMaxAge, so a lenient revert here would be invisible
+// — an operator shortening the session for compliance would silently get 24h.
+func TestEnvSessionMaxAge_UnparseableIsBootError(t *testing.T) {
+	t.Setenv("AUTHPLANE_SESSION_MAX_AGE", "28800")
+	cfg := DefaultConfig()
+	if err := loadFromEnv(cfg); err == nil {
+		t.Fatal("expected a boot error for a unit-less duration, got nil (silent revert)")
+	} else if !strings.Contains(err.Error(), "AUTHPLANE_SESSION_MAX_AGE") {
+		t.Errorf("error should name the offending env var: %v", err)
+	}
+}
+
+func TestEnvSessionMaxAge_ValidDurationLoads(t *testing.T) {
+	t.Setenv("AUTHPLANE_SESSION_MAX_AGE", "8h")
+	cfg := DefaultConfig()
+	if err := loadFromEnv(cfg); err != nil {
+		t.Fatalf("loadFromEnv: %v", err)
+	}
+	if cfg.Session.MaxAge != 8*time.Hour {
+		t.Errorf("Session.MaxAge = %v, want 8h", cfg.Session.MaxAge)
+	}
+}
+
+// An explicit zero/negative session.max_age (from YAML, which the strict env
+// parse doesn't see) is caught by Validate rather than silently clamped to 24h.
+func TestValidateRejectsNonPositiveSessionMaxAge(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Hour} {
+		cfg := DefaultConfig()
+		cfg.Session.MaxAge = d
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("Session.MaxAge=%v: expected a validation error", d)
+		}
+		if !strings.Contains(err.Error(), "session.max_age") {
+			t.Errorf("Session.MaxAge=%v: error should mention session.max_age: %v", d, err)
+		}
+	}
+}
+
+// Zero is rejected rather than defaulted because the two readings are opposite:
+// an operator writing 0s most likely means "off", but zero does not disable the
+// lockout — it makes it engage without blocking anyone (auth_lockout) or never
+// engage at all (auth_fail_window). Defaulting would hand back fifteen minutes
+// to someone who asked for none, so the server refuses to start and names the
+// switch that does what they meant.
+func TestValidate_RejectsZeroLockoutDurations(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Config)
+		wantKey string
+	}{
+		{"zero lockout", func(c *Config) { c.RateLimit.AuthLockout = 0 }, "rate_limit.auth_lockout"},
+		{"zero window", func(c *Config) { c.RateLimit.AuthFailWindow = 0 }, "rate_limit.auth_fail_window"},
+		{"negative lockout", func(c *Config) { c.RateLimit.AuthLockout = -1 }, "rate_limit.auth_lockout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := DefaultConfig()
+			tc.mutate(c)
+
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("%s accepted, want a startup error", tc.wantKey)
+			}
+			if !strings.Contains(err.Error(), tc.wantKey) {
+				t.Errorf("error does not name the field: %v", err)
+			}
+			// The message must point at the switch that does what the operator meant.
+			if !strings.Contains(err.Error(), "auth_fail_max: 0") {
+				t.Errorf("error does not name the real off switch: %v", err)
+			}
+		})
+	}
+}
+
+// The shipped defaults must pass their own validation.
+func TestValidate_DefaultsPass(t *testing.T) {
+	if err := DefaultConfig().Validate(); err != nil {
+		t.Fatalf("DefaultConfig does not validate: %v", err)
+	}
+}
+
+// auth_fail_max: 0 is the documented way to disable the lockout, and it is what
+// validateRateLimit's own error message recommends. Zeroing the durations
+// afterwards is the natural next step, so it must not be a startup failure.
+func TestValidate_ZeroDurationsAcceptedWhenLockoutIsDisabled(t *testing.T) {
+	c := DefaultConfig()
+	c.RateLimit.AuthFailMax = 0
+	c.RateLimit.AuthLockout = 0
+	c.RateLimit.AuthFailWindow = 0
+
+	if err := c.Validate(); err != nil {
+		t.Fatalf("rejected the configuration its own error message recommends: %v", err)
+	}
+}
+
+// A positive-but-tiny cap is the same fail-open a zero duration is, just
+// quieter: the tracker would sit permanently at capacity, evicting on every new
+// identity, reported only by a log line.
+func TestValidate_RejectsTinyTrackedIdentitiesCap(t *testing.T) {
+	c := DefaultConfig()
+	c.RateLimit.MaxTrackedIdentities = 100
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("accepted max_tracked_identities: 100")
+	}
+	if !strings.Contains(err.Error(), "rate_limit.max_tracked_identities") {
+		t.Errorf("error does not name the field: %v", err)
+	}
+}
+
+// Zero means "use the built-in default" and must stay acceptable — the floor
+// applies only to a value the operator actually set.
+func TestValidate_UnsetTrackedIdentitiesCapAccepted(t *testing.T) {
+	c := DefaultConfig()
+	c.RateLimit.MaxTrackedIdentities = 0
+
+	if err := c.Validate(); err != nil {
+		t.Fatalf("rejected an unset cap: %v", err)
+	}
+}
+
+// Zero does not disable the throughput limiter, it bricks it: x/time/rate reads
+// Limit(0) as "never refill", so a source address spends its burst and is denied
+// for the process lifetime, and a zero burst denies from the first request. The
+// field was documented "0 = no limit", so an operator could have taken their
+// public API down by following the comment.
+func TestValidate_RejectsNonPositiveThroughputLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Config)
+		wantKey string
+	}{
+		{"zero rps", func(c *Config) { c.RateLimit.RequestsPerSecond = 0 }, "rate_limit.requests_per_second"},
+		{"negative rps", func(c *Config) { c.RateLimit.RequestsPerSecond = -1 }, "rate_limit.requests_per_second"},
+		{"zero burst", func(c *Config) { c.RateLimit.Burst = 0 }, "rate_limit.burst"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := DefaultConfig()
+			tc.mutate(c)
+
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("%s accepted, want a startup error", tc.wantKey)
+			}
+			if !strings.Contains(err.Error(), tc.wantKey) {
+				t.Errorf("error does not name the field: %v", err)
+			}
+			// It must name the switch that actually turns the limiter off.
+			if !strings.Contains(err.Error(), "rate_limit.enabled: false") {
+				t.Errorf("error does not name the real off switch: %v", err)
+			}
+		})
+	}
+}
+
+// With the limiter off the values are inert, so they must not block startup —
+// the same reasoning that skips the lockout durations when auth_fail_max is 0.
+func TestValidate_ThroughputLimitsIgnoredWhenDisabled(t *testing.T) {
+	c := DefaultConfig()
+	c.RateLimit.Enabled = false
+	c.RateLimit.RequestsPerSecond = 0
+	c.RateLimit.Burst = 0
+
+	if err := c.Validate(); err != nil {
+		t.Fatalf("rejected inert values on a disabled limiter: %v", err)
 	}
 }

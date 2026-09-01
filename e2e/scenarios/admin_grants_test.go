@@ -36,7 +36,7 @@ import (
 //     the admin UI uses.
 
 // adminUserGrantsList is the local mirror of dto.UserGrantsView. The
-// inner ConsentGrantView is reused from ap306_three_bound_test.go
+// inner ConsentGrantView is reused from admin_grants_helpers_test.go
 // (adminConsentGrantView) — the same package, no duplication needed.
 // adminBrokerGrantViewLocal is unique to this file because no other
 // scenario reads broker_grants over the admin wire yet.
@@ -153,7 +153,7 @@ func TestAdmin_UserGrants_ListReturnsBothShapes(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",
@@ -248,7 +248,7 @@ func TestAdmin_BrokerGrantViews_NeverLeakCredentialData(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",
@@ -575,7 +575,7 @@ func TestAdmin_RevokeBrokerGrant_NoCascade(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",

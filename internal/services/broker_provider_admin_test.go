@@ -23,7 +23,7 @@ type brokerProviderAdminTestEnv struct {
 func newBrokerProviderAdminTestEnv() *brokerProviderAdminTestEnv {
 	providers := newFakeBrokerProviderStore()
 	auditMock := &mockAuditRecorder{}
-	svc := NewBrokerProviderAdminService(providers, observability.NewNoop(), auditMock)
+	svc := NewBrokerProviderAdminService(providers, observability.NewNoop(), auditMock, noopSecretEncoder{})
 	return &brokerProviderAdminTestEnv{svc: svc, providers: providers, audit: auditMock}
 }
 
@@ -394,29 +394,36 @@ func TestBrokerProviderAdmin_List_ReturnsAll(t *testing.T) {
 
 // TestBrokerProviderAdmin_Create_RejectsRawSecretInConfigData is the
 // regression for audit finding B12: literal credential values in
-// config_data are rejected. Operators must use the *_env convention.
+// config_data are rejected. Operators must use the *_ref convention.
 func TestBrokerProviderAdmin_Create_RejectsRawSecretInConfigData(t *testing.T) {
 	env := newBrokerProviderAdminTestEnv()
 	ctx := context.Background()
 
 	cases := []struct {
-		name      string
-		configRaw string
-		shouldOK  bool
+		name        string
+		configRaw   string
+		shouldOK    bool
+		errContains string // expected substring when rejected
 	}{
 		{
-			name:      "raw_client_secret_rejected",
-			configRaw: `{"client_id":"x","client_secret":"raw-value"}`,
-			shouldOK:  false,
+			// A raw value in a ROUTED secret field (client_secret) is rejected by
+			// the env-like SecretEncoder (no inline values), not the guard.
+			name:        "raw_client_secret_rejected",
+			configRaw:   `{"client_id":"x","client_secret":"raw-value"}`,
+			shouldOK:    false,
+			errContains: "inline values",
 		},
 		{
-			name:      "raw_password_rejected",
-			configRaw: `{"client_id":"x","admin_password":"hunter2"}`,
-			shouldOK:  false,
+			// A raw value in a NON-routed key is rejected by the post-encode guard
+			// (which runs even when no secret field is provided for routing).
+			name:        "raw_password_rejected",
+			configRaw:   `{"client_id":"x","admin_password":"hunter2"}`,
+			shouldOK:    false,
+			errContains: "_ref convention",
 		},
 		{
-			name:      "client_secret_env_accepted",
-			configRaw: `{"client_id":"x","client_secret_env":"GH_CLIENT_SECRET"}`,
+			name:      "client_secret_ref_accepted",
+			configRaw: `{"client_id":"x","client_secret_ref":"GH_CLIENT_SECRET"}`,
 			shouldOK:  true,
 		},
 		{
@@ -435,9 +442,10 @@ func TestBrokerProviderAdmin_Create_RejectsRawSecretInConfigData(t *testing.T) {
 			shouldOK:  true,
 		},
 		{
-			name:      "uppercase_suffix_rejected",
-			configRaw: `{"My_SECRET":"raw"}`,
-			shouldOK:  false, // case-insensitive suffix match
+			name:        "uppercase_suffix_rejected",
+			configRaw:   `{"My_SECRET":"raw"}`,
+			shouldOK:    false, // case-insensitive suffix match
+			errContains: "_ref convention",
 		},
 		{
 			name:      "secret_validity_seconds_accepted",
@@ -445,9 +453,15 @@ func TestBrokerProviderAdmin_Create_RejectsRawSecretInConfigData(t *testing.T) {
 			shouldOK:  true, // doesn't end in _secret
 		},
 		{
-			name:      "non_string_secret_value_accepted",
-			configRaw: `{"client_secret":123}`,
-			shouldOK:  true, // rule only fires on string values
+			name:        "non_string_routed_secret_field_rejected",
+			configRaw:   `{"client_secret":123}`,
+			shouldOK:    false, // a routed secret field of the wrong JSON type is malformed input (400)
+			errContains: "expected a JSON string",
+		},
+		{
+			name:      "non_string_non_routed_key_accepted",
+			configRaw: `{"My_SECRET":123}`,
+			shouldOK:  true, // the raw-secret guard still only fires on string values for non-routed keys
 		},
 	}
 	for _, tc := range cases {
@@ -467,8 +481,8 @@ func TestBrokerProviderAdmin_Create_RejectsRawSecretInConfigData(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected rejection, got nil")
 				}
-				if !strings.Contains(err.Error(), "_env convention") {
-					t.Errorf("expected *_env-convention message, got %v", err)
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("expected error containing %q, got %v", tc.errContains, err)
 				}
 			}
 		})

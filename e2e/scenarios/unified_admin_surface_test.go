@@ -13,7 +13,7 @@ import (
 	"github.com/authplane/authserver/e2e"
 )
 
-// TestUnifiedAdminSurface_FullLifecycle covers 
+// TestUnifiedAdminSurface_FullLifecycle covers
 // end-to-end via the unified admin HTTP endpoints:
 //
 //   - POST /admin/broker-providers          ( create)
@@ -97,7 +97,7 @@ func TestUnifiedAdminSurface_FullLifecycle(t *testing.T) {
 		"protocol":     "oauth",
 		"config_data": map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",
@@ -552,7 +552,7 @@ func TestUnifiedAdminSurface_FullLifecycle(t *testing.T) {
 	// Defense-in-depth: no consent_grants row should exist for the
 	// (webApp, broker_resource_id) tuple — the consent flow keys on
 	// the actor MCP resource id, never on a Broker resource id. The
-	// check guards against a sibling sub-test (or a future 
+	// check guards against a sibling sub-test (or a future
 	// follow-up) accidentally seeding a row at this tuple.
 	//
 	// read via the /admin/users/{id}/grants endpoint instead

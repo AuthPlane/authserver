@@ -13,6 +13,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
@@ -281,21 +282,21 @@ func newFrontingFixture(t *testing.T) *frontingFixture {
 	keyProv := &mockSigningKeyProvider{key: signingKey}
 
 	issuances := &mockIssuanceStore{}
-	mintIssuer := NewMintIssuer(keyProv, issuances, teFrontingIssuer, obs)
+	mintIssuer := NewMintIssuer(keyProv, issuances, static.NewIssuerProvider(teFrontingIssuer), obs)
 
 	svc := &TokenExchangeService{
-		clients:       noopClientStore{},
-		jwksSign:      keyProv,
-		audit:         auditRec,
-		issuer:        teFrontingIssuer,
-		config:        TokenExchangeConfig{MaxChainDepth: 5, TokenExpiry: 15 * time.Minute},
-		logger:        obs.Logger,
-		tracer:        obs.Tracer,
-		metrics:       obs.Metrics,
-		registry:      registry,
-		consentGrants: consentStore,
-		mintIssuer:    mintIssuer,
-		fronting:      frontingSvc,
+		clients:        noopClientStore{},
+		jwksSign:       keyProv,
+		audit:          auditRec,
+		issuerProvider: static.NewIssuerProvider(teFrontingIssuer),
+		teConfig:       static.NewTokenExchangeConfigProvider(output.TokenExchangeConfig{MaxChainDepth: 5, TokenExpiry: 15 * time.Minute}),
+		logger:         obs.Logger,
+		tracer:         obs.Tracer,
+		metrics:        obs.Metrics,
+		registry:       registry,
+		consentGrants:  consentStore,
+		mintIssuer:     mintIssuer,
+		fronting:       frontingSvc,
 	}
 
 	return &frontingFixture{
@@ -367,7 +368,9 @@ func (f *frontingFixture) dispatchMintFronted(req input.TokenExchangeRequest, cl
 	f.t.Helper()
 	ctx, span := f.svc.tracer.Start(context.Background(), "test.dispatchMint")
 	defer span.End()
-	resp, err := f.svc.dispatchMint(ctx, span, time.Now(), req, claims, target)
+	issuer, _ := f.svc.issuerProvider.Issuer(ctx)
+	teCfg, _ := f.svc.teConfig.Config(ctx)
+	resp, err := f.svc.dispatchMint(ctx, span, time.Now(), req, issuer, claims, target, teCfg)
 	if err != nil || resp == nil {
 		return resp, nil, err
 	}
@@ -1379,15 +1382,52 @@ func TestDispatchFrontedBroker_Audit_DenialEmitsDeniedReason(t *testing.T) {
 		t.Fatal("expected denial error, got nil")
 	}
 
+	// A denial must be recorded as a denial. This emission previously used
+	// ActionTokenExchanged — the success action — so "token.exchanged" did not
+	// mean a token had been exchanged, and any consumer filtering on it counted
+	// denials as successes.
 	events := f.auditRec.take()
 	found := false
 	for _, ev := range events {
-		if ev.Action == audit.ActionTokenExchanged &&
+		if ev.Action == audit.ActionTokenExchanged {
+			t.Errorf("denial emitted the success action %q: %s", ev.Action, ev.Detail)
+		}
+		if ev.Action == audit.ActionTokenExchangeDenied &&
 			strings.Contains(ev.Detail, "denied_reason=upstream_connection_missing") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("no ActionTokenExchanged audit event with denied_reason=upstream_connection_missing; got %d events", len(events))
+		t.Errorf("no ActionTokenExchangeDenied audit event with denied_reason=upstream_connection_missing; got %d events", len(events))
+	}
+}
+
+// TestDispatchFrontedBroker_Audit_DenialEmitsExactlyOneEvent pins the other half
+// of the fix: the denial used to emit two rows — a bare token.exchange_denied
+// from recordDenied plus the rich (mislabelled) dispatch-site row. One denial is
+// one event.
+func TestDispatchFrontedBroker_Audit_DenialEmitsExactlyOneEvent(t *testing.T) {
+	f := stdBrokerFixture(t)
+	f.seedFrontingLink(frSourceSlug, frBrokerTargetSlug, resource.ScopeMap{
+		"tool:list": {"readonly"},
+	})
+
+	subj := subjectClaimsForFronting("tool:list", frAgentID, []string{frSourceURI})
+	if _, err := f.dispatchBrokerFronted(input.TokenExchangeRequest{
+		ClientID: frAgentID,
+		Resource: frBrokerTargetSlug,
+		Scope:    "readonly",
+	}, subj); err == nil {
+		t.Fatal("expected denial error, got nil")
+	}
+
+	var denials int
+	for _, ev := range f.auditRec.take() {
+		if ev.Action == audit.ActionTokenExchangeDenied {
+			denials++
+		}
+	}
+	if denials != 1 {
+		t.Errorf("denial emitted %d token.exchange_denied events, want exactly 1", denials)
 	}
 }

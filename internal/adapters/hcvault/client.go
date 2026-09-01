@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -87,8 +88,23 @@ func NewClient(ctx context.Context, cfg ClientConfig, obs *observability.Provide
 
 	renewCtx, cancel := context.WithCancel(context.Background())
 
+	// No Transport: ssrf.NewSafeTransport() is for clients that dial third
+	// parties on the public internet. It refuses 10/8, 172.16/12, 192.168/16 and
+	// loopback, which is where Vault lives (compose bridge, Kubernetes
+	// ClusterIP). With it installed, /.well-known/jwks.json and /oauth/token
+	// return 500 while the container still reports healthy: the healthcheck
+	// never touches Vault and a static-token config performs no login at boot.
+	// The address is operator configuration, not request input, so there is no
+	// third party for the guard to stop.
+	//
+	// CheckRedirect: vaultRedirectPolicy rather than http.ErrUseLastResponse,
+	// because Vault itself redirects. An HA standby answers 307 pointing at the
+	// active node's api_addr when request forwarding is off or failing, and
+	// every issued token is a Vault round trip, so refusing that hop would turn
+	// a degraded-but-serving cluster into 500s on /oauth/token. One hop and
+	// nothing further; see vaultRedirectPolicy.
 	c := &Client{
-		httpClient: &http.Client{Timeout: cfg.Timeout},
+		httpClient: &http.Client{Timeout: cfg.Timeout, CheckRedirect: vaultRedirectPolicy},
 		addr:       cfg.Address,
 		mount:      cfg.Mount,
 		token:      cfg.Token,
@@ -398,6 +414,23 @@ func (c *Client) Decrypt(ctx context.Context, keyName, ciphertext, derivedContex
 // request sends an authenticated request to Vault.
 func (c *Client) request(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
 	return c.rawRequest(ctx, method, path, body, c.getToken())
+}
+
+// vaultRedirectPolicy mirrors hashicorp/vault/api: follow at most one
+// redirect — an HA standby's 307 to the active node's api_addr — and never
+// downgrade https to http. Go forwards X-Vault-Token and replays the request
+// body across a redirect; for appRoleLogin, which goes through the same
+// client, that body is role_id and secret_id — a long-lived credential, not a
+// renewable token. Each hop beyond the first is a copy of that sent to a host
+// the operator never configured.
+func vaultRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) > 1 {
+		return http.ErrUseLastResponse
+	}
+	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return errors.New("vault redirect would downgrade https to http")
+	}
+	return nil
 }
 
 // rawRequest sends a request to Vault with an explicit token.

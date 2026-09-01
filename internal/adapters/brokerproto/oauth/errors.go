@@ -15,6 +15,6 @@ var errUpstreamHTTP = errors.New("oauth upstream returned non-2xx status")
 var errUpstreamMissingAccessToken = errors.New("oauth upstream response missing access_token")
 
 // errSecretLookup is returned when the SecretResolver cannot resolve the
-// configured client_secret_env. Surfaced as its own sentinel so wiring
+// configured client_secret_ref. Surfaced as its own sentinel so wiring
 // code can distinguish missing-secret-config from upstream failures.
 var errSecretLookup = errors.New("oauth client secret lookup failed")

@@ -25,6 +25,12 @@ type Family struct {
 	Status    FamilyStatus
 	CreatedAt time.Time
 	RevokedAt *time.Time
+
+	// AuthSessionID is the AuthSession the family was born from. Empty when
+	// unknown — rows created before migration 003 have no link, and nothing
+	// backfills them. The code-reuse revocation path reads it to find which
+	// family a replayed authorization code produced.
+	AuthSessionID string
 }
 
 // IsActive reports whether the family is active (not revoked).

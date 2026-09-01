@@ -16,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/client"
@@ -24,6 +25,7 @@ import (
 	"github.com/authplane/authserver/internal/domain/xaa"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/services"
 	"github.com/authplane/authserver/testdata"
 )
@@ -40,6 +42,18 @@ type jwtBearerTestSetup struct {
 }
 
 func newJWTBearerTestSetup(t *testing.T) *jwtBearerTestSetup {
+	return newJWTBearerTestSetupWithMode(t, "")
+}
+
+func newJWTBearerTestSetupWithMode(t *testing.T, subjectMode string) *jwtBearerTestSetup {
+	return newJWTBearerTestSetupWithXAA(t, static.NewXAAConfigProvider(output.XAAConfig{
+		TokenExpiry:     15 * time.Minute,
+		MaxAssertionAge: 5 * time.Minute,
+		SubjectMode:     subjectMode,
+	}))
+}
+
+func newJWTBearerTestSetupWithXAA(t *testing.T, xaaConfig output.XAAConfigProvider) *jwtBearerTestSetup {
 	t.Helper()
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
@@ -81,7 +95,7 @@ func newJWTBearerTestSetup(t *testing.T) *jwtBearerTestSetup {
 	if err != nil {
 		t.Fatalf("keyfile: %v", err)
 	}
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
 	resources := []services.ResourceInfo{
@@ -95,7 +109,8 @@ func newJWTBearerTestSetup(t *testing.T) *jwtBearerTestSetup {
 	svc := services.NewJWTBearerService(
 		stores.IDP, mockCache, stores.AssertionJTI,
 		stores.Client, stores.MachineToken, jwksSvc,
-		jwtBearerIssuer, 15*time.Minute, 5*time.Minute,
+		staticIssuerForTest(jwtBearerIssuer),
+		xaaConfig,
 		obs, auditSvc,
 		services.NewStaticResourceLister(resources),
 	)
@@ -199,6 +214,29 @@ func (s *jwtBearerTestSetup) validAssertion(clientID string) token.IdentityAsser
 		Expiry:   now + 300,
 		IssuedAt: now,
 		Scope:    "read write",
+	}
+}
+
+// failingXAAConfigProvider always errors, to assert jwt-bearer (XAA) issuance
+// fails closed on a config-resolution error rather than proceeding.
+type failingXAAConfigProvider struct{ err error }
+
+func (p failingXAAConfigProvider) Config(context.Context) (output.XAAConfig, error) {
+	return output.XAAConfig{}, p.err
+}
+
+func TestJWTBearerGrant_ConfigError_FailsClosed(t *testing.T) {
+	wantErr := errors.New("xaa config unavailable")
+	setup := newJWTBearerTestSetupWithXAA(t, failingXAAConfigProvider{err: wantErr})
+
+	// XAA config resolves at the top of GrantJWTBearer, before any assertion
+	// validation, so an empty request still reaches the fail-closed path.
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{})
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected error wrapping %v on config failure, got %v", wantErr, err)
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response on config failure, got %+v", resp)
 	}
 }
 
@@ -522,7 +560,7 @@ func TestJWTBearerGrant_WithResource(t *testing.T) {
 // newJWTBearerWithPolicySetup creates a test setup with policy + subject mapping enabled.
 func newJWTBearerWithPolicySetup(t *testing.T, subjectMode string) *jwtBearerTestSetup {
 	t.Helper()
-	setup := newJWTBearerTestSetup(t)
+	setup := newJWTBearerTestSetupWithMode(t, subjectMode)
 	obs := testObs()
 
 	policySvc := services.NewXAAPolicyService(
@@ -532,7 +570,7 @@ func newJWTBearerWithPolicySetup(t *testing.T, subjectMode string) *jwtBearerTes
 	mappingSvc := services.NewSubjectMappingService(
 		setup.h.Stores.SubjectMapping, setup.h.Stores.IDP, obs,
 	)
-	setup.svc.WithPolicy(policySvc, mappingSvc, subjectMode)
+	setup.svc.WithPolicy(policySvc, mappingSvc)
 	return setup
 }
 
@@ -1109,5 +1147,278 @@ func TestJWTBearerGrant_PolicyResourceRestriction_RequestMatchesPolicy(t *testin
 	}
 	if resp.AccessToken == "" {
 		t.Error("access_token is empty")
+	}
+}
+
+// --- xaa.require_resource ---
+
+// newJWTBearerRequireResourceSetup mirrors the default setup with
+// require_resource turned on, so the flag is the only variable under test.
+func newJWTBearerRequireResourceSetup(t *testing.T) *jwtBearerTestSetup {
+	t.Helper()
+	return newJWTBearerTestSetupWithXAA(t, static.NewXAAConfigProvider(output.XAAConfig{
+		TokenExpiry:     15 * time.Minute,
+		MaxAssertionAge: 5 * time.Minute,
+		RequireResource: true,
+	}))
+}
+
+// audienceOf reads the aud claim off an issued access token.
+func audienceOf(t *testing.T, accessToken string) []string {
+	t.Helper()
+	tok, err := jwt.ParseSigned(accessToken, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatalf("parse JWT: %v", err)
+	}
+	var rawClaims map[string]json.RawMessage
+	if err := tok.UnsafeClaimsWithoutVerification(&rawClaims); err != nil {
+		t.Fatalf("unsafe claims: %v", err)
+	}
+	var aud []string
+	if err := json.Unmarshal(rawClaims["aud"], &aud); err != nil {
+		t.Fatalf("parse aud: %v", err)
+	}
+	return aud
+}
+
+// TestJWTBearerGrant_NoResource_DefaultMintsIssuerAudience pins the default
+// (require_resource=false): an exchange that names no resource on either the
+// assertion or the request still succeeds, and the token falls back to the
+// issuer as its audience. Turning the flag on must leave this untouched.
+func TestJWTBearerGrant_NoResource_DefaultMintsIssuerAudience(t *testing.T) {
+	setup := newJWTBearerTestSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "read write")
+
+	assertion := setup.validAssertion(c.ID)
+	assertion.Resource = ""
+	raw := setup.signTestIDJAG(t, assertion)
+
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+	})
+	if err != nil {
+		t.Fatalf("grant: %v (default must stay permissive)", err)
+	}
+	if aud := audienceOf(t, resp.AccessToken); len(aud) != 1 || aud[0] != jwtBearerIssuer {
+		t.Errorf("aud = %v, want [%s]", aud, jwtBearerIssuer)
+	}
+}
+
+// TestJWTBearerGrant_RequireResource_NoResourceRejected is the point of the
+// flag: with it on, the issuer-audience fallback is unreachable because the
+// exchange is refused before a token is minted.
+func TestJWTBearerGrant_RequireResource_NoResourceRejected(t *testing.T) {
+	setup := newJWTBearerRequireResourceSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "read write")
+
+	assertion := setup.validAssertion(c.ID)
+	assertion.Resource = ""
+	raw := setup.signTestIDJAG(t, assertion)
+
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+	})
+	if err == nil || !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("grant err = %v, want ErrInvalidTarget", err)
+	}
+	if resp != nil {
+		t.Errorf("expected nil response, got %+v", resp)
+	}
+}
+
+// TestJWTBearerGrant_RequireResource_RefusalLeavesAssertionUsable — the
+// refusal runs before the jti is consumed, so the correction the error asks
+// for actually works: the client resends the same assertion with a resource
+// and gets a token. Without this ordering the retry returns ErrAssertionReplay
+// and every attempt costs a fresh IdP round-trip.
+func TestJWTBearerGrant_RequireResource_RefusalLeavesAssertionUsable(t *testing.T) {
+	setup := newJWTBearerRequireResourceSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "read write")
+
+	assertion := setup.validAssertion(c.ID)
+	assertion.Resource = ""
+	raw := setup.signTestIDJAG(t, assertion)
+
+	_, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+	})
+	if err == nil || !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("first grant err = %v, want ErrInvalidTarget", err)
+	}
+
+	// Same assertion, corrected request.
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+		Resource:     "https://api.example.com",
+	})
+	if err != nil {
+		t.Fatalf("corrective retry: %v (the refusal must not spend the assertion)", err)
+	}
+	if aud := audienceOf(t, resp.AccessToken); len(aud) != 1 || aud[0] != "https://api.example.com" {
+		t.Errorf("aud = %v, want [https://api.example.com]", aud)
+	}
+}
+
+// TestJWTBearerGrant_UnknownResourceSpendsAssertion pins the other side of
+// the jti boundary. Refusals that read server state — here the resource
+// catalog — run after the assertion is spent, on purpose: leaving it usable
+// would let a captured assertion be resent with one candidate URI after
+// another until the catalog is enumerated. Losing the retry is the price of
+// closing that oracle, so this asymmetry is deliberate, not an oversight.
+func TestJWTBearerGrant_UnknownResourceSpendsAssertion(t *testing.T) {
+	setup := newJWTBearerTestSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "read write")
+
+	assertion := setup.validAssertion(c.ID)
+	raw := setup.signTestIDJAG(t, assertion)
+
+	_, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+		Resource:     "https://not-registered.example",
+	})
+	if err == nil || !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("grant err = %v, want ErrInvalidScope for an unknown resource", err)
+	}
+
+	// Same assertion, this time naming a registered resource: the catalog
+	// probe already spent it.
+	_, err = setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+		Resource:     "https://api.example.com",
+	})
+	if !errors.Is(err, domain.ErrAssertionReplay) {
+		t.Fatalf("retry err = %v, want ErrAssertionReplay — a catalog probe must not be repeatable", err)
+	}
+}
+
+// TestJWTBearerGrant_ScopeCeilingSpendsAssertion — same boundary for the
+// scope ceiling, which reads the client's registered scope.
+func TestJWTBearerGrant_ScopeCeilingSpendsAssertion(t *testing.T) {
+	setup := newJWTBearerTestSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "read")
+
+	assertion := setup.validAssertion(c.ID)
+	raw := setup.signTestIDJAG(t, assertion)
+
+	_, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "write",
+	})
+	if err == nil || !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("grant err = %v, want ErrInvalidScope", err)
+	}
+
+	_, err = setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+	})
+	if !errors.Is(err, domain.ErrAssertionReplay) {
+		t.Fatalf("retry err = %v, want ErrAssertionReplay — a scope probe must not be repeatable", err)
+	}
+}
+
+// TestJWTBearerGrant_ClientMismatchLeavesAssertionUsable — an assertion
+// presented against the wrong client is refused before the jti is consumed,
+// so it cannot be used to burn the legitimate client's assertion.
+func TestJWTBearerGrant_ClientMismatchLeavesAssertionUsable(t *testing.T) {
+	setup := newJWTBearerTestSetup(t)
+	victim, victimSecret := setup.createJWTBearerClient(t, "read write")
+	attacker, attackerSecret := setup.createJWTBearerClient(t, "read write")
+
+	// Assertion minted for the victim client.
+	assertion := setup.validAssertion(victim.ID)
+	raw := setup.signTestIDJAG(t, assertion)
+
+	_, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     attacker.ID,
+		ClientSecret: attackerSecret,
+		Scope:        "read",
+	})
+	if err == nil || !errors.Is(err, domain.ErrAssertionClientMismatch) {
+		t.Fatalf("mismatched grant err = %v, want ErrAssertionClientMismatch", err)
+	}
+
+	// The rightful client can still use it.
+	if _, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     victim.ID,
+		ClientSecret: victimSecret,
+		Scope:        "read",
+	}); err != nil {
+		t.Fatalf("victim grant: %v (a mismatched presentation must not spend the assertion)", err)
+	}
+}
+
+// TestJWTBearerGrant_RequireResource_AssertionResourceAccepted — the resource
+// claim on the assertion satisfies the requirement.
+func TestJWTBearerGrant_RequireResource_AssertionResourceAccepted(t *testing.T) {
+	setup := newJWTBearerRequireResourceSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "read write")
+
+	assertion := setup.validAssertion(c.ID)
+	assertion.Resource = "https://api.example.com"
+	raw := setup.signTestIDJAG(t, assertion)
+
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+	})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if aud := audienceOf(t, resp.AccessToken); len(aud) != 1 || aud[0] != "https://api.example.com" {
+		t.Errorf("aud = %v, want [https://api.example.com]", aud)
+	}
+}
+
+// TestJWTBearerGrant_RequireResource_RequestResourceAccepted — the resource
+// parameter on the token request (RFC 8707) satisfies the requirement just as
+// the assertion claim does. What the flag forbids is a token with no resource
+// at all, not a particular way of naming one.
+func TestJWTBearerGrant_RequireResource_RequestResourceAccepted(t *testing.T) {
+	setup := newJWTBearerRequireResourceSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "read write")
+
+	assertion := setup.validAssertion(c.ID)
+	assertion.Resource = ""
+	raw := setup.signTestIDJAG(t, assertion)
+
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion:    raw,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+		Resource:     "https://api.example.com",
+	})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if aud := audienceOf(t, resp.AccessToken); len(aud) != 1 || aud[0] != "https://api.example.com" {
+		t.Errorf("aud = %v, want [https://api.example.com]", aud)
 	}
 }

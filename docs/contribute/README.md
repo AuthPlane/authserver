@@ -1,7 +1,7 @@
 # Contribute
 
 **For:** Developers extending authserver — adding upstream providers, new grant types, transports, adapters; fixing bugs; shipping releases.
-**Prereqs:** Go 1.26.3+ (matches `go.mod`), Node.js 22+ (admin UI build only), Docker, `golangci-lint v2.11+`. See [running-tests.md](running-tests.md) for the canonical matrix.
+**Prereqs:** Go 1.26.6+ (matches `go.mod`), Node.js 22+ (admin UI build only), Docker, `golangci-lint v2.11+`. See [running-tests.md](running-tests.md) for the canonical matrix.
 **Shared setup:** `make ci-local` is the floor for "ready to push" — runs build, lint, import-boundary check, OSS-leak check, unit tests, govulncheck.
 
 ## Reading order

@@ -28,7 +28,7 @@ xaa:
   token_expiry: 1h         # access-token TTL
   max_assertion_age: 5m    # max age of the IdP assertion (iat → now)
   subject_mode: auto_map   # or "strict" — see XAA recipe
-  require_resource: false
+  require_resource: false  # true → reject exchanges that name no resource
   jwks_cache_ttl: 1h
 ```
 
@@ -143,7 +143,8 @@ Denial reasons from `internal/services/jwt_bearer.go` (logged as audit events `j
 | `replay` | The same `jti` was used twice | Mint a fresh assertion with a unique `jti` — they are single-use. |
 | `client_mismatch` | Assertion `client_id` claim does not equal the authenticated `client_id` | Set the assertion `client_id` to the Authplane client_id from step 3. |
 | `invalid_scope` | Intersection of (client scope, assertion scope, request scope) is empty | Patch the client's `scope` to include the requested scope. The client scope is the ceiling for the empty case. |
-| `invalid_resource` | The `resource` claim/parameter is not registered in Authplane, or assertion and request resources disagree | Register the resource (`POST /admin/resources`) or align the assertion to the registered URI. |
+| `invalid_resource` | The `resource` claim/parameter is not registered in Authplane, or assertion and request resources disagree | Register the resource (`POST /admin/resources`) or align the assertion to the registered URI. An unregistered resource is detected after the `jti` is consumed, so mint a fresh assertion for the retry. |
+| `resource_required` | `xaa.require_resource: true` and the exchange named no resource — neither a `resource` claim on the assertion nor a `resource` parameter on the request. Returned as `400 invalid_target`. | Send `resource=<registered URI>` on the token request, or have the IdP mint the assertion with a `resource` claim — either satisfies the setting. The refused assertion is not spent — resending it with the resource added works. |
 | `jwks_fetch_failed` | Authplane can't reach the IdP's JWKS URI | Confirm network reachability; force refresh via `POST /admin/idps/{id}/refresh-keys`. |
 | `assertion expired` / `clock skew` | `exp` past, or `iat` older than `max_assertion_age` | Reduce assertion lifetime to a few minutes; sync clocks. |
 

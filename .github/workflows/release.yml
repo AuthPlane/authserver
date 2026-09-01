@@ -7,9 +7,8 @@ on:
 
 permissions:
   contents: write
-
-env:
-  GO_VERSION: "1.26"
+  id-token: write   # keyless cosign signing (OIDC -> Fulcio/Rekor)
+  packages: write   # publish the Helm chart to ghcr.io
 
 jobs:
   release:
@@ -22,7 +21,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v4
@@ -33,9 +32,74 @@ jobs:
       - name: Run tests before release
         run: make test
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install syft (SBOM generator)
+        uses: anchore/sbom-action/download-syft@v0
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  chart:
+    name: Publish Helm chart
+    runs-on: ubuntu-latest
+    # Independent of the binary release: a chart push must not be able to
+    # abort goreleaser, and a goreleaser failure should not leave a chart
+    # published for artifacts that do not exist. Ordering it after `release`
+    # gives the second property; `if: success()` is implied by `needs`.
+    needs: release
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: azure/setup-helm@v4
+
+      - name: Read chart version
+        id: chart
+        run: |
+          # The chart carries its OWN version, independent of appVersion —
+          # a release that does not touch charts/ ships the same chart.
+          VERSION=$(grep -m1 '^version:' charts/authplane/Chart.yaml | awk '{print $2}')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "chart version: $VERSION"
+
+      - name: Log in to ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Skip if this chart version is already published
+        id: exists
+        run: |
+          # Republishing an existing chart version would silently change what
+          # `helm pull` returns for a version someone has already deployed.
+          # A patch release that did not touch charts/ is the normal case here,
+          # so this is a notice and not a failure.
+          set +e
+          helm show chart "oci://ghcr.io/authplane/charts/authplane" \
+            --version "${{ steps.chart.outputs.version }}" >/dev/null 2>&1
+          if [ $? -eq 0 ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::chart ${{ steps.chart.outputs.version }} is already published — skipping. Bump charts/authplane/Chart.yaml version to publish a new one."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package and push
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          helm package charts/authplane --destination dist
+          helm push "dist/authplane-${{ steps.chart.outputs.version }}.tgz" \
+            oci://ghcr.io/authplane/charts
+
+      - name: Verify it resolves
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          # Prove the push is pullable before the job goes green — a chart that
+          # cannot be resolved is worse than one that was never pushed.
+          helm show chart "oci://ghcr.io/authplane/charts/authplane" \
+            --version "${{ steps.chart.outputs.version }}"

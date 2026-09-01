@@ -52,6 +52,10 @@ services:
       AUTHPLANE_DATA_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       AUTHPLANE_DPOP_ENABLED: "false"
       AUTHPLANE_CLIENT_CREDENTIALS_ENABLED: "true"
+      # Token exchange on + self-exchange allowed (mint a subject token via
+      # client_credentials, exchange it back as the same client).
+      AUTHPLANE_TOKEN_EXCHANGE_ENABLED: "true"
+      AUTHPLANE_TOKEN_EXCHANGE_ALLOW_SELF_EXCHANGE: "true"
       # Per-IP rate limiter OFF — defaults ON at 100 rps/IP, which throttles all
       # load from k6's single source IP (429s) and caps the measurement.
       AUTHPLANE_RATE_LIMIT_ENABLED: "false"

@@ -18,13 +18,15 @@ import (
 // Coverage:
 //   - AdminCreateBrokerProvider + AdminGetBrokerProviderBySlug
 //   - AdminCreateResource (mint + broker variants — broker uses the
+//
 // broker_provider_slug shortcut so we never need to thread
-//     a UUID)
-//   - AdminGetResourceBySlug
-//   - AdminAddAllowedClient + AdminListAllowedClients +
-//     AdminRemoveAllowedClient (idempotency check on each)
-//   - AdminAddAllowedReturnURL + AdminListAllowedReturnURLs +
-//     AdminRemoveAllowedReturnURL (broker-only)
+//
+//	  a UUID)
+//	- AdminGetResourceBySlug
+//	- AdminAddAllowedClient + AdminListAllowedClients +
+//	  AdminRemoveAllowedClient (idempotency check on each)
+//	- AdminAddAllowedReturnURL + AdminListAllowedReturnURLs +
+//	  AdminRemoveAllowedReturnURL (broker-only)
 func TestAdminHelpers_Smoke(t *testing.T) {
 	h, _ := e2e.SetupE2E(t, e2e.HarnessConfig{
 		EnableAdminAPI: true,
@@ -37,7 +39,7 @@ func TestAdminHelpers_Smoke(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "smoke-client",
-			"client_secret_env": "CONNECTOR_SMOKE_SECRET",
+			"client_secret_ref": "CONNECTOR_SMOKE_SECRET",
 		},
 	})
 	if bpID == "" {

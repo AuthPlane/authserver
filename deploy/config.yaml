@@ -111,7 +111,7 @@ observability:
 #     protocol: oauth
 #     config_data:
 #       client_id: "Iv1.test"
-#       client_secret_env: "CONNECTOR_GITHUB_SECRET"
+#       client_secret_ref: "CONNECTOR_GITHUB_SECRET"
 #       authorize_url: "https://github.com/login/oauth/authorize"
 #       token_url: "https://github.com/login/oauth/access_token"
 #

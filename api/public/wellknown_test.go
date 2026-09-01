@@ -5,7 +5,6 @@ package public_test
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,13 +12,20 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	apipublic "github.com/authplane/authserver/api/public"
-	"github.com/authplane/authserver/api/public/wellknown"
 	"github.com/authplane/authserver/internal/adapters/keyfile"
 	"github.com/authplane/authserver/internal/config"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/services"
 )
+
+// The AS metadata discovery document is exercised by the wellknown package's
+// golden test (api/public/wellknown/as_metadata_golden_test.go, byte-identity
+// across boot configs) and the ASMetadataService unit tests
+// (internal/services/as_metadata_test.go, assembly + degradation + scope
+// dedup), plus the e2e scenarios. The server-level tests here cover JWKS,
+// health, metrics, and shutdown — which is why they no longer wire an
+// ASMetadata port (discovery routes are simply not registered for them).
 
 func testObs() *observability.Provider {
 	return observability.NewNoop()
@@ -32,14 +38,6 @@ func testServerCfg() config.ServerConfig {
 	}
 }
 
-func testResourceServers() wellknown.ResourceListerFunc {
-	return func() []wellknown.ResourceEntry {
-		return []wellknown.ResourceEntry{
-			{URI: "https://mcp.example.com", Scopes: []string{"tools/query_database", "tools/create_ticket"}},
-		}
-	}
-}
-
 func newTestJWKSService(t *testing.T) *services.JWKSService {
 	t.Helper()
 	dir := t.TempDir()
@@ -48,7 +46,7 @@ func newTestJWKSService(t *testing.T) *services.JWKSService {
 	if err != nil {
 		t.Fatalf("create keyfile store: %v", err)
 	}
-	return services.NewJWKSService(store, "ES256", obs)
+	return services.NewJWKSService(store, nil, "ES256", obs)
 }
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -56,13 +54,13 @@ func newTestServer(t *testing.T) *httptest.Server {
 	jwksSvc := newTestJWKSService(t)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
 	}, testObs())
 
-	// Use httptest to test the handler directly.
-	// We need to access the internal handler; use NewServer and extract the mux.
-	// Actually, just create a real httptest server.
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -121,111 +119,6 @@ func TestJWKS_CacheControl(t *testing.T) {
 	}
 }
 
-// --- AS Metadata Endpoint Tests ---
-
-func TestASMetadata_AllRequiredFields(t *testing.T) {
-	ts := newTestServer(t)
-
-	resp, err := http.Get(ts.URL + "/.well-known/oauth-authorization-server")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d, want 200", resp.StatusCode)
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	var meta map[string]any
-	if err := json.Unmarshal(body, &meta); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	requiredFields := []string{
-		"issuer",
-		"authorization_endpoint",
-		"token_endpoint",
-		"registration_endpoint",
-		"revocation_endpoint",
-		"jwks_uri",
-		"response_types_supported",
-		"grant_types_supported",
-		"token_endpoint_auth_methods_supported",
-		"code_challenge_methods_supported",
-		"scopes_supported",
-		"resource_indicators_supported",
-	}
-
-	for _, field := range requiredFields {
-		if _, ok := meta[field]; !ok {
-			t.Errorf("missing required field: %s", field)
-		}
-	}
-
-	// Verify correct values.
-	if meta["issuer"] != "https://auth.example.com" {
-		t.Errorf("issuer: got %v", meta["issuer"])
-	}
-	if meta["authorization_endpoint"] != "https://auth.example.com/oauth/authorize" {
-		t.Errorf("authorization_endpoint: got %v", meta["authorization_endpoint"])
-	}
-	if meta["token_endpoint"] != "https://auth.example.com/oauth/token" {
-		t.Errorf("token_endpoint: got %v", meta["token_endpoint"])
-	}
-	if meta["jwks_uri"] != "https://auth.example.com/.well-known/jwks.json" {
-		t.Errorf("jwks_uri: got %v", meta["jwks_uri"])
-	}
-
-	// resource_indicators_supported must be true.
-	if meta["resource_indicators_supported"] != true {
-		t.Errorf("resource_indicators_supported: got %v", meta["resource_indicators_supported"])
-	}
-
-	// code_challenge_methods_supported must be ["S256"].
-	methods, ok := meta["code_challenge_methods_supported"].([]any)
-	if !ok || len(methods) != 1 || methods[0] != "S256" {
-		t.Errorf("code_challenge_methods_supported: got %v", meta["code_challenge_methods_supported"])
-	}
-}
-
-// Matrix: 6.14 — AS metadata must include Cache-Control header
-func TestASMetadata_CacheControl(t *testing.T) {
-	ts := newTestServer(t)
-
-	resp, err := http.Get(ts.URL + "/.well-known/oauth-authorization-server")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	resp.Body.Close()
-
-	cc := resp.Header.Get("Cache-Control")
-	if cc != "public, max-age=3600" {
-		t.Errorf("Cache-Control: got %q, want %q", cc, "public, max-age=3600")
-	}
-}
-
-func TestASMetadata_ScopesFromResourceServers(t *testing.T) {
-	ts := newTestServer(t)
-
-	resp, err := http.Get(ts.URL + "/.well-known/oauth-authorization-server")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var meta map[string]any
-	json.NewDecoder(resp.Body).Decode(&meta)
-
-	scopes, ok := meta["scopes_supported"].([]any)
-	if !ok {
-		t.Fatal("scopes_supported not an array")
-	}
-	if len(scopes) != 2 {
-		t.Fatalf("expected 2 scopes, got %d", len(scopes))
-	}
-}
-
 // --- JWT Round-Trip via JWKS Endpoint ---
 
 func TestJWKS_JWTRoundTrip(t *testing.T) {
@@ -236,11 +129,14 @@ func TestJWKS_JWTRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	jwksSvc := services.NewJWKSService(store, "ES256", obs)
+	jwksSvc := services.NewJWKSService(store, nil, "ES256", obs)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -361,9 +257,12 @@ func TestHealth_DBDown_Returns503(t *testing.T) {
 	jwksSvc := newTestJWKSService(t)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
-		Health:          &failingHealthChecker{},
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		Health:                &failingHealthChecker{},
 	}, testObs())
 
 	ts := httptest.NewServer(srv.Handler())
@@ -417,11 +316,14 @@ func TestMetrics_NotExposedOnPublicServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create keyfile store: %v", err)
 	}
-	jwksSvc := services.NewJWKSService(store, "ES256", obs)
+	jwksSvc := services.NewJWKSService(store, nil, "ES256", obs)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -444,8 +346,11 @@ func TestGracefulShutdown(t *testing.T) {
 	jwksSvc := newTestJWKSService(t)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
 	}, testObs())
 
 	ts := httptest.NewServer(srv.Handler())
@@ -472,139 +377,4 @@ func TestGracefulShutdown(t *testing.T) {
 	// The server uses http.Server.Shutdown() which drains in-flight requests.
 	// httptest.Close() calls this internally. The fact that our pre-shutdown
 	// request completed with 200 and post-shutdown fails proves graceful shutdown works.
-}
-
-// --- Resource Server DB scope discovery tests ---
-// These verify that AS metadata discovers scopes from the resource_servers DB
-// table (populated by Admin API).
-
-func staticResourceLister(entries []wellknown.ResourceEntry) wellknown.ResourceListerFunc {
-	return func() []wellknown.ResourceEntry { return entries }
-}
-
-func TestASMetadata_ResourceServerDBScopes_Included(t *testing.T) {
-	jwksSvc := newTestJWKSService(t)
-
-	// No static config, no scopes table — only resource servers from DB.
-	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS: jwksSvc,
-		ResourceServers: staticResourceLister([]wellknown.ResourceEntry{
-			{URI: "https://mcp.example.com", Scopes: []string{"tools/query", "tools/create"}},
-		}),
-	}, testObs())
-
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/.well-known/oauth-authorization-server")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var meta map[string]any
-	json.NewDecoder(resp.Body).Decode(&meta)
-
-	scopes, ok := meta["scopes_supported"].([]any)
-	if !ok || scopes == nil {
-		t.Fatalf("scopes_supported should be a non-null array, got: %v", meta["scopes_supported"])
-	}
-	if len(scopes) != 2 {
-		t.Fatalf("expected 2 scopes from resource servers, got %d: %v", len(scopes), scopes)
-	}
-
-	scopeSet := make(map[string]bool)
-	for _, s := range scopes {
-		scopeSet[s.(string)] = true
-	}
-	if !scopeSet["tools/query"] || !scopeSet["tools/create"] {
-		t.Errorf("resource server scopes not found in scopes_supported: %v", scopes)
-	}
-}
-
-func TestASMetadata_MergesMultipleResourceServers(t *testing.T) {
-	jwksSvc := newTestJWKSService(t)
-
-	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS: jwksSvc,
-		ResourceServers: staticResourceLister([]wellknown.ResourceEntry{
-			{URI: "https://mcp1.example.com", Scopes: []string{"tools/query"}},
-			{URI: "https://mcp2.example.com", Scopes: []string{"tools/create"}},
-		}),
-	}, testObs())
-
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/.well-known/oauth-authorization-server")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var meta map[string]any
-	json.NewDecoder(resp.Body).Decode(&meta)
-
-	scopes, ok := meta["scopes_supported"].([]any)
-	if !ok {
-		t.Fatal("scopes_supported should be an array")
-	}
-	if len(scopes) != 2 {
-		t.Fatalf("expected 2 scopes from 2 resource servers, got %d: %v", len(scopes), scopes)
-	}
-
-	scopeSet := make(map[string]bool)
-	for _, s := range scopes {
-		scopeSet[s.(string)] = true
-	}
-	if !scopeSet["tools/query"] {
-		t.Error("missing scope from first resource server")
-	}
-	if !scopeSet["tools/create"] {
-		t.Error("missing scope from second resource server")
-	}
-}
-
-func TestASMetadata_DeduplicatesScopesAcrossResourceServers(t *testing.T) {
-	jwksSvc := newTestJWKSService(t)
-
-	// Two resource servers with overlapping scopes — duplicates must appear only once.
-	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS: jwksSvc,
-		ResourceServers: staticResourceLister([]wellknown.ResourceEntry{
-			{URI: "https://mcp1.example.com", Scopes: []string{"tools/query", "tools/shared"}},
-			{URI: "https://mcp2.example.com", Scopes: []string{"tools/create", "tools/shared"}},
-		}),
-	}, testObs())
-
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/.well-known/oauth-authorization-server")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var meta map[string]any
-	json.NewDecoder(resp.Body).Decode(&meta)
-
-	scopes, ok := meta["scopes_supported"].([]any)
-	if !ok || scopes == nil {
-		t.Fatalf("scopes_supported should be a non-null array, got: %v", meta["scopes_supported"])
-	}
-
-	scopeSet := make(map[string]bool)
-	for _, s := range scopes {
-		scopeSet[s.(string)] = true
-	}
-
-	for _, want := range []string{"tools/query", "tools/create", "tools/shared"} {
-		if !scopeSet[want] {
-			t.Errorf("missing scope %q in scopes_supported: %v", want, scopes)
-		}
-	}
-	if len(scopes) != 3 {
-		t.Errorf("expected 3 unique scopes (tools/shared deduplicated), got %d: %v", len(scopes), scopes)
-	}
 }

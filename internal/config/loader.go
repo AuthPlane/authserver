@@ -26,6 +26,53 @@ var legacyYAMLKeys = []struct {
 	{"token_exchange.cross_client_allowlist", "fold into per-resource policy.exchange.allowed_client_ids"},
 }
 
+// normalizeDeprecated folds pre-v0.1.2 config keys into their current
+// equivalents so a v0.1.x config file keeps working across the upgrade.
+// Unlike legacyYAMLKeys (which hard-fails on keys removed before any release
+// shipped), these keys were live in v0.1.x and have a running operator base,
+// so they are translated rather than rejected. DeprecatedKeysUsed reports what
+// was translated so the caller can warn at boot.
+//
+// The deprecated field is left populated: it marks the ref as legacy-sourced,
+// which exempts it from the CONNECTOR_*/AUTHPLANE_VAULT_* naming rule that
+// v0.1.2 introduced (v0.1.x documented unprefixed names like
+// OIDC_CLIENT_SECRET, so enforcing it on upgrade would break those installs).
+func normalizeDeprecated(cfg *Config) {
+	if cfg.OIDC.ClientSecretEnv == "" {
+		return
+	}
+	if cfg.OIDC.ClientSecretRef == "" {
+		cfg.OIDC.ClientSecretRef = cfg.OIDC.ClientSecretEnv
+	}
+	// v0.1.x semantics: client_secret_env took precedence over an inline
+	// client_secret. Preserve that instead of tripping the mutual-exclusion
+	// check that v0.1.2 added, which would reject a config that used to boot.
+	if cfg.OIDC.ClientSecretRef == cfg.OIDC.ClientSecretEnv {
+		cfg.OIDC.ClientSecret = ""
+	}
+}
+
+// DeprecatedKeysUsed lists the deprecated config keys this config actually
+// relies on, as "old key -> new key" migration hints for a boot-time warning.
+// Empty when the config uses only current keys.
+func (c *Config) DeprecatedKeysUsed() []string {
+	var used []string
+	if c.OIDC.ClientSecretEnv != "" {
+		used = append(used, "oidc.client_secret_env -> oidc.client_secret_ref")
+	}
+	return used
+}
+
+// LegacyOIDCSecretRef returns the OIDC client-secret ref when it came from the
+// deprecated client_secret_env key, so the secret backend can admit a name that
+// predates the CONNECTOR_*/AUTHPLANE_VAULT_* rule. Empty otherwise.
+func (c *Config) LegacyOIDCSecretRef() string {
+	if c.OIDC.ClientSecretEnv != "" && c.OIDC.ClientSecretRef == c.OIDC.ClientSecretEnv {
+		return c.OIDC.ClientSecretEnv
+	}
+	return ""
+}
+
 // Load loads configuration from a YAML file and environment variables.
 // Priority: defaults < YAML file < environment variables.
 func Load(path string) (*Config, error) {
@@ -53,6 +100,8 @@ func Load(path string) (*Config, error) {
 	if err := loadFromEnv(cfg); err != nil {
 		return nil, fmt.Errorf("load env config: %w", err)
 	}
+
+	normalizeDeprecated(cfg)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -171,9 +220,17 @@ func DefaultConfig() *Config {
 			AuthFailMax:       10,
 			AuthFailWindow:    10 * time.Minute,
 			AuthLockout:       15 * time.Minute,
+			// ~41 MB at roughly 163 B/entry, comfortable in a 256 MB container.
+			// Sized against memory only — it is not a barrier an attacker has to
+			// climb, and reaching it no longer disables anything (the tracker
+			// evicts an unlocked entry instead of refusing). See
+			// api/shared.maxTrackedIdentities for why the earlier "3.8x margin"
+			// framing was withdrawn.
+			MaxTrackedIdentities: 250000, // no digit separator: docsgen prints this literal, and Atoi rejects "250_000"
 		},
 		OAuth: OAuthConfig{
 			RequireScope: true,
+			StateMaxAge:  10 * time.Minute,
 		},
 		OIDC: OIDCConfig{
 			ShowLocalLogin:     true,
@@ -194,8 +251,10 @@ func DefaultConfig() *Config {
 			TokenExpiry:   1 * time.Hour,
 		},
 		Admin: AdminConfig{
-			Enabled: true,
-			Address: ":9001",
+			Enabled:              true,
+			Address:              ":9001",
+			AuditDefaultLookback: 24 * time.Hour,
+			AuditMaxLookback:     30 * 24 * time.Hour,
 		},
 		Observability: ObservabilityConfig{
 			Logging: LoggingConfig{
@@ -223,10 +282,16 @@ func loadFromEnv(cfg *Config) error {
 	loadSigningFromEnv(&cfg.Signing)
 	loadDCRFromEnv(&cfg.DCR)
 	loadCIMDFromEnv(&cfg.CIMD)
-	loadSessionFromEnv(&cfg.Session)
+	if err := loadSessionFromEnv(&cfg.Session); err != nil {
+		return err
+	}
 	loadRateLimitFromEnv(&cfg.RateLimit)
-	loadAdminFromEnv(&cfg.Admin)
-	loadOAuthFromEnv(&cfg.OAuth)
+	if err := loadAdminFromEnv(&cfg.Admin); err != nil {
+		return err
+	}
+	if err := loadOAuthFromEnv(&cfg.OAuth); err != nil {
+		return err
+	}
 	loadOIDCFromEnv(&cfg.OIDC)
 	loadObservabilityFromEnv(&cfg.Observability)
 	if err := loadResourcesFromEnv(cfg); err != nil {
@@ -330,13 +395,23 @@ func loadCIMDFromEnv(cfg *CIMDConfig) {
 	cfg.FetchTimeout = getEnvDuration("AUTHPLANE_CIMD_FETCH_TIMEOUT", cfg.FetchTimeout)
 }
 
-func loadSessionFromEnv(cfg *SessionConfig) {
+func loadSessionFromEnv(cfg *SessionConfig) error {
 	cfg.CookieName = getEnv("AUTHPLANE_SESSION_COOKIE_NAME", cfg.CookieName)
-	cfg.MaxAge = getEnvDuration("AUTHPLANE_SESSION_MAX_AGE", cfg.MaxAge)
+	// Strict parse: a set-but-unparseable MaxAge is a boot failure, not a silent
+	// revert to 24h. Since the middleware now clamps a zero/negative MaxAge up to
+	// DefaultSessionMaxAge, a lenient revert here would be invisible — an operator
+	// shortening the session for compliance would silently get 24h. Mirror the
+	// oauth.state_max_age treatment (see getEnvDurationE).
+	d, err := getEnvDurationE("AUTHPLANE_SESSION_MAX_AGE", cfg.MaxAge)
+	if err != nil {
+		return err
+	}
+	cfg.MaxAge = d
 	cfg.Secure = getEnvBool("AUTHPLANE_SESSION_SECURE", cfg.Secure)
 	cfg.SameSite = getEnv("AUTHPLANE_SESSION_SAME_SITE", cfg.SameSite)
 	cfg.Secret = getEnv("AUTHPLANE_SESSION_SECRET", cfg.Secret)
 	cfg.FailClosed = getEnvBool("AUTHPLANE_SESSION_FAIL_CLOSED", cfg.FailClosed)
+	return nil
 }
 
 func loadRateLimitFromEnv(cfg *RateLimitConfig) {
@@ -346,16 +421,39 @@ func loadRateLimitFromEnv(cfg *RateLimitConfig) {
 	cfg.AuthFailMax = getEnvInt("AUTHPLANE_RATE_LIMIT_AUTH_FAIL_MAX", cfg.AuthFailMax)
 	cfg.AuthFailWindow = getEnvDuration("AUTHPLANE_RATE_LIMIT_AUTH_FAIL_WINDOW", cfg.AuthFailWindow)
 	cfg.AuthLockout = getEnvDuration("AUTHPLANE_RATE_LIMIT_AUTH_LOCKOUT", cfg.AuthLockout)
+	cfg.MaxTrackedIdentities = getEnvInt("AUTHPLANE_RATE_LIMIT_MAX_TRACKED_IDENTITIES", cfg.MaxTrackedIdentities)
 }
 
-func loadAdminFromEnv(cfg *AdminConfig) {
+func loadAdminFromEnv(cfg *AdminConfig) error {
 	cfg.Enabled = getEnvBool("AUTHPLANE_ADMIN_ENABLED", cfg.Enabled)
 	cfg.Address = getEnv("AUTHPLANE_ADMIN_ADDRESS", cfg.Address)
 	cfg.APIKey = getEnv("AUTHPLANE_ADMIN_API_KEY", cfg.APIKey)
+	// Strict parse: these bound how much of the highest-volume table a single
+	// request may walk, so a set-but-unparseable value is a boot failure rather
+	// than a silent revert to the default (see getEnvDurationE). An operator
+	// widening the window for an exporter must not be quietly left at 30 days.
+	d, err := getEnvDurationE("AUTHPLANE_ADMIN_AUDIT_DEFAULT_LOOKBACK", cfg.AuditDefaultLookback)
+	if err != nil {
+		return err
+	}
+	cfg.AuditDefaultLookback = d
+	if d, err = getEnvDurationE("AUTHPLANE_ADMIN_AUDIT_MAX_LOOKBACK", cfg.AuditMaxLookback); err != nil {
+		return err
+	}
+	cfg.AuditMaxLookback = d
+	return nil
 }
 
-func loadOAuthFromEnv(cfg *OAuthConfig) {
+func loadOAuthFromEnv(cfg *OAuthConfig) error {
 	cfg.RequireScope = getEnvBool("AUTHPLANE_OAUTH_REQUIRE_SCOPE", cfg.RequireScope)
+	// Strict parse: a set-but-unparseable value is a boot failure, not a silent
+	// revert to the default (this is a security knob — see getEnvDurationE).
+	d, err := getEnvDurationE("AUTHPLANE_OAUTH_STATE_MAX_AGE", cfg.StateMaxAge)
+	if err != nil {
+		return err
+	}
+	cfg.StateMaxAge = d
+	return nil
 }
 
 func loadOIDCFromEnv(cfg *OIDCConfig) {
@@ -443,6 +541,24 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	return defaultVal
 }
 
+// getEnvDurationE is like getEnvDuration but treats a set-but-unparseable value
+// as a boot error instead of silently reverting to the default. Use it for
+// security-relevant knobs where a silent revert would hide a misconfiguration —
+// e.g. a unit-less "120" (the seconds form other schemas use) that
+// time.ParseDuration rejects would otherwise leave the knob at its default with
+// no signal, defeating the very tightening the operator intended.
+func getEnvDurationE(key string, defaultVal time.Duration) (time.Duration, error) {
+	val, ok := os.LookupEnv(key)
+	if !ok || val == "" {
+		return defaultVal, nil
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid duration %q (did you forget a unit, e.g. \"2m\"?): %w", key, val, err)
+	}
+	return d, nil
+}
+
 func loadConnectFromEnv(cfg *ConnectConfig) {
 	cfg.StateSecret = getEnv("AUTHPLANE_CONNECT_STATE_SECRET", cfg.StateSecret)
 	cfg.RedirectBaseURL = getEnv("AUTHPLANE_CONNECT_REDIRECT_BASE_URL", cfg.RedirectBaseURL)
@@ -473,8 +589,12 @@ func loadBrokerProviderFromEnv(cfg *Config) {
 	if v := getEnv("AUTHPLANE_BROKER_PROVIDER_CLIENT_ID", ""); v != "" {
 		configData["client_id"] = v
 	}
-	if v := getEnv("AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_ENV", ""); v != "" {
-		configData["client_secret_env"] = v
+	if v := getEnv("AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_REF", ""); v != "" {
+		configData["client_secret_ref"] = v
+	} else if v := getEnv("AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_ENV", ""); v != "" {
+		// DEPRECATED pre-v0.1.2 spelling, still honored so an existing
+		// deployment's environment keeps seeding the same provider.
+		configData["client_secret_ref"] = v
 	}
 	if v := getEnv("AUTHPLANE_BROKER_PROVIDER_AUTHORIZE_URL", ""); v != "" {
 		configData["authorize_url"] = v

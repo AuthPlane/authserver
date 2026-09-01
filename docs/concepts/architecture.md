@@ -231,14 +231,16 @@ MCP Server                        authserver
       │       expires_in: 3600 }       │
 ```
 
-`TokenExchangeService.Exchange` resolves the resource, then dispatches via the `Issuer` interface (`MintIssuer` for Mint resources, `BrokerIssuer` for Broker resources). For Broker resources, `BrokerIssuer` enforces three bounds:
+`TokenExchangeService.Exchange` resolves the resource, then dispatches via the `Issuer` interface (`MintIssuer` for Mint resources, `BrokerIssuer` for Broker resources). A direct-Broker vend is bounded twice, and the two bounds live in different components:
 
-> requested ⊆ `consent_grants.scopes` (per-agent attestation)
-> ⊆ `broker_grants.scopes_granted` (per-provider grant)
+> requested ⊆ `consent_grants.scopes` (per-agent attestation) — enforced by `dispatchBroker`, inside the agent-attestation gate, before any issuer runs
+> ⊆ `broker_grants.scopes_granted` (per-provider grant) — enforced by `BrokerIssuer`
+
+Which component owns which bound is what makes the fronted path differ: because the `consent_grants` bound lives in dispatch rather than in the issuer, a fronted Mint→Broker exchange never reaches it — dispatch hands off to the fronted-broker path right after the operator gate — so the fronting link's `scope_map` and the `broker_grants` ceiling are what bound that vend. `BrokerIssuer` reads no consent state on either path.
 
 Failures emit `error=consent_required` with a `cause` sub-discriminator (`consent_missing` | `scope_insufficient`) and a `consent_url` that flips between `/connect/{provider}` (upstream re-auth) and `/authorize?resource=...` (AS-side re-consent) based on which bound failed.
 
-**Per-resource exchange policy:** Each resource carries `policy.exchange.allowed_client_ids`. Empty means any consented client.
+**Per-resource exchange policy:** Each resource carries `policy.exchange.allowed_client_ids`. Empty means any client; user consent is a separate gate, skipped for Mint self-exchange and on fronted paths — Mint→Mint and Mint→Broker alike (there the operator's fronting declaration and its `scope_map` stand in for the consent row).
 
 **Encryption:** Upstream refresh-grants are encrypted at rest with AES-256-GCM or HashiCorp Vault Transit.
 

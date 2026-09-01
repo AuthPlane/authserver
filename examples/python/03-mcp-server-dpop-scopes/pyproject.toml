@@ -10,13 +10,15 @@ requires-python = ">=3.12"
 dependencies = [
   # fastmcp 3.x is required because the authplane-fastmcp adapter passes
   # `scopes_supported=` to `RemoteAuthProvider`, a kwarg added in 3.0.0.
-  "fastmcp>=3.0,<4",
+  # The floor is 3.2 because authplane-fastmcp 0.3.0 itself requires it;
+  # declaring it here keeps the reason visible instead of resolver-only.
+  "fastmcp>=3.2,<4",
   # Authplane SDK + FastMCP adapter (PyPI). Pinned to the exact version
   # the example was developed and verified against; bump together with
   # the SDK. The agent depends on the core SDK for the DPoPProvider /
   # DPoPKeyMaterial outbound helpers and for client_credentials.
-  "authplane-sdk==0.2.0",
-  "authplane-fastmcp==0.2.0",
+  "authplane-sdk==0.3.0",
+  "authplane-fastmcp==0.3.0",
   # `cryptography` provides the EC P-256 keypair generator used by the
   # agent to produce DPoP signing material. It's a transitive dep of
   # `authlib` (which authplane-sdk pulls in) but we pin it explicitly

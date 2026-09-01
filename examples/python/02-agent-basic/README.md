@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 8 lines · Total example: 58 lines · SDK: python-sdk 0.2.0**
+**Auth-specific code: 8 lines · Total example: 58 lines · SDK: python-sdk 0.3.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP
@@ -37,7 +37,7 @@ that needs to talk to the other resource.
 |---|---|
 | **Time to run** | ~30 seconds (tier 01 must already be running) |
 | **Prereqs** | Tier 01 up (`make run` there), Docker 24+, `docker compose`, `curl`, `jq`, **Python 3.12+** (only if you run outside Docker — `pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` 0.2.0 (PyPI) |
+| **SDK** | `authplane-sdk` 0.3.0 (PyPI) |
 | **HTTP client** | `httpx >= 0.27, < 1` (matches `pyproject.toml`) |
 
 ## Run it in 3 commands

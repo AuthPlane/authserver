@@ -1,7 +1,7 @@
 # Tier 03 — FastMCP server + agent with DPoP (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 16 lines · Total example: 127 lines · SDK: ts-sdk 0.2.0**
+**Auth-specific code: 16 lines · Total example: 127 lines · SDK: ts-sdk 0.3.0**
 <!-- loccount:end -->
 
 A FastMCP TypeScript server protected by Authplane-issued, DPoP-bound JWTs
@@ -32,7 +32,7 @@ gate can audit the combined LOC budget for this tier.
 |---|---|
 | **Time to run** | ~2 minutes (first build is ~90s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, Node.js 22+ (only if you run outside Docker) |
-| **SDK** | `@authplane/sdk` + `@authplane/fastmcp` 0.2.0 (npm) |
+| **SDK** | `@authplane/sdk` + `@authplane/fastmcp` 0.3.0 (npm) |
 | **MCP framework** | [`fastmcp` for TypeScript](https://github.com/punkpeye/fastmcp) — the TS track switches from Express + MCP TS SDK at tier 03 |
 
 ## Run it in 3 commands

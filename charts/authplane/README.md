@@ -27,7 +27,7 @@ helm install authplane ./charts/authplane \
 
 ```bash
 helm install authplane oci://ghcr.io/authplane/charts/authplane \
-  --version 0.2.1 \
+  --version 0.3.0 \
   -f values-production.yaml
 ```
 
@@ -41,9 +41,9 @@ See [values.yaml](values.yaml) for all configurable parameters.
 
 For complete deployment guides — including PostgreSQL/SQLite setup, OIDC federation (Google, Okta), Vault Transit, ingress, secrets management, observability, production checklist, and local testing with kind — see:
 
-- **[Helm Chart Deployment Guide](../../docs/deployment/kubernetes/helm-chart.md)** — Full reference
-- **[Local Testing with kind](../../docs/deployment/kubernetes/kind-testing.md)** — Step-by-step local development
-- **[Kubernetes Overview](../../docs/deployment/kubernetes/index.md)** — All Kubernetes deployment approaches
+- **[Helm Chart Deployment Guide](../../docs/guides/deploy/helm.md)** — Full reference
+- **[Local Testing with kind](../../docs/guides/deploy/kind-local-testing.md)** — Step-by-step local development
+- **[Kubernetes Overview](../../docs/guides/deploy/kubernetes.md)** — All Kubernetes deployment approaches
 
 ## Uninstallation
 

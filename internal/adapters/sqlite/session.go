@@ -114,7 +114,7 @@ func (st *SessionStore) GetByID(ctx context.Context, id string) (*session.AuthSe
 }
 
 // ConsumeByCodeHash atomically marks the session as consumed.
-// If already consumed, returns ErrCodeConsumed.
+// If already consumed, returns the session with ErrCodeConsumed.
 // If not found, returns ErrInvalidGrant.
 func (st *SessionStore) ConsumeByCodeHash(ctx context.Context, codeHash string) (*session.AuthSession, error) {
 	ctx, span := st.tracer.Start(ctx, "SQLite.SessionConsumeByCodeHash")
@@ -188,9 +188,9 @@ func (st *SessionStore) ConsumeByCodeHash(ctx context.Context, codeHash string) 
 		span.SetStatus(codes.Error, scanErr.Error())
 		return nil, fmt.Errorf("check session: %w", scanErr)
 	}
-	// Session exists but was already consumed.
-	_ = s // we only need to know it exists
-	return nil, domain.ErrCodeConsumed
+	// Session exists but was already consumed: hand it back with the sentinel
+	// so the caller can respond to the replay.
+	return s, domain.ErrCodeConsumed
 }
 
 // UpdateCodeHashAndScope implements output.SessionStore.
@@ -200,7 +200,7 @@ func (st *SessionStore) UpdateCodeHashAndScope(ctx context.Context, sessionID, c
 
 	start := time.Now()
 	result, err := dbOrTx(ctx, st.db).ExecContext(ctx,
-		`UPDATE auth_sessions SET code_hash = ?, scope = ? WHERE id = ? AND expires_at > ?`,
+		`UPDATE auth_sessions SET code_hash = ?, scope = ? WHERE id = ? AND expires_at > ? AND consumed_at IS NULL`,
 		codeHash, scope, sessionID, formatTime(time.Now().UTC()),
 	)
 	st.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("session_update_code_hash"))

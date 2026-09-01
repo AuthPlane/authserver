@@ -74,7 +74,7 @@ provider_status=$(curl -s -o /tmp/provider.$$ -w '%{http_code}' -X POST "${ADMIN
   "protocol": "oauth",
   "config_data": {
     "client_id": "Iv1.fakeoauthapp_abc123",
-    "client_secret_env": "AUTHPLANE_ADMIN_API_KEY",
+    "client_secret_ref": "AUTHPLANE_ADMIN_API_KEY",
     "authorize_url": "https://github.example.invalid/login/oauth/authorize",
     "token_url": "https://github.example.invalid/login/oauth/access_token"
   }

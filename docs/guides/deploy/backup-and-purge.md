@@ -27,7 +27,7 @@ Each pass deletes expired rows from these tables (the `--only` names are exact, 
 | `dpop-nonces` | DPoP proof JTIs and server nonces |
 | `jti` | Revoked-token JTIs (RFC 7009) |
 | `machine-tokens` | Expired client-credentials tokens |
-| `refresh-tokens` | Expired refresh tokens and aged-out families |
+| `refresh-tokens` | Expired refresh tokens. Families are **not** purged: `token_families` keeps one row per authorization-code exchange since install (rows leave only when their client or user is deleted) |
 | `sessions` | Expired user sessions |
 
 Default: all targets. `--timeout` defaults to `10m`; pass `--timeout=0` to disable the deadline (still aborts on SIGINT/SIGTERM). Cited from [`docs/reference/cli.md#cli-purge`](../../reference/cli.md#cli-purge).

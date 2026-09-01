@@ -99,15 +99,15 @@ holds a session for the user, the rest is the standard
 ## How to configure
 
 > **Single-mode topology.** OIDC federation is **boot-time YAML
-> config only** in OSS at v0.1.x — there is no Admin UI page, CLI
+> config only** at v0.1.x — there is no Admin UI page, CLI
 > subcommand, or REST endpoint for runtime federation-provider
 > management. Edit `oidc:` in the AS config, restart the AS. (Once the
 > AS is running with federation enabled, every other operation on this
 > page — Resources, Clients — is available in all three modes; see
 > [single-mcp.md](single-mcp.md) Configure section.)
 >
-> **OSS is single-provider.** Only one upstream OIDC IdP at a time.
-> Multi-provider federation is reserved for EE.
+> **Single-provider.** The default configuration supports one upstream
+> OIDC IdP at a time.
 
 Full per-provider setup with screenshots and gotchas:
 [oidc.md](../guides/federation/oidc.md). The relevant YAML shape
@@ -119,21 +119,22 @@ oidc:
   enabled: true
   issuer: https://your-org.okta.com
   client_id: <okta-app-id>
-  # Either client_secret OR client_secret_env (env var name takes
-  # precedence when both are set).
-  client_secret_env: OIDC_CLIENT_SECRET
+  # Set exactly one of client_secret (inline) or client_secret_ref (env var
+  # name) — they are mutually exclusive; configuring both fails validation.
+  client_secret_ref: CONNECTOR_OIDC_CLIENT_SECRET
   display_name: Okta            # button text on the login page
   scopes: [openid, email, profile]
   redirect_uri: https://authserver.example.com/oidc/callback
-  show_local_login: true        # let users still sign in with password
+  show_local_login: true        # false disables password login entirely (form hidden, POST /login → 404)
   include_groups_scope: true    # auto-include "groups" scope when supported
   connector_id: ""              # Dex connector_id, optional
 ```
 
-Claim handling and user provisioning are not YAML-configurable in
-OSS — `sub` maps to `users.provider_sub`, `email` to `users.email`,
+Claim handling and user provisioning are not YAML-configurable —
+`sub` maps to `users.provider_sub`, `email` to `users.email`, and
 auto-provisioning is on by default. See
-[oidc.md](../guides/federation/oidc.md) for the OSS/EE split.
+[oidc.md](../guides/federation/oidc.md) for claim requirements and
+provisioning behavior.
 
 ## How authserver handles it
 

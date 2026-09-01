@@ -1,7 +1,7 @@
-github.com/authplane/go-sdk/core v0.1.1 h1:trmUFLNvCmnAGv1/WkrWKB5QbvfuigjTBJh3+vTpeWU=
-github.com/authplane/go-sdk/core v0.1.1/go.mod h1:ROwq9u49obzrUqPUcZ9JCNM+391VnhQUdnWyhh14ukY=
-github.com/authplane/go-sdk/mcp v0.1.1 h1:S7pPfUmXWG5ee2quLHuq/V+Zjxfjv7hTUaMZjw5xrbM=
-github.com/authplane/go-sdk/mcp v0.1.1/go.mod h1:7peu92m8w03eBnpy3xONnYy5cucaoUwpKAKtRvG5oVA=
+github.com/authplane/go-sdk/core v0.2.0 h1:W5S4dF9C0ptSccRG2mI31nHyFxWSgZmS5F3g38kxPWc=
+github.com/authplane/go-sdk/core v0.2.0/go.mod h1:MG4lXcApugXCwXnXwMfOJxfmezK6Sk1V87stBuZaILw=
+github.com/authplane/go-sdk/mcp v0.2.0 h1:yWwfarIodgkbZwhsWUQITK4LkJOK+eveUIObzex0TJ0=
+github.com/authplane/go-sdk/mcp v0.2.0/go.mod h1:ZLLvKJyjkxCta7lCWbceB9PNOzUX/jcSo+e+f7BydRE=
 github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
 github.com/go-jose/go-jose/v4 v4.1.4/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/golang-jwt/jwt/v5 v5.3.0 h1:pv4AsKCKKZuqlgs5sUmn4x8UlGa0kEVt/puTpKx9vvo=
@@ -20,7 +20,7 @@ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zI
 github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
 golang.org/x/oauth2 v0.34.0 h1:hqK/t4AKgbqWkdkcAeI8XLmbK+4m4G5YeQRrmiotGlw=
 golang.org/x/oauth2 v0.34.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
-golang.org/x/sys v0.40.0 h1:DBZZqJ2Rkml6QMQsZywtnjnnGvHza6BTfYFWY9kjEWQ=
-golang.org/x/sys v0.40.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=
+golang.org/x/sys v0.44.0 h1:ildZl3J4uzeKP07r2F++Op7E9B29JRUy+a27EibtBTQ=
+golang.org/x/sys v0.44.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 golang.org/x/tools v0.41.0 h1:a9b8iMweWG+S0OBnlU36rzLp20z1Rp10w+IY2czHTQc=
 golang.org/x/tools v0.41.0/go.mod h1:XSY6eDqxVNiYgezAVqqCeihT4j1U2CCsqvH3WhQpnlg=

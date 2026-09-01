@@ -104,7 +104,7 @@ func (st *SessionStore) GetByID(ctx context.Context, id string) (*session.AuthSe
 }
 
 // ConsumeByCodeHash atomically marks the session as consumed using UPDATE...RETURNING.
-// If already consumed, returns ErrCodeConsumed.
+// If already consumed, returns the session with ErrCodeConsumed.
 // If not found, returns ErrInvalidGrant.
 func (st *SessionStore) ConsumeByCodeHash(ctx context.Context, codeHash string) (*session.AuthSession, error) {
 	ctx, span := st.tracer.Start(ctx, "Postgres.SessionConsumeByCodeHash")
@@ -132,11 +132,12 @@ func (st *SessionStore) ConsumeByCodeHash(ctx context.Context, codeHash string) 
 	}
 
 	// No row returned by UPDATE: either not found or already consumed.
-	// Read to distinguish the two cases.
-	var existsID string
-	checkErr := dbOrTx(ctx, st.pool).QueryRow(ctx,
-		`SELECT id FROM auth_sessions WHERE code_hash = $1`, codeHash,
-	).Scan(&existsID)
+	// Read the full row to distinguish the two cases — and, when it is a
+	// replay, to hand the session back with the sentinel.
+	checkRow := dbOrTx(ctx, st.pool).QueryRow(ctx,
+		`SELECT `+sessionColumns+` FROM auth_sessions WHERE code_hash = $1`, codeHash,
+	)
+	consumed, checkErr := scanSession(checkRow)
 	st.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("session_consume_by_code_hash"))
 
 	if isNoRows(checkErr) {
@@ -148,7 +149,7 @@ func (st *SessionStore) ConsumeByCodeHash(ctx context.Context, codeHash string) 
 		return nil, fmt.Errorf("check session: %w", checkErr)
 	}
 	// Session exists but was already consumed.
-	return nil, domain.ErrCodeConsumed
+	return consumed, domain.ErrCodeConsumed
 }
 
 // UpdateCodeHashAndScope implements output.SessionStore.
@@ -158,7 +159,7 @@ func (st *SessionStore) UpdateCodeHashAndScope(ctx context.Context, sessionID, c
 
 	start := time.Now()
 	tag, err := dbOrTx(ctx, st.pool).Exec(ctx,
-		`UPDATE auth_sessions SET code_hash = $1, scope = $2 WHERE id = $3 AND expires_at > NOW()`,
+		`UPDATE auth_sessions SET code_hash = $1, scope = $2 WHERE id = $3 AND expires_at > NOW() AND consumed_at IS NULL`,
 		codeHash, scope, sessionID,
 	)
 	st.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("session_update_code_hash"))

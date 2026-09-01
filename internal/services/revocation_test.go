@@ -30,7 +30,7 @@ func newRevocationTestSetup(t *testing.T) *revocationTestSetup {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	auditSvc := services.NewAuditService(stores.Audit, obs)
-	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, nil, "", obs, auditSvc, stores.Revocation)
+	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, nil, staticIssuerForTest(""), obs, auditSvc, stores.Revocation)
 	return &revocationTestSetup{
 		revokeSvc: revokeSvc,
 		auditSvc:  auditSvc,
@@ -256,5 +256,78 @@ func TestRevocation_PublicClientNoSecret_Succeeds(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("public client revocation should succeed: %v", err)
+	}
+}
+
+// TestRevocation_SuspendedPublicClient_NoStatusLeak pins that a suspended
+// public client gets the ordinary RFC 7009 success, not invalid_client.
+//
+// A public client_id travels in the authorize URL and in browser redirects, so
+// distinguishing "suspended" from "active" here would hand anyone an anonymous
+// client-status oracle. The suspension still bites: nothing is revoked.
+func TestRevocation_SuspendedPublicClient_NoStatusLeak(t *testing.T) {
+	setup := newRevocationTestSetup(t)
+	ctx := context.Background()
+	c, _, refreshPlain := setup.createClientAndFamily(t, true)
+
+	c.Status = client.StatusSuspended
+	if err := setup.stores.Stores.Client.Update(ctx, c); err != nil {
+		t.Fatalf("suspend client: %v", err)
+	}
+
+	err := setup.revokeSvc.RevokeToken(ctx, input.RevokeRequest{
+		Token:    refreshPlain,
+		ClientID: c.ID,
+	})
+	if err != nil {
+		t.Fatalf("suspended public client must not surface an error: %v", err)
+	}
+
+	// Nothing was revoked — the refusal is silent, not cosmetic.
+	rt, err := setup.stores.Stores.Token.GetRefreshTokenByHash(ctx, crypto.HashSHA256(refreshPlain))
+	if err != nil {
+		t.Fatalf("get refresh token: %v", err)
+	}
+	family, err := setup.stores.Stores.Token.GetFamily(ctx, rt.FamilyID)
+	if err != nil {
+		t.Fatalf("get family: %v", err)
+	}
+	if !family.IsActive() {
+		t.Error("a suspended client must not be able to revoke")
+	}
+}
+
+// TestRevocation_SuspendedConfidentialClient_InvalidClient covers the other
+// half: a caller that proved it holds the secret learns the client's status,
+// because it already knows it. The status check runs after the secret check so
+// the two refusals are not separable by timing.
+func TestRevocation_SuspendedConfidentialClient_InvalidClient(t *testing.T) {
+	setup := newRevocationTestSetup(t)
+	ctx := context.Background()
+	c, secret, refreshPlain := setup.createClientAndFamily(t, false)
+
+	c.Status = client.StatusSuspended
+	if err := setup.stores.Stores.Client.Update(ctx, c); err != nil {
+		t.Fatalf("suspend client: %v", err)
+	}
+
+	err := setup.revokeSvc.RevokeToken(ctx, input.RevokeRequest{
+		Token:        refreshPlain,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+	})
+	if !errors.Is(err, domain.ErrInvalidClient) {
+		t.Fatalf("got %v, want ErrInvalidClient", err)
+	}
+
+	// A wrong secret is refused identically, so the response cannot be read as
+	// a statement about the client's status.
+	err = setup.revokeSvc.RevokeToken(ctx, input.RevokeRequest{
+		Token:        refreshPlain,
+		ClientID:     c.ID,
+		ClientSecret: "wrong-secret",
+	})
+	if !errors.Is(err, domain.ErrInvalidClient) {
+		t.Fatalf("wrong secret: got %v, want ErrInvalidClient", err)
 	}
 }

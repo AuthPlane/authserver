@@ -40,7 +40,7 @@ type XAAConfig struct {
 	Enabled         bool          `yaml:"enabled"`
 	TokenExpiry     time.Duration `yaml:"token_expiry"`      // TTL for XAA-issued access tokens (default: 1h)
 	MaxAssertionAge time.Duration `yaml:"max_assertion_age"` // Max age of ID-JAG iat (default: 5m)
-	RequireResource bool          `yaml:"require_resource"`  // Require resource claim in assertions (default: false)
+	RequireResource bool          `yaml:"require_resource"`  // Refuse exchanges that name no resource, on the assertion or the request (default: false)
 	SubjectMode     string        `yaml:"subject_mode"`      // "auto_map" or "strict" (default: "auto_map")
 	JWKSCacheTTL    time.Duration `yaml:"jwks_cache_ttl"`    // JWKS cache TTL (default: 1h)
 }
@@ -56,6 +56,12 @@ type OAuthConfig struct {
 	// with invalid_scope (RFC 6749 §3.3 compliant). When false, missing scope
 	// defaults to all registered scopes for the resource (ADR-012).
 	RequireScope bool `yaml:"require_scope"`
+
+	// StateMaxAge bounds the OIDC state cookie's lifetime: both the cookie's
+	// Max-Age attribute and the server-side freshness window checked at
+	// callback. Default 10m. A shorter value tightens the state replay window
+	// (regulatory or UX driven, per deployment).
+	StateMaxAge time.Duration `yaml:"state_max_age"`
 }
 
 // OIDCConfig controls upstream OIDC federation (single provider, OSS).
@@ -64,11 +70,12 @@ type OIDCConfig struct {
 	Issuer             string   `yaml:"issuer"`               // upstream issuer URL (e.g., https://accounts.google.com)
 	ClientID           string   `yaml:"client_id"`            // client_id registered with upstream IdP
 	ClientSecret       string   `yaml:"client_secret"`        // client_secret registered with upstream IdP
-	ClientSecretEnv    string   `yaml:"client_secret_env"`    // env var name for client_secret (takes precedence over client_secret)
+	ClientSecretRef    string   `yaml:"client_secret_ref"`    // env var name for client_secret (mutually exclusive with client_secret; set only one)
+	ClientSecretEnv    string   `yaml:"client_secret_env"`    // DEPRECATED: pre-v0.1.2 name for client_secret_ref; normalized into ClientSecretRef at load time. Also marks the ref as legacy-sourced, which exempts it from the CONNECTOR_*/AUTHPLANE_VAULT_* naming rule. Remove in a future release.
 	DisplayName        string   `yaml:"display_name"`         // button text, e.g. "Okta", "Google"
 	Scopes             []string `yaml:"scopes"`               // OIDC scopes; defaults to ["openid","email","profile"]
 	RedirectURI        string   `yaml:"redirect_uri"`         // explicit redirect_uri for OIDC callback
-	ShowLocalLogin     bool     `yaml:"show_local_login"`     // show password form when OIDC is enabled (default true)
+	ShowLocalLogin     bool     `yaml:"show_local_login"`     // local password login: false hides the form and POST /login answers 404 (default true)
 	IncludeGroupsScope bool     `yaml:"include_groups_scope"` // auto-include "groups" scope if upstream supports it (default true)
 	ConnectorID        string   `yaml:"connector_id"`         // Dex connector_id parameter (optional)
 }
@@ -177,12 +184,31 @@ type SessionConfig struct {
 
 // RateLimitConfig controls global rate limiting.
 type RateLimitConfig struct {
-	Enabled           bool          `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+	// RequestsPerSecond is the per-source-address token-refill rate. It must be
+	// greater than zero: x/time/rate reads Limit(0) as "never refill", so a zero
+	// here does not disable the limiter — it lets each address spend Burst and
+	// then denies it for the process lifetime. Validate rejects it. Turn
+	// throughput limiting off with Enabled: false.
 	RequestsPerSecond float64       `yaml:"requests_per_second"`
 	Burst             int           `yaml:"burst"`
 	AuthFailMax       int           `yaml:"auth_fail_max"`
 	AuthFailWindow    time.Duration `yaml:"auth_fail_window"`
 	AuthLockout       time.Duration `yaml:"auth_lockout"`
+
+	// MaxTrackedIdentities bounds how many identities the auth-failure lockout
+	// holds at once. Its key space is caller-chosen — anyone posting the login
+	// form can mint entries with made-up addresses — so at the bound the lockout
+	// evicts an entry that is not currently locked rather than refusing the
+	// newcomer, so a flood of invented addresses cannot leave an untouched
+	// account unprotected; lockouts already in force are never evicted. Only
+	// when every tracked identity is locked is a newcomer refused. Raise it
+	// alongside auth_fail_window, which scales the live set linearly.
+	//
+	// This bounds the NUMBER of entries. Each one is bounded separately, by the
+	// 254-byte cap on the identity — without that, a count-only bound would say
+	// 41 MB and admit 16 GB.
+	MaxTrackedIdentities int `yaml:"max_tracked_identities"`
 }
 
 // AdminConfig controls the admin API server.
@@ -192,6 +218,19 @@ type AdminConfig struct {
 	APIKey            string  `yaml:"api_key"`
 	RequestsPerSecond float64 `yaml:"requests_per_second"` // Per-IP rate limit (0 = no limit)
 	Burst             int     `yaml:"burst"`               // Burst size for rate limiter
+
+	// AuditDefaultLookback is how far back GET /admin/audit reaches when the
+	// caller omits since. AuditMaxLookback is the furthest back a caller may
+	// ask; a request beyond it is rejected rather than silently narrowed, so a
+	// client is never handed a short answer to a long question.
+	//
+	// audit_events is the highest-volume table in the schema, and the feed pages
+	// on offset, so both bounds exist to stop one request walking all of it.
+	// They are here, and not constants, because only the deployment knows its
+	// compliance window: an operator retaining a year of audit for an exporter
+	// raises audit_max_lookback rather than losing reach over its own data.
+	AuditDefaultLookback time.Duration `yaml:"audit_default_lookback"`
+	AuditMaxLookback     time.Duration `yaml:"audit_max_lookback"`
 }
 
 // ObservabilityConfig controls logging, tracing, and metrics.

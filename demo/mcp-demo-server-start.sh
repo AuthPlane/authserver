@@ -59,7 +59,7 @@ export AUTHPLANE_ENCRYPTION_KEY="bed8eb204ebfe0bc38750d871e048051129f69c3ea85389
 # Demo-fake value (32+ chars). Generate a real one with: openssl rand -hex 32
 export AUTHPLANE_CONNECT_STATE_SECRET="demo-connect-state-secret-not-for-production-use"
 # CONNECTOR_GOOGLE_SECRET is the env var the broker_providers[google-calendar]
-# config_data.client_secret_env points at. The value is never exercised — the
+# config_data.client_secret_ref points at. The value is never exercised — the
 # AS only reads it when actually performing the upstream OAuth exchange, which
 # requires real Google credentials. The demo only triggers consent_required.
 export CONNECTOR_GOOGLE_SECRET="demo-fake-google-client-secret"

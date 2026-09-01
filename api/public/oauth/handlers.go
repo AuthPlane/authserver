@@ -15,19 +15,25 @@ import (
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // oauthHandler handles GET /oauth/authorize and POST /oauth/token.
 type oauthHandler struct {
-	authorize          AuthorizeProvider
-	token              TokenProvider
-	clientCreds        ClientCredentialsProvider
-	tokenExchange      TokenExchangeProvider
-	jwtBearer          JWTBearerProvider
-	session            *shared.SessionMiddleware
-	obs                *observability.Provider
-	connectConsentBase string // base URL used to build /connect/<provider> consent_urls (Broker upstream re-connect)
-	authorizeBase      string // AS issuer URL used to build /authorize?resource=<slug> consent_urls (AS-side re-consent, )
+	authorize     AuthorizeProvider
+	token         TokenProvider
+	clientCreds   ClientCredentialsProvider
+	tokenExchange TokenExchangeProvider
+	jwtBearer     JWTBearerProvider
+	session       *shared.SessionMiddleware
+	obs           *observability.Provider
+	urls          output.URLBuilder
+	// issuerProvider resolves the AS issuer URL — the public base for
+	// everything under the host (<issuer>/authorize, <issuer>/connect/<provider>,
+	// <issuer>/connections). Both consent_required URL flavors are built
+	// from it. Optional: when nil (or it resolves empty) the handler emits
+	// consent_required without a consent_url.
+	issuerProvider output.IssuerProvider
 }
 
 // handleAuthorize handles GET /oauth/authorize.
@@ -58,14 +64,14 @@ func (h *oauthHandler) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Login required: redirect to login page, preserving the full authorize URL.
 	if result.LoginRequired {
 		loginURL := fmt.Sprintf("/login?redirect=%s", url.QueryEscape(r.URL.String()))
-		http.Redirect(w, r, loginURL, http.StatusSeeOther)
+		shared.RedirectInternal(w, r, h.urls, loginURL, http.StatusSeeOther, h.obs.Logger)
 		return
 	}
 
 	// Consent required: redirect to consent page.
 	if result.ConsentRequired {
 		consentURL := fmt.Sprintf("/consent?session_id=%s", url.QueryEscape(result.Session.ID))
-		http.Redirect(w, r, consentURL, http.StatusSeeOther)
+		shared.RedirectInternal(w, r, h.urls, consentURL, http.StatusSeeOther, h.obs.Logger)
 		return
 	}
 
@@ -347,13 +353,29 @@ func (h *oauthHandler) writeTokenError(w http.ResponseWriter, r *http.Request, e
 		//     (agent-attestation scope-insufficient) failures.
 		//   - Both empty → no consent_url; client shows the generic
 		//     consent_required error.
+		// Both consent_url flavors derive from the issuer — the public base
+		// for everything under the host. Resolve it once; on failure (or an
+		// empty value) fall through to the graceful-omit warn below rather
+		// than failing the token response.
+		issuerBase := ""
+		var issuerErr error
+		if h.issuerProvider != nil {
+			issuerBase, issuerErr = h.issuerProvider.Issuer(r.Context())
+		}
 		var consentURL string
 		switch {
+		case issuerErr != nil:
+			h.obs.Logger.WarnContext(r.Context(),
+				"emitting consent_required without consent_url — issuer could not be resolved",
+				"error", issuerErr,
+				"provider_slug", consentErr.ProviderSlug,
+				"resource_slug", consentErr.ResourceSlug,
+			)
 		case consentErr.ProviderSlug != "":
-			consentURL = connectionapi.ConsentURL(h.connectConsentBase, consentErr.ProviderSlug, consentErr.ResourceSlug)
+			consentURL = connectionapi.ConsentURL(issuerBase, consentErr.ProviderSlug, consentErr.ResourceSlug)
 			if consentURL == "" {
 				h.obs.Logger.WarnContext(r.Context(),
-					"emitting consent_required without consent_url — connect.redirect_base_url is not configured",
+					"emitting consent_required without consent_url — issuer is not configured",
 					"provider_slug", consentErr.ProviderSlug,
 					"resource_slug", consentErr.ResourceSlug,
 				)
@@ -363,10 +385,10 @@ func (h *oauthHandler) writeTokenError(w http.ResponseWriter, r *http.Request, e
 			if consentErr.Cause == domain.CauseScopeInsufficient {
 				scope = strings.Join(consentErr.MissingScopes, " ")
 			}
-			consentURL = connectionapi.ReconsentURL(h.authorizeBase, consentErr.ResourceSlug, scope)
+			consentURL = connectionapi.ReconsentURL(issuerBase, consentErr.ResourceSlug, scope)
 			if consentURL == "" {
 				h.obs.Logger.WarnContext(r.Context(),
-					"emitting consent_required without consent_url — server.issuer is not configured",
+					"emitting consent_required without consent_url — issuer is not configured",
 					"resource_slug", consentErr.ResourceSlug,
 				)
 			}
@@ -392,7 +414,8 @@ func (h *oauthHandler) writeTokenError(w http.ResponseWriter, r *http.Request, e
 	case errors.Is(err, domain.ErrCodeConsumed),
 		errors.Is(err, domain.ErrInvalidGrant),
 		errors.Is(err, domain.ErrSessionExpired),
-		errors.Is(err, domain.ErrFamilyRevoked):
+		errors.Is(err, domain.ErrFamilyRevoked),
+		errors.Is(err, domain.ErrReuseRevocationFailed):
 		shared.WriteOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 	case errors.Is(err, domain.ErrInvalidPKCE):
 		shared.WriteOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")

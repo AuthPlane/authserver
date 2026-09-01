@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+// AuthWrapper wraps an HTTP handler with an auth gate. *apiKeyMiddleware
+// satisfies it; an alternative strategy can be injected via OptionalDeps.Auth.
+type AuthWrapper interface {
+	Wrap(http.Handler) http.Handler
+}
+
 // apiKeyMiddleware validates the API key on every request.
 type apiKeyMiddleware struct {
 	key []byte

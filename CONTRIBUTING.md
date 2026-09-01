@@ -47,7 +47,7 @@ build and modify it. To build and test locally:
 
 ### Prerequisites
 
-- Go 1.26.3+
+- Go 1.26.6+
 - Docker (for PostgreSQL / Vault integration tests)
 
 ### Build & test

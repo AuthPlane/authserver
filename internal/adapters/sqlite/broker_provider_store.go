@@ -27,7 +27,7 @@ type BrokerProviderStore struct {
 
 var _ output.BrokerProviderStore = (*BrokerProviderStore)(nil)
 
-const brokerProviderColumns = `id, slug, display_name, protocol, config_data, created_at, updated_at`
+const brokerProviderColumns = `id, slug, display_name, protocol, config_data, enc_secret_data, enc_secret_backend, created_at, updated_at`
 
 // GetByID returns the BrokerProvider with the given id.
 func (s *BrokerProviderStore) GetByID(ctx context.Context, id string) (*resource.BrokerProvider, error) {
@@ -35,7 +35,7 @@ func (s *BrokerProviderStore) GetByID(ctx context.Context, id string) (*resource
 	defer span.End()
 	start := time.Now()
 
-	row := s.db.QueryRowContext(ctx,
+	row := dbOrTx(ctx, s.db).QueryRowContext(ctx,
 		`SELECT `+brokerProviderColumns+` FROM broker_providers WHERE id = ?`, id,
 	)
 	p, err := scanBrokerProvider(row)
@@ -57,7 +57,7 @@ func (s *BrokerProviderStore) GetBySlug(ctx context.Context, slug string) (*reso
 	defer span.End()
 	start := time.Now()
 
-	row := s.db.QueryRowContext(ctx,
+	row := dbOrTx(ctx, s.db).QueryRowContext(ctx,
 		`SELECT `+brokerProviderColumns+` FROM broker_providers WHERE slug = ?`, slug,
 	)
 	p, err := scanBrokerProvider(row)
@@ -79,7 +79,7 @@ func (s *BrokerProviderStore) List(ctx context.Context) ([]*resource.BrokerProvi
 	defer span.End()
 	start := time.Now()
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := dbOrTx(ctx, s.db).QueryContext(ctx,
 		`SELECT `+brokerProviderColumns+` FROM broker_providers ORDER BY slug`,
 	)
 	s.recordDB(ctx, "broker_provider_list", start)
@@ -121,11 +121,13 @@ func (s *BrokerProviderStore) Create(ctx context.Context, p *resource.BrokerProv
 	}
 	p.Slug = canonical
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = dbOrTx(ctx, s.db).ExecContext(ctx,
 		`INSERT INTO broker_providers (`+brokerProviderColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Slug, p.DisplayName, string(p.Protocol),
 		configDataString(p.ConfigData),
+		nullableBytes(p.EncSecretData),
+		sql.NullString{String: p.EncSecretBackend, Valid: p.EncSecretBackend != ""},
 		formatTime(p.CreatedAt), formatTime(p.UpdatedAt),
 	)
 	s.recordDB(ctx, "broker_provider_create", start)
@@ -150,12 +152,15 @@ func (s *BrokerProviderStore) Update(ctx context.Context, p *resource.BrokerProv
 	}
 	p.Slug = canonical
 
-	res, err := s.db.ExecContext(ctx,
+	res, err := dbOrTx(ctx, s.db).ExecContext(ctx,
 		`UPDATE broker_providers
-		    SET slug = ?, display_name = ?, protocol = ?, config_data = ?, updated_at = ?
+		    SET slug = ?, display_name = ?, protocol = ?, config_data = ?,
+		        enc_secret_data = ?, enc_secret_backend = ?, updated_at = ?
 		  WHERE id = ?`,
 		p.Slug, p.DisplayName, string(p.Protocol),
 		configDataString(p.ConfigData),
+		nullableBytes(p.EncSecretData),
+		sql.NullString{String: p.EncSecretBackend, Valid: p.EncSecretBackend != ""},
 		formatTime(p.UpdatedAt), p.ID,
 	)
 	s.recordDB(ctx, "broker_provider_update", start)
@@ -182,7 +187,7 @@ func (s *BrokerProviderStore) Delete(ctx context.Context, id string) error {
 	defer span.End()
 	start := time.Now()
 
-	res, err := s.db.ExecContext(ctx, `DELETE FROM broker_providers WHERE id = ?`, id)
+	res, err := dbOrTx(ctx, s.db).ExecContext(ctx, `DELETE FROM broker_providers WHERE id = ?`, id)
 	s.recordDB(ctx, "broker_provider_delete", start)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -211,14 +216,17 @@ func (s *BrokerProviderStore) recordDB(ctx context.Context, op string, start tim
 // scanBrokerProvider scans a single broker_providers row.
 func scanBrokerProvider(row interface{ Scan(...any) error }) (*resource.BrokerProvider, error) {
 	var (
-		p          resource.BrokerProvider
-		protocol   string
-		configData string
-		createdAt  string
-		updatedAt  string
+		p             resource.BrokerProvider
+		protocol      string
+		configData    string
+		encSecretData []byte
+		encBackend    sql.NullString
+		createdAt     string
+		updatedAt     string
 	)
 	if err := row.Scan(
 		&p.ID, &p.Slug, &p.DisplayName, &protocol, &configData,
+		&encSecretData, &encBackend,
 		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, err
@@ -227,6 +235,8 @@ func scanBrokerProvider(row interface{ Scan(...any) error }) (*resource.BrokerPr
 	if configData != "" {
 		p.ConfigData = []byte(configData)
 	}
+	p.EncSecretData = encSecretData
+	p.EncSecretBackend = encBackend.String
 
 	var err error
 	p.CreatedAt, err = scanTime(createdAt)
@@ -247,4 +257,13 @@ func configDataString(data []byte) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+// nullableBytes returns nil when the slice is empty so the driver
+// persists SQL NULL rather than a zero-length BLOB.
+func nullableBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }

@@ -11,6 +11,8 @@ import "context"
 // Convention for ownerContext values:
 //   - Upstream connection: "connection:{ownerID}:{service}:{connectionID}"
 //   - Signing key encryption: "signing-key:{keyID}"
+//   - Broker-provider config secret: "broker-provider:{providerID}"
+//   - OIDC client secret: "oidc:{connectorID}"
 //
 // Retry policy: ErrEncryptionFailed means bad input — do not retry.
 // ErrEncryptorUnavailable means transient backend failure — caller may retry.

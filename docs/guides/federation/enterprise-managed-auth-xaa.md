@@ -26,7 +26,7 @@ xaa:
   enabled: true
   token_expiry: 1h
   max_assertion_age: 5m
-  require_resource: false      # set true to reject assertions without resource claim
+  require_resource: false      # set true to reject exchanges that name no resource
   subject_mode: auto_map       # or "strict"
   jwks_cache_ttl: 1h
 ```
@@ -185,7 +185,8 @@ Denial reasons emitted by `internal/services/jwt_bearer.go` and the XAA policy e
 | `replay` | Same `jti` reused | jti is single-use; mint a new assertion. |
 | `client_mismatch` | Assertion's `client_id` claim ≠ authenticated client | Align them. |
 | `invalid_scope` | Intersection of client/assertion/request/policy scopes is empty | Patch the client's `scope`, widen the policy `scopes`, or narrow the request. |
-| `invalid_resource` | Resource not registered, or assertion/request resources disagree | Register the resource (`POST /admin/resources`); align the `resource` claim. |
+| `invalid_resource` | Resource not registered, or assertion/request resources disagree | Register the resource (`POST /admin/resources`); align the `resource` claim. An unregistered resource is detected after the `jti` is consumed, so the retry needs a fresh assertion. |
+| `resource_required` | `xaa.require_resource: true` and neither the assertion nor the request named a resource. Returned as `400 invalid_target`. | Send `resource=<registered URI>` on the token request, or mint the assertion with a `resource` claim. The refused assertion is not spent; resend it with the resource added. |
 | `policy_denied` | XAA policy did not match (wrong `client_id`, resource, or all scopes filtered out) | List policies (`GET /admin/xaa/policies?idp_id=...`); confirm one matches the (idp, client, scope, resource) tuple. |
 | `access_denied` in `strict` mode | No subject mapping exists for the IdP's subject | Create an explicit mapping (Step 4) or switch `subject_mode: auto_map`. |
 

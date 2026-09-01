@@ -10,6 +10,7 @@ import (
 	"github.com/authplane/authserver/api/shared"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // handler serves the public connection endpoints.
@@ -17,6 +18,7 @@ type handler struct {
 	connect ConnectProvider
 	session *shared.SessionMiddleware
 	obs     *observability.Provider
+	urls    output.URLBuilder
 }
 
 // --- Connect / Callback ---
@@ -30,7 +32,7 @@ func (h *handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	userID, ok := shared.UserIDFromContext(r.Context())
 	if !ok || userID == "" {
-		http.Redirect(w, r, "/login?next="+r.URL.RequestURI(), http.StatusFound)
+		shared.RedirectInternal(w, r, h.urls, "/login?next="+r.URL.RequestURI(), http.StatusFound, h.obs.Logger)
 		return
 	}
 

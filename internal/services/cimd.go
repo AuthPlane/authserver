@@ -22,13 +22,21 @@ import (
 // CIMDService handles Client ID Metadata Document verification.
 // CIMD is pull-based: the AS fetches the client's metadata URL to auto-register.
 type CIMDService struct {
-	clients       output.ClientStore
-	cimd          output.CIMDFetcher
-	dcrMode       DCRMode
-	enabledGrants []string // grant types the AS is configured to honor; empty = no enforcement
-	logger        *slog.Logger
-	tracer        trace.Tracer
-	metrics       *observability.Metrics
+	clients      output.ClientStore
+	cimd         output.CIMDFetcher
+	modeProvider output.DCRModeProvider // required; resolves the DCR policy from ctx
+	// grantsProvider resolves the grant types the AS honors, per request.
+	// nil ⇒ no enforcement (tests). Optional, injected via WithCIMDEnabledGrants.
+	grantsProvider output.EnabledGrantsProvider
+	// cimdConfig is the per-request config seam and the single source of truth
+	// for the fetch knobs (RequireHTTPS/CacheTTL/FetchTimeout) and the Enabled
+	// gate, both consumed at the top of VerifyCIMD. Required (a constructor
+	// parameter). The static default returns boot values (OSS unchanged); a
+	// substitute provider may vary it per request.
+	cimdConfig output.CIMDConfigProvider
+	logger     *slog.Logger
+	tracer     trace.Tracer
+	metrics    *observability.Metrics
 }
 
 var _ input.CIMDPort = (*CIMDService)(nil)
@@ -36,32 +44,34 @@ var _ input.CIMDPort = (*CIMDService)(nil)
 // CIMDServiceOpt configures optional CIMDService dependencies.
 type CIMDServiceOpt func(*CIMDService)
 
-// WithCIMDEnabledGrants sets the grant types the running AS is
-// configured to honor. CIMDService rejects fetched documents whose
-// grant_types aren't in this set — same fail-loud guarantee
-// AdminService and DCRService now have, applied at the third
-// client-registration path.
-func WithCIMDEnabledGrants(grants []string) CIMDServiceOpt {
-	return func(s *CIMDService) { s.enabledGrants = grants }
+// WithCIMDEnabledGrants injects the per-request enabled-grants provider.
+// CIMDService rejects fetched documents whose grant_types aren't in the set the
+// provider returns — same fail-loud guarantee AdminService and DCRService have.
+func WithCIMDEnabledGrants(p output.EnabledGrantsProvider) CIMDServiceOpt {
+	return func(s *CIMDService) { s.grantsProvider = p }
 }
 
 // NewCIMDService creates a new CIMD service.
-// dcrMode is used to enforce DCR policy on CIMD auto-registration — CIMD
-// must not bypass admin_only or approved_redirects restrictions.
+// modeProvider enforces DCR policy on CIMD auto-registration (CIMD must not
+// bypass admin_only or approved_redirects). cimdConfig is the required
+// per-request config seam (single source of truth for the fetch knobs and the
+// Enabled gate) — a positional parameter like modeProvider, not an option.
 func NewCIMDService(
 	clients output.ClientStore,
 	cimd output.CIMDFetcher,
-	dcrMode DCRMode,
+	modeProvider output.DCRModeProvider,
+	cimdConfig output.CIMDConfigProvider,
 	obs *observability.Provider,
 	opts ...CIMDServiceOpt,
 ) *CIMDService {
 	s := &CIMDService{
-		clients: clients,
-		cimd:    cimd,
-		dcrMode: dcrMode,
-		logger:  obs.Logger,
-		tracer:  obs.Tracer,
-		metrics: obs.Metrics,
+		clients:      clients,
+		cimd:         cimd,
+		modeProvider: modeProvider,
+		cimdConfig:   cimdConfig,
+		logger:       obs.Logger,
+		tracer:       obs.Tracer,
+		metrics:      obs.Metrics,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -79,16 +89,56 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 		attribute.String("cimd_url", clientID),
 	)
 
+	// Resolve the per-request CIMD config — the single source of truth for the
+	// Enabled gate and the fetch knobs. A substitute provider may vary it per
+	// request; the static default returns boot values. Fail closed on provider
+	// error; deny when the feature is disabled.
+	cfg, cfgErr := s.cimdConfig.Config(ctx)
+	if cfgErr != nil {
+		s.logger.ErrorContext(ctx, "cimd blocked: config provider failed during VerifyCIMD", "error", cfgErr)
+		span.RecordError(cfgErr)
+		return nil, fmt.Errorf("resolve cimd config: %w", cfgErr)
+	}
+	if !cfg.Enabled {
+		span.SetStatus(codes.Error, "cimd blocked: disabled by config provider")
+		s.logger.WarnContext(ctx, "cimd auto-registration blocked: disabled by config provider", "client_id", clientID)
+		return nil, domain.ErrRegistrationDisabled
+	}
+
 	// Enforce DCR policy before CIMD auto-registration.
 	// CIMD must not bypass admin_only or approved_redirects restrictions.
-	if s.dcrMode.Mode == "admin_only" {
+	policy, err := s.modeProvider.Get(ctx)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "cimd blocked: dcr mode provider failed during VerifyCIMD", "error", err)
+		span.RecordError(err)
+		return nil, fmt.Errorf("get dcr mode: %w", err)
+	}
+
+	// Fail closed on an unrecognized mode: mirror DCRService.enforceMode's
+	// allowlist posture (default-deny) instead of falling through to
+	// auto-registration. Keeps both registration paths in agreement.
+	switch policy.Mode {
+	case "open", "approved_redirects", "admin_only":
+		// recognized mode
+	default:
+		span.SetStatus(codes.Error, "cimd blocked by unknown dcr mode")
+		s.logger.ErrorContext(ctx, "cimd auto-registration blocked by unknown DCR mode",
+			"client_id", clientID, "mode", policy.Mode)
+		return nil, fmt.Errorf("unknown dcr mode: %s", policy.Mode)
+	}
+
+	if policy.Mode == "admin_only" {
 		span.SetStatus(codes.Error, "cimd blocked by dcr admin_only")
 		s.logger.WarnContext(ctx, "cimd auto-registration blocked by DCR admin_only mode", "client_id", clientID)
 		return nil, domain.ErrRegistrationDisabled
 	}
 
 	start := time.Now()
-	doc, err := s.cimd.Fetch(ctx, clientID)
+	doc, err := s.cimd.Fetch(ctx, clientID, output.CIMDFetchConfig{
+		RequireHTTPS: cfg.RequireHTTPS,
+		CacheTTL:     cfg.CacheTTL,
+		FetchTimeout: cfg.FetchTimeout,
+	})
 	s.metrics.CIMDFetchDuration.Record(ctx, time.Since(start).Seconds())
 	if err != nil {
 		span.RecordError(err)
@@ -96,11 +146,16 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 		return nil, err
 	}
 
-	// reject CIMD-fetched docs that ask for a grant the AS isn't
-	// configured to honor. Without this, CIMD remained the third path
-	// (alongside admin REST and DCR) that could persist status=active
-	// clients whose grants /oauth/token can't serve.
-	if grantErr := client.ValidateGrantTypesEnabled(doc.GrantTypes, s.enabledGrants); grantErr != nil {
+	// Resolve the enabled-grant set per request (shared helper: nil provider ⇒
+	// no enforcement, provider error ⇒ fail closed), then reject docs asking for
+	// a grant the AS isn't configured to honor.
+	enabledGrants, gErr := resolveEnabledGrants(ctx, s.grantsProvider)
+	if gErr != nil {
+		span.RecordError(gErr)
+		span.SetStatus(codes.Error, gErr.Error())
+		return nil, gErr
+	}
+	if grantErr := client.ValidateGrantTypesEnabled(doc.GrantTypes, enabledGrants); grantErr != nil {
 		span.RecordError(grantErr)
 		span.SetStatus(codes.Error, grantErr.Error())
 		s.logger.WarnContext(ctx, "cimd auto-registration blocked by disabled grant",
@@ -110,9 +165,9 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 
 	// Enforce approved_redirects: every redirect URI in the CIMD document
 	// must appear in the approved list (exact match, no wildcards).
-	if s.dcrMode.Mode == "approved_redirects" {
+	if policy.Mode == "approved_redirects" {
 		for _, uri := range doc.RedirectURIs {
-			if s.matchesApprovedRedirect(uri) {
+			if slices.Contains(policy.ApprovedRedirects, uri) {
 				continue
 			}
 			uriErr := fmt.Errorf("%w: cimd redirect_uri %q not in approved list", domain.ErrInvalidRedirectURI, uri)
@@ -180,11 +235,4 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 	))
 
 	return c, nil
-}
-
-// matchesApprovedRedirect checks if a redirect URI matches any of the approved URIs.
-// Exact string match only — no wildcards, no prefix matching, no normalization.
-// Mirrors DCRService.matchesApprovedPattern.
-func (s *CIMDService) matchesApprovedRedirect(uri string) bool {
-	return slices.Contains(s.dcrMode.ApprovedRedirects, uri)
 }

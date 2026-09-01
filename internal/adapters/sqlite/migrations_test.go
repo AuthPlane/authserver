@@ -18,7 +18,7 @@ import (
 // pre-release exit gate: the consolidated `001_initial.up.sql` and
 // `001_initial.down.sql` are exercised in CI as a fresh-install +
 // drop-everything roundtrip. Previously, the up script ran on every
-// integration boot but the down script was never exercised — 
+// integration boot but the down script was never exercised —
 // adds permanent coverage.
 //
 // Round trip:

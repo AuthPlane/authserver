@@ -25,14 +25,14 @@ type JWKSDiscoveryFunc func(ctx context.Context, issuerURL string) (string, erro
 
 // XAAIDPService manages trusted IdP registration and JWKS discovery.
 type XAAIDPService struct {
-	idpStore  output.IDPStore
-	jwksCache output.IDPJWKSCache
-	discover  JWKSDiscoveryFunc
-	issuer    string // our AS issuer URL (default audience)
-	logger    *slog.Logger
-	tracer    trace.Tracer
-	metrics   *observability.Metrics
-	audit     AuditRecorder
+	idpStore       output.IDPStore
+	jwksCache      output.IDPJWKSCache
+	discover       JWKSDiscoveryFunc
+	issuerProvider output.IssuerProvider // our AS issuer URL (default audience)
+	logger         *slog.Logger
+	tracer         trace.Tracer
+	metrics        *observability.Metrics
+	audit          AuditRecorder
 }
 
 // NewXAAIDPService creates a new XAA IdP administration service.
@@ -40,19 +40,22 @@ func NewXAAIDPService(
 	idpStore output.IDPStore,
 	jwksCache output.IDPJWKSCache,
 	discover JWKSDiscoveryFunc,
-	issuer string,
+	issuerProvider output.IssuerProvider,
 	obs *observability.Provider,
 	audit AuditRecorder,
 ) *XAAIDPService {
+	if issuerProvider == nil {
+		panic("services.NewXAAIDPService: issuerProvider is required")
+	}
 	return &XAAIDPService{
-		idpStore:  idpStore,
-		jwksCache: jwksCache,
-		discover:  discover,
-		issuer:    issuer,
-		logger:    obs.Logger.With("component", "xaa_idp"),
-		tracer:    obs.Tracer,
-		metrics:   obs.Metrics,
-		audit:     audit,
+		idpStore:       idpStore,
+		jwksCache:      jwksCache,
+		discover:       discover,
+		issuerProvider: issuerProvider,
+		logger:         obs.Logger.With("component", "xaa_idp"),
+		tracer:         obs.Tracer,
+		metrics:        obs.Metrics,
+		audit:          audit,
 	}
 }
 
@@ -63,7 +66,11 @@ func (s *XAAIDPService) RegisterIDP(ctx context.Context, req input.RegisterIDPRe
 
 	audience := req.Audience
 	if audience == "" {
-		audience = s.issuer
+		var issuerErr error
+		audience, issuerErr = s.issuerProvider.Issuer(ctx)
+		if issuerErr != nil {
+			return nil, fmt.Errorf("resolve issuer: %w", issuerErr)
+		}
 	}
 
 	jwksURI := req.JWKSUri

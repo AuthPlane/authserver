@@ -199,9 +199,39 @@ spec:
             - name: admin
               containerPort: 9001
               protocol: TCP
+          # Both probes point at /livez, which checks nothing. That is deliberate
+          # on both counts, and neither is the obvious choice, so:
+          #
+          # LIVENESS must not depend on the database. A restart cannot fix a
+          # downed database, and cannot even succeed — the server runs
+          # migrations at startup — so a liveness probe on /health or /ready
+          # would crash-loop the pod through an outage and hold it down, on
+          # exponential backoff, past the moment the database recovers.
+          #
+          # READINESS is the less obvious one. /ready exists, pings the database
+          # and answers 503, and gating the Service on it looks right: a pod
+          # that cannot issue a token should not receive traffic. But readiness
+          # is all-or-nothing per pod, and this pod serves two kinds of route.
+          # /.well-known/jwks.json and the discovery documents are built from
+          # config and the signing key — with the default keyfile store they
+          # never touch the database — so removing the pod takes down the key
+          # set every resource server fetches to VALIDATE tokens, turning a
+          # database outage into an authentication outage everywhere downstream.
+          # That is the failure this chart's own history is about. Serving 500
+          # from /oauth/token while JWKS keeps answering is the better
+          # degradation.
+          #
+          # What this gives up: per-pod fault isolation. If one replica's
+          # connection pool is exhausted while the database is healthy,
+          # readiness would have routed around it and now does not. That is the
+          # narrower case, and the chart defaults to replicaCount: 1, where
+          # removing the only pod routes to nobody.
+          #
+          # /ready is unchanged and still honest — point an uptime check or a
+          # human at it. It just no longer decides who gets traffic.
           livenessProbe:
             httpGet:
-              path: /.well-known/oauth-authorization-server
+              path: /livez
               port: http
             initialDelaySeconds: 5
             periodSeconds: 15
@@ -209,7 +239,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /.well-known/oauth-authorization-server
+              path: /livez
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10

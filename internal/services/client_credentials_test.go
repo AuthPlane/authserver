@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,11 +14,13 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/services"
 	"github.com/authplane/authserver/testdata"
 )
@@ -31,6 +34,10 @@ type ccTestSetup struct {
 }
 
 func newCCTestSetup(t *testing.T) *ccTestSetup {
+	return newCCTestSetupWithConfig(t, static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{TokenExpiry: 15 * time.Minute}))
+}
+
+func newCCTestSetupWithConfig(t *testing.T, ccConfig output.ClientCredentialsConfigProvider) *ccTestSetup {
 	t.Helper()
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
@@ -41,7 +48,7 @@ func newCCTestSetup(t *testing.T) *ccTestSetup {
 		t.Fatalf("keyfile: %v", err)
 	}
 
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
 	// Static resources for resource validation.
@@ -53,8 +60,8 @@ func newCCTestSetup(t *testing.T) *ccTestSetup {
 		stores.Client,
 		stores.MachineToken,
 		jwksSvc,
-		"https://auth.example.com",
-		15*time.Minute,
+		staticIssuerForTest("https://auth.example.com"),
+		ccConfig,
 		obs,
 		auditSvc,
 		services.NewStaticResourceLister(resources),
@@ -69,8 +76,19 @@ func newCCTestSetup(t *testing.T) *ccTestSetup {
 	}
 }
 
-// createConfidentialClient creates a confidential client with client_credentials grant type.
+// createConfidentialClient creates an admin-provisioned confidential client
+// with client_credentials grant type.
 func (s *ccTestSetup) createConfidentialClient(t *testing.T, scope string) (*client.Client, string) {
+	t.Helper()
+	return s.createConfidentialClientWithSource(t, scope, client.SourceAdmin)
+}
+
+// createConfidentialClientWithSource is createConfidentialClient with the
+// registration door made explicit. The scope-denial message branches on it, so
+// a test that cares which door the client came through has to say so.
+func (s *ccTestSetup) createConfidentialClientWithSource(
+	t *testing.T, scope string, source client.RegistrationSource,
+) (*client.Client, string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -90,7 +108,7 @@ func (s *ccTestSetup) createConfidentialClient(t *testing.T, scope string) (*cli
 		ResponseTypes:           []string{},
 		TokenEndpointAuthMethod: "client_secret_basic",
 		Status:                  client.StatusActive,
-		RegistrationSource:      client.SourceAdmin,
+		RegistrationSource:      source,
 		Scope:                   scope,
 		IssuedAt:                now,
 		UpdatedAt:               now,
@@ -100,6 +118,32 @@ func (s *ccTestSetup) createConfidentialClient(t *testing.T, scope string) (*cli
 		t.Fatalf("create client: %v", err)
 	}
 	return c, secret
+}
+
+// failingCCConfigProvider always errors, to assert client-credentials issuance
+// fails closed on a config-resolution error rather than minting a token.
+type failingCCConfigProvider struct{ err error }
+
+func (p failingCCConfigProvider) Config(context.Context) (output.ClientCredentialsConfig, error) {
+	return output.ClientCredentialsConfig{}, p.err
+}
+
+func TestClientCredentials_ConfigError_FailsClosed(t *testing.T) {
+	wantErr := errors.New("cc config unavailable")
+	setup := newCCTestSetupWithConfig(t, failingCCConfigProvider{err: wantErr})
+	c, secret := setup.createConfidentialClient(t, "read write")
+
+	resp, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+	})
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected error wrapping %v on config failure, got %v", wantErr, err)
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response on config failure, got %+v", resp)
+	}
 }
 
 func TestClientCredentials_ValidExchange(t *testing.T) {
@@ -516,9 +560,11 @@ func TestClientCredentials_ExactSubset_Allowed(t *testing.T) {
 	}
 }
 
-func TestClientCredentials_EmptyClientScope_AllScopesAllowed(t *testing.T) {
+// An empty client Scope is NOT "no restriction" for this grant — it is an empty
+// ceiling. Requesting anything against it fails (see the two tests below); the
+// only thing that succeeds is requesting nothing, which yields an empty scope.
+func TestClientCredentials_EmptyClientScope_NoScopeRequested_IssuesEmptyScope(t *testing.T) {
 	setup := newCCTestSetup(t)
-	// Empty scope = no per-client restriction.
 	c, secret := setup.createConfidentialClient(t, "")
 
 	resp, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
@@ -531,6 +577,115 @@ func TestClientCredentials_EmptyClientScope_AllScopesAllowed(t *testing.T) {
 	}
 	if resp.Scope != "" {
 		t.Errorf("scope = %q, want empty", resp.Scope)
+	}
+}
+
+// TestClientCredentials_AdminClientNoScopes_ErrorPointsAtTheGrant covers the
+// operator who provisioned a machine client through the admin surface and left
+// its scope empty. The generic invalid_scope text points at the token request
+// while the cause is the registration two steps earlier — and for this client
+// the remedy really is PATCH: it is an M2M client merely missing its grant.
+func TestClientCredentials_AdminClientNoScopes_ErrorPointsAtTheGrant(t *testing.T) {
+	setup := newCCTestSetup(t)
+	c, secret := setup.createConfidentialClientWithSource(t, "", client.SourceAdmin)
+
+	_, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "profile",
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("err = %v, want ErrInvalidScope", err)
+	}
+	// err.Error() IS the wire error_description (api/public/oauth/handlers.go:399).
+	if !strings.Contains(err.Error(), "no registered scopes") {
+		t.Errorf("error_description = %q, want it to state the client has no registered scopes", err.Error())
+	}
+	if !strings.Contains(err.Error(), "PATCH /admin/clients/{client_id}") {
+		t.Errorf("error_description = %q, want the PATCH remedy for an admin-provisioned client", err.Error())
+	}
+}
+
+// TestClientCredentials_DynamicallyRegisteredClient_ErrorRedirectsToTheAdminAPI
+// covers the other empty-ceiling client: one that came through a registration
+// door that only issues user-delegated clients. Telling this developer to PATCH
+// is wrong advice — it repairs a client that should not have been created for
+// this grant. The message names the door, not the field.
+func TestClientCredentials_DynamicallyRegisteredClient_ErrorRedirectsToTheAdminAPI(t *testing.T) {
+	for _, source := range []client.RegistrationSource{client.SourceDCR, client.SourceCIMD} {
+		t.Run(string(source), func(t *testing.T) {
+			setup := newCCTestSetup(t)
+			c, secret := setup.createConfidentialClientWithSource(t, "", source)
+
+			_, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+				ClientID:     c.ID,
+				ClientSecret: secret,
+				Scope:        "profile",
+			})
+			if !errors.Is(err, domain.ErrInvalidScope) {
+				t.Fatalf("err = %v, want ErrInvalidScope", err)
+			}
+			if !strings.Contains(err.Error(), "created through dynamic registration") {
+				t.Errorf("error_description = %q, want it to name the registration door", err.Error())
+			}
+			if !strings.Contains(err.Error(), "pre-registered through the admin API") {
+				t.Errorf("error_description = %q, want it to redirect to the admin API", err.Error())
+			}
+			// The repair advice must not reach this client: patching it around
+			// the rule is the pattern the message exists to stop.
+			if strings.Contains(err.Error(), "PATCH") {
+				t.Errorf("error_description = %q, must not offer PATCH to a dynamically registered client", err.Error())
+			}
+		})
+	}
+}
+
+// TestClientCredentials_ScopeExceedsRegistered_ErrorNamesTheOverreach is the
+// third branch: a client that DOES have registered scopes but asked for more
+// must not be told it has none — that would send the operator to the admin API
+// for a client already configured there.
+func TestClientCredentials_ScopeExceedsRegistered_ErrorNamesTheOverreach(t *testing.T) {
+	setup := newCCTestSetup(t)
+	c, secret := setup.createConfidentialClient(t, "read")
+
+	_, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read admin",
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("err = %v, want ErrInvalidScope", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds the client's registered scopes") {
+		t.Errorf("error_description = %q, want it to state the request exceeded the registered set", err.Error())
+	}
+	if strings.Contains(err.Error(), "no registered scopes") {
+		t.Errorf("error_description = %q, must not claim the client has no scopes", err.Error())
+	}
+}
+
+// TestClientCredentials_DCRClientWithGrantedScopes_ErrorNamesTheOverreach pins
+// the branch order. A dynamically registered client whose scopes were later
+// granted by an operator is, at that point, a configured client overreaching —
+// the registration door stops being the story, so the overreach message wins.
+// Checking the source first would misdiagnose every such request.
+func TestClientCredentials_DCRClientWithGrantedScopes_ErrorNamesTheOverreach(t *testing.T) {
+	setup := newCCTestSetup(t)
+	c, secret := setup.createConfidentialClientWithSource(t, "read", client.SourceDCR)
+
+	_, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read admin",
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("err = %v, want ErrInvalidScope", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds the client's registered scopes") {
+		t.Errorf("error_description = %q, want the overreach message", err.Error())
+	}
+	if strings.Contains(err.Error(), "dynamic registration") {
+		t.Errorf("error_description = %q, must not blame the registration door for an overreach", err.Error())
 	}
 }
 

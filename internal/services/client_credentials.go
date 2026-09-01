@@ -31,15 +31,15 @@ var _ input.ClientCredentialsPort = (*ClientCredentialsService)(nil)
 // ClientCredentialsService implements the client_credentials grant (RFC 6749 §4.4).
 // Services authenticate as themselves — no user involved, no refresh token issued.
 type ClientCredentialsService struct {
-	clients       output.ClientStore
-	machineTokens output.MachineTokenStore
-	jwks          JWKSSigningKeyProvider
-	audit         AuditRecorder
-	issuer        string
-	tokenTTL      time.Duration
-	logger        *slog.Logger
-	tracer        trace.Tracer
-	metrics       *observability.Metrics
+	clients        output.ClientStore
+	machineTokens  output.MachineTokenStore
+	jwks           JWKSSigningKeyProvider
+	audit          AuditRecorder
+	issuerProvider output.IssuerProvider
+	ccConfig       output.ClientCredentialsConfigProvider
+	logger         *slog.Logger
+	tracer         trace.Tracer
+	metrics        *observability.Metrics
 
 	// Resource validation — all scope metadata lives on resource servers.
 	resources ResourceLister
@@ -54,7 +54,7 @@ type ClientCredentialsService struct {
 
 	// DPoP support (RFC 9449) — optional. When dpopStore is nil, DPoP is disabled.
 	dpopStore  output.DPoPNonceStore
-	dpopConfig *DPoPConfig
+	dpopConfig output.DPoPConfigProvider
 
 	// Agent identity — optional. When set, attaches agent_id/agent_chain claims.
 	agentIdentity *AgentIdentityService
@@ -65,30 +65,36 @@ func NewClientCredentialsService(
 	clients output.ClientStore,
 	machineTokens output.MachineTokenStore,
 	jwks JWKSSigningKeyProvider,
-	issuer string,
-	tokenTTL time.Duration,
+	issuerProvider output.IssuerProvider,
+	ccConfig output.ClientCredentialsConfigProvider,
 	obs *observability.Provider,
 	auditRec AuditRecorder,
 	resources ResourceLister,
 ) *ClientCredentialsService {
+	if issuerProvider == nil {
+		panic("services.NewClientCredentialsService: issuerProvider is required")
+	}
+	if ccConfig == nil {
+		panic("NewClientCredentialsService: ccConfig must not be nil")
+	}
 	return &ClientCredentialsService{
-		clients:       clients,
-		machineTokens: machineTokens,
-		jwks:          jwks,
-		audit:         auditRec,
-		issuer:        issuer,
-		tokenTTL:      tokenTTL,
-		logger:        obs.Logger.With("component", "client_credentials"),
-		tracer:        obs.Tracer,
-		metrics:       obs.Metrics,
-		resources:     resources,
+		clients:        clients,
+		machineTokens:  machineTokens,
+		jwks:           jwks,
+		audit:          auditRec,
+		issuerProvider: issuerProvider,
+		ccConfig:       ccConfig,
+		logger:         obs.Logger.With("component", "client_credentials"),
+		tracer:         obs.Tracer,
+		metrics:        obs.Metrics,
+		resources:      resources,
 	}
 }
 
 // WithDPoP enables DPoP proof-of-possession support on the client credentials service.
-func (s *ClientCredentialsService) WithDPoP(store output.DPoPNonceStore, cfg DPoPConfig) {
+func (s *ClientCredentialsService) WithDPoP(store output.DPoPNonceStore, cfg output.DPoPConfigProvider) {
 	s.dpopStore = store
-	s.dpopConfig = &cfg
+	s.dpopConfig = cfg
 }
 
 // WithIssuanceAudit enables the per-token issuance audit row write.
@@ -142,10 +148,11 @@ func (s *ClientCredentialsService) Exchange(ctx context.Context, req input.Clien
 		// for. Silent narrowing (Intersect) hid overbroad or buggy client
 		// behavior; RFC 6749 §5.2 names invalid_scope for this case.
 		if !requestedScopes.IsSubset(clientScopes) {
-			span.RecordError(domain.ErrInvalidScope)
-			span.SetStatus(codes.Error, "requested scope exceeds client's registered scopes")
+			scopeErr := scopeDenialError(c, clientScopes)
+			span.RecordError(scopeErr)
+			span.SetStatus(codes.Error, scopeErr.Error())
 			s.recordDenied(ctx, req.ClientID, "invalid_scope")
-			return nil, domain.ErrInvalidScope
+			return nil, scopeErr
 		}
 		effectiveScopes = requestedScopes
 	} else {
@@ -174,8 +181,14 @@ func (s *ClientCredentialsService) Exchange(ctx context.Context, req input.Clien
 	}
 
 	// 6. Sign JWT access token.
+	ccCfg, err := s.ccConfig.Config(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("resolve client credentials config: %w", err)
+	}
 	now := time.Now().UTC()
-	expiry := now.Add(s.tokenTTL)
+	expiry := now.Add(ccCfg.TokenExpiry)
 	jti := crypto.GenerateRandomString(16)
 
 	sk, err := s.jwks.GetSigningKey(ctx)
@@ -185,13 +198,17 @@ func (s *ClientCredentialsService) Exchange(ctx context.Context, req input.Clien
 		return nil, fmt.Errorf("get signing key: %w", err)
 	}
 
+	issuer, err := s.issuerProvider.Issuer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve issuer: %w", err)
+	}
 	aud := []string{req.Resource}
 	if req.Resource == "" {
-		aud = []string{s.issuer}
+		aud = []string{issuer}
 	}
 
 	claims := crypto.AccessTokenClaims{
-		Issuer:    s.issuer,
+		Issuer:    issuer,
 		Subject:   req.ClientID, // RFC 9068 §2.2: sub = client_id for machine tokens
 		Audience:  aud,
 		ClientID:  req.ClientID,
@@ -329,7 +346,7 @@ func (s *ClientCredentialsService) Exchange(ctx context.Context, req input.Clien
 	return &input.ClientCredentialsResponse{
 		AccessToken: accessToken,
 		TokenType:   tokenType,
-		ExpiresIn:   int(s.tokenTTL.Seconds()),
+		ExpiresIn:   int(ccCfg.TokenExpiry.Seconds()),
 		Scope:       effectiveScopes.String(),
 	}, nil
 }
@@ -396,7 +413,22 @@ func (s *ClientCredentialsService) validateDPoP(ctx context.Context, span trace.
 		return "", nil
 	}
 
-	result, err := crypto.ValidateProof(proof, method, reqURL, "", accessTokenHash, s.dpopConfig.ProofLifetime)
+	dpopCfg, err := s.dpopConfig.Config(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("resolve dpop config: %w", err)
+	}
+
+	// When the resolved config reports DPoP disabled, ignore the proof and
+	// issue a bearer token (no sender-constraining). The default build only
+	// wires this provider when DPoP is enabled, so this is byte-identical
+	// there; a substitute provider may toggle it per request.
+	if !dpopCfg.Enabled {
+		return "", nil
+	}
+
+	result, err := crypto.ValidateProof(proof, method, reqURL, "", accessTokenHash, dpopCfg.ProofLifetime)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "DPoP proof validation failed")
@@ -405,7 +437,7 @@ func (s *ClientCredentialsService) validateDPoP(ctx context.Context, span trace.
 	}
 
 	// If require_nonce is set, validate the nonce from the proof against the store.
-	if s.dpopConfig.RequireNonce {
+	if dpopCfg.RequireNonce {
 		if result.Nonce == "" {
 			span.RecordError(domain.ErrDPoPNonceRequired)
 			span.SetStatus(codes.Error, "DPoP nonce required but missing")
@@ -421,7 +453,7 @@ func (s *ClientCredentialsService) validateDPoP(ctx context.Context, span trace.
 	}
 
 	// Consume JTI for replay detection.
-	jtiExpiry := time.Now().Add(s.dpopConfig.ProofLifetime * 2)
+	jtiExpiry := time.Now().Add(dpopCfg.ProofLifetime * 2)
 	if err := s.dpopStore.ConsumeJTI(ctx, result.JTI, jtiExpiry); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "DPoP JTI replay")
@@ -463,16 +495,51 @@ func (s *ClientCredentialsService) recordDPoPMetric(ctx context.Context, err err
 }
 
 // isKnownResource checks whether the resource URI is registered.
-func (s *ClientCredentialsService) isKnownResource(_ context.Context, resource string) bool {
+func (s *ClientCredentialsService) isKnownResource(ctx context.Context, resource string) bool {
 	if s.resources == nil {
 		return false
 	}
-	for _, r := range s.resources.List() {
+	resources, err := s.resources.List(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "resource lookup failed, treating resource as unknown", "error", err)
+		return false
+	}
+	for _, r := range resources {
 		if r.URI == resource {
 			return true
 		}
 	}
 	return false
+}
+
+// scopeDenialError explains why a requested scope was refused. The token
+// endpoint surfaces err.Error() as the wire error_description, so the reason
+// has to travel in the error itself. The caller is the authenticated client
+// asking about its own registration, so naming it discloses nothing.
+//
+// The advice differs by door, which is why this takes the client. An
+// admin-provisioned client is a machine client missing a grant, and PATCH
+// fixes it. A dynamically registered client is a user-delegated client that
+// should not be using this grant at all, so it is sent to the admin surface
+// instead of being patched around the rule.
+//
+// Order matters: the ceiling check runs first, so a dynamically registered
+// client that an operator later granted scopes to is diagnosed as overreaching
+// rather than blamed on the door it came through.
+func scopeDenialError(c *client.Client, clientScopes scope.Set) error {
+	// ASCII only: RFC 6749 5.2 defines error_description as NQSCHAR.
+	switch {
+	case !clientScopes.IsEmpty():
+		return fmt.Errorf("%w: the requested scope exceeds the client's registered scopes",
+			domain.ErrInvalidScope)
+	case c.RegistrationSource == client.SourceDCR || c.RegistrationSource == client.SourceCIMD:
+		return fmt.Errorf("%w: this client was created through dynamic registration, which "+
+			"issues user-delegated clients only; machine-to-machine clients must be "+
+			"pre-registered through the admin API", domain.ErrInvalidScope)
+	default:
+		return fmt.Errorf("%w: the client has no registered scopes; grant them with "+
+			"PATCH /admin/clients/{client_id}", domain.ErrInvalidScope)
+	}
 }
 
 // hasGrantType checks if the grant type is in the list.

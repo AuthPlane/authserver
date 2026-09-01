@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/authplane/authserver/api/shared"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/observability"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // TestRegisterRoutes_DisabledStub_ReturnsTypedError —. With Connect
@@ -18,7 +20,7 @@ import (
 // pre- silent 404 / empty consent_url.
 func TestRegisterRoutes_DisabledStub_ReturnsTypedError(t *testing.T) {
 	mux := http.NewServeMux()
-	sessMW := shared.NewSessionMiddleware([]byte(strings.Repeat("k", 32)), "s", 0, false, http.SameSiteLaxMode)
+	sessMW := shared.NewSessionMiddleware(static.NewSessionSecretProvider([]byte(strings.Repeat("k", 32))), static.NewSessionConfigProvider(output.SessionConfig{SameSite: http.SameSiteLaxMode}), "s", false)
 	obs := observability.NewNoop()
 
 	RegisterRoutes(mux, Deps{Connect: nil}, sessMW, obs)

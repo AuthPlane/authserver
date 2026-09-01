@@ -1,9 +1,12 @@
 package oauth
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/authplane/authserver/internal/domain/resource"
 )
 
 // Error-path coverage for the internal helpers parseConfigData,
@@ -101,24 +104,7 @@ func TestParseCredential_MissingRefreshToken(t *testing.T) {
 
 func TestResolveSecret_EmptyEnvName(t *testing.T) {
 	a := &Adapter{secretResolver: &stubSecretResolver{secret: "x"}}
-	_, err := a.resolveSecret("")
-	if !errors.Is(err, errSecretLookup) {
-		t.Errorf("expected errSecretLookup, got %v", err)
-	}
-}
-
-func TestResolveSecret_InvalidEnvNamePattern(t *testing.T) {
-	a := &Adapter{secretResolver: &stubSecretResolver{secret: "x"}}
-	// Lowercase + dashes are rejected by ValidEnvVarName.
-	_, err := a.resolveSecret("not-a-valid-name")
-	if !errors.Is(err, errSecretLookup) {
-		t.Errorf("expected errSecretLookup, got %v", err)
-	}
-}
-
-func TestResolveSecret_NilResolver(t *testing.T) {
-	a := &Adapter{secretResolver: nil}
-	_, err := a.resolveSecret("CLIENT_SECRET_X")
+	_, err := a.resolveSecret(context.Background(), &resource.BrokerProvider{ID: "p1"}, "")
 	if !errors.Is(err, errSecretLookup) {
 		t.Errorf("expected errSecretLookup, got %v", err)
 	}
@@ -127,7 +113,7 @@ func TestResolveSecret_NilResolver(t *testing.T) {
 func TestResolveSecret_ResolverReturnsError(t *testing.T) {
 	want := errors.New("secret unavailable")
 	a := &Adapter{secretResolver: &stubSecretResolver{err: want}}
-	_, err := a.resolveSecret("CLIENT_SECRET_X")
+	_, err := a.resolveSecret(context.Background(), &resource.BrokerProvider{ID: "p1"}, "CLIENT_SECRET_X")
 	if !errors.Is(err, errSecretLookup) {
 		t.Errorf("expected errSecretLookup wrap, got %v", err)
 	}
@@ -135,7 +121,7 @@ func TestResolveSecret_ResolverReturnsError(t *testing.T) {
 
 func TestResolveSecret_ResolverReturnsEmpty(t *testing.T) {
 	a := &Adapter{secretResolver: &stubSecretResolver{secret: ""}}
-	_, err := a.resolveSecret("CLIENT_SECRET_X")
+	_, err := a.resolveSecret(context.Background(), &resource.BrokerProvider{ID: "p1"}, "CLIENT_SECRET_X")
 	if !errors.Is(err, errSecretLookup) {
 		t.Errorf("expected errSecretLookup, got %v", err)
 	}

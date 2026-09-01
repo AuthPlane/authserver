@@ -124,7 +124,7 @@ xaa:
   enabled: true
   token_expiry: 1h          # TTL for XAA-issued access tokens
   max_assertion_age: 5m     # Reject ID-JAGs whose iat is older than this
-  require_resource: false   # If true, ID-JAG must carry a resource claim
+  require_resource: false   # If true, the exchange must name a resource
   subject_mode: auto_map    # "auto_map" or "strict"
   jwks_cache_ttl: 1h
 ```
@@ -148,7 +148,7 @@ After XAA is enabled in YAML and trusted IdPs are registered:
 2. **Test against the public reproduction harness** —
    [xaa-with-okta.md](../guides/federation/xaa-with-okta.md) walks
    through end-to-end XAA validation against Okta's public playground
-   without needing an enterprise tenant.
+   without needing an Okta tenant.
 
 ## How authserver handles it
 

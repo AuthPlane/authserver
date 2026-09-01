@@ -29,6 +29,13 @@ func (s *staticJWKS) BuildJWKS(_ context.Context) (*jose.JSONWebKeySet, error) {
 	return &cp, nil
 }
 
+// staticIssuerForTest satisfies output.IssuerProvider for unit tests without
+// importing internal/adapters/static (preserves consistency with integration
+// test conventions).
+type staticIssuerForTest string
+
+func (s staticIssuerForTest) Issuer(_ context.Context) (string, error) { return string(s), nil }
+
 // memoryProofStore is an in-memory DPoPProofStore that returns a sentinel
 // "replay" error on duplicate JTI consumption.
 type memoryProofStore struct {
@@ -76,14 +83,16 @@ type jwtTestFixture struct {
 	handler http.Handler
 }
 
-func newJWTFixture(t *testing.T) *jwtTestFixture {
+// newTestKeyAndJWKS returns a fresh ES256 signing key and the single-key JWKS
+// that verifies tokens minted with it.
+func newTestKeyAndJWKS(t *testing.T) (*crypto.KeyPair, jose.JSONWebKeySet) {
 	t.Helper()
 
 	kp, err := crypto.GenerateKeyPair("ES256", "test-kid")
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	jwks := jose.JSONWebKeySet{
+	return kp, jose.JSONWebKeySet{
 		Keys: []jose.JSONWebKey{{
 			Key:       kp.PublicKey,
 			KeyID:     kp.KeyID,
@@ -91,7 +100,13 @@ func newJWTFixture(t *testing.T) *jwtTestFixture {
 			Use:       "sig",
 		}},
 	}
-	mw := NewJWTMiddleware(&staticJWKS{set: jwks}, testIssuer, observability.NewNoop())
+}
+
+func newJWTFixture(t *testing.T) *jwtTestFixture {
+	t.Helper()
+
+	kp, jwks := newTestKeyAndJWKS(t)
+	mw := NewJWTMiddleware(&staticJWKS{set: jwks}, staticIssuerForTest(testIssuer), observability.NewNoop())
 
 	f := &jwtTestFixture{kp: kp, mw: mw}
 	f.handler = mw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +192,7 @@ func TestNewResourceJWTMiddleware_PanicsOnEmptyAudience(t *testing.T) {
 			t.Fatal("expected panic for empty audience")
 		}
 	}()
-	NewResourceJWTMiddleware(jwks, testIssuer, "", newMemoryProofStore(), DPoPJWTConfig{ProofLifetime: time.Minute}, observability.NewNoop())
+	NewResourceJWTMiddleware(jwks, staticIssuerForTest(testIssuer), "", newMemoryProofStore(), DPoPJWTConfig{ProofLifetime: time.Minute}, observability.NewNoop())
 }
 
 // And nil proof store — the other half of the footgun pair.
@@ -191,7 +206,7 @@ func TestNewResourceJWTMiddleware_PanicsOnNilProofStore(t *testing.T) {
 			t.Fatal("expected panic for nil proofStore")
 		}
 	}()
-	NewResourceJWTMiddleware(jwks, testIssuer, resourceA, nil, DPoPJWTConfig{ProofLifetime: time.Minute}, observability.NewNoop())
+	NewResourceJWTMiddleware(jwks, staticIssuerForTest(testIssuer), resourceA, nil, DPoPJWTConfig{ProofLifetime: time.Minute}, observability.NewNoop())
 }
 
 // Happy path: the constructor wires audience + store correctly, so a properly
@@ -204,7 +219,7 @@ func TestNewResourceJWTMiddleware_WiresAudienceAndStore(t *testing.T) {
 	jwks := &staticJWKS{set: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 		Key: kp.PublicKey, KeyID: kp.KeyID, Algorithm: "ES256", Use: "sig",
 	}}}}
-	mw := NewResourceJWTMiddleware(jwks, testIssuer, resourceA, newMemoryProofStore(), DPoPJWTConfig{ProofLifetime: time.Minute}, observability.NewNoop())
+	mw := NewResourceJWTMiddleware(jwks, staticIssuerForTest(testIssuer), resourceA, newMemoryProofStore(), DPoPJWTConfig{ProofLifetime: time.Minute}, observability.NewNoop())
 
 	called := false
 	h := mw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -576,5 +591,626 @@ func TestJWTMiddleware_InvalidIssuer_NoClaimsNoStore(t *testing.T) {
 	}
 	if store.Len() != 0 {
 		t.Errorf("store touched on rejected request: %d", store.Len())
+	}
+}
+
+// ============================================================================
+// Zero DPoPJWTConfig — enforcement is token-intrinsic (AUD-12)
+// ============================================================================
+//
+// The audit's finding was a godoc that claimed a zero dpopCfg yields a
+// "Bearer-only resource" with DPoP enforcement disabled. It never did: the
+// proof is required because the token carries cnf.jkt, not because dpopCfg
+// says so. These tests exist so that a future attempt to make the code match
+// that retracted comment fails CI instead of shipping a real bypass.
+
+// newZeroDPoPFixture builds the middleware through NewResourceJWTMiddleware
+// with a zero DPoPJWTConfig — precisely the configuration an operator would
+// reach for believing it turns DPoP off.
+func newZeroDPoPFixture(t *testing.T) (*jwtTestFixture, *memoryProofStore) {
+	t.Helper()
+
+	kp, jwks := newTestKeyAndJWKS(t)
+	store := newMemoryProofStore()
+	mw := NewResourceJWTMiddleware(
+		&staticJWKS{set: jwks},
+		staticIssuerForTest(testIssuer),
+		resourceA,
+		store,
+		DPoPJWTConfig{}, // the zero value under test
+		observability.NewNoop(),
+	)
+
+	f := &jwtTestFixture{kp: kp, mw: mw}
+	f.handler = mw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.called = true
+		if c, ok := ClaimsFromContext(r.Context()); ok {
+			f.sawSub = c.Subject
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	return f, store
+}
+
+// The load-bearing assertion: a bound token with no proof at all is rejected
+// even though dpopCfg is the zero value. If someone gates the
+// crypto.IsDPoPBound branch on m.dpop, this request starts returning 200 and
+// the bypass is live.
+func TestJWTMiddleware_ZeroDPoPConfig_BoundTokenStillRequiresProof(t *testing.T) {
+	f, store := newZeroDPoPFixture(t)
+	mat := newDPoPMaterial(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+
+	// DPoP scheme, but no DPoP proof header.
+	req := httptest.NewRequestWithContext(context.Background(), defaultMethod, urlStr, nil)
+	req.Header.Set("Authorization", "DPoP "+mat.token)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	if f.called {
+		t.Fatal("downstream invoked for a DPoP-bound token with no proof — DPoP enforcement is not token-intrinsic anymore")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want 401", rec.Code)
+	}
+	if store.Len() != 0 {
+		t.Errorf("store touched on rejected request: %d", store.Len())
+	}
+}
+
+// The availability surprise the audit called out, pinned as intended
+// behavior: presenting a bound token under Bearer is rejected, not honored.
+func TestJWTMiddleware_ZeroDPoPConfig_BoundTokenRejectedUnderBearer(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	mat := newDPoPMaterial(t, f, resourceA)
+
+	rec := f.serveBearer(t, mat.token, "http://server.local"+resourcePath)
+
+	if f.called {
+		t.Fatal("downstream invoked for a DPoP-bound token presented as Bearer")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want 401", rec.Code)
+	}
+}
+
+// A zero dpopCfg means "60s default lifetime", not "no freshness check": a
+// valid proof is accepted, and its JTI is consumed, so replay protection is on
+// without the operator configuring anything.
+func TestJWTMiddleware_ZeroDPoPConfig_ValidProofAcceptedAndJTIConsumed(t *testing.T) {
+	f, store := newZeroDPoPFixture(t)
+	mat := newDPoPMaterial(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+	ath := crypto.ComputeATH(mat.token)
+
+	proof, err := crypto.CreateDPoPProof(mat.signer, "zero-cfg-jti", defaultMethod, urlStr, time.Now(), "", ath)
+	if err != nil {
+		t.Fatalf("proof: %v", err)
+	}
+
+	rec := f.serveDPoP(t, mat.token, proof, defaultMethod, urlStr)
+	if !f.called || rec.Code != http.StatusOK {
+		t.Fatalf("valid proof rejected under zero dpopCfg: status=%d called=%v body=%q", rec.Code, f.called, rec.Body.String())
+	}
+	if store.Len() != 1 {
+		t.Errorf("JTI not consumed under zero dpopCfg: store size %d, want 1", store.Len())
+	}
+
+	// Same proof again — replay must still be caught.
+	rec2 := f.serveDPoP(t, mat.token, proof, defaultMethod, urlStr)
+	if f.called || rec2.Code != http.StatusUnauthorized {
+		t.Errorf("replay accepted under zero dpopCfg: status=%d called=%v", rec2.Code, f.called)
+	}
+}
+
+// The 60-second default is a real window, not an absent check: a proof issued
+// well outside it is rejected.
+func TestJWTMiddleware_ZeroDPoPConfig_StaleProofRejected(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	mat := newDPoPMaterial(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+	ath := crypto.ComputeATH(mat.token)
+
+	stale, err := crypto.CreateDPoPProof(mat.signer, "stale-jti", defaultMethod, urlStr, time.Now().Add(-90*time.Second), "", ath)
+	if err != nil {
+		t.Fatalf("proof: %v", err)
+	}
+
+	rec := f.serveDPoP(t, mat.token, stale, defaultMethod, urlStr)
+	if f.called || rec.Code != http.StatusUnauthorized {
+		t.Errorf("stale proof accepted under the 60s default: status=%d called=%v", rec.Code, f.called)
+	}
+}
+
+// AUD-12 acceptance criterion 4: the tokenless 401 advertises DPoP even with a
+// zero dpopCfg. Answering "Bearer" alone would send a DPoP-bound client down a
+// path this resource then rejects.
+func TestJWTMiddleware_ZeroDPoPConfig_TokenlessChallengeAdvertisesDPoP(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+
+	req := httptest.NewRequestWithContext(context.Background(), defaultMethod, "http://server.local"+resourcePath, nil)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want 401", rec.Code)
+	}
+	// One field line carrying both challenges, not two. A client reading this
+	// with a first-value-wins accessor must still see DPoP — splitting them
+	// across lines would hide it from exactly the parsers this change targets,
+	// so assert the single-line encoding rather than merely the presence.
+	challenges := rec.Header().Values("WWW-Authenticate")
+	if len(challenges) != 1 {
+		t.Fatalf("tokenless challenge spread over %d field lines (%q); want 1 so first-value-wins parsers see both", len(challenges), challenges)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer, DPoP" {
+		t.Errorf("tokenless challenge: got %q, want %q", got, "Bearer, DPoP")
+	}
+}
+
+// ============================================================================
+// The DPoP scheme itself demands a proof
+// ============================================================================
+//
+// Advertising DPoP in the challenge to every client makes this reachable in
+// normal operation: a client that follows the challenge and holds a token the
+// AS chose not to bind will present Authorization: DPoP. Accepting that with
+// no proof would have the resource ignore, in silence, the very scheme it
+// advertises as proof-carrying.
+
+// newUnboundDPoPCaller returns a DPoP signer and an access token WITHOUT
+// cnf.jkt — the combination the review found slipping through.
+func newUnboundDPoPCaller(t *testing.T, f *jwtTestFixture, aud string) (jose.Signer, string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa: %v", err)
+	}
+	signer, err := crypto.NewDPoPSigner(priv, jose.ES256)
+	if err != nil {
+		t.Fatalf("dpop signer: %v", err)
+	}
+	return signer, f.mint(t, crypto.AccessTokenClaims{Audience: []string{aud}})
+}
+
+func TestJWTMiddleware_DPoPScheme_UnboundTokenRequiresProof(t *testing.T) {
+	f, store := newZeroDPoPFixture(t)
+	_, tok := newUnboundDPoPCaller(t, f, resourceA)
+
+	req := httptest.NewRequestWithContext(context.Background(), defaultMethod, "http://server.local"+resourcePath, nil)
+	req.Header.Set("Authorization", "DPoP "+tok) // DPoP scheme, no DPoP proof header
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	if f.called {
+		t.Fatal("downstream invoked for a DPoP-scheme request with no proof")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want 401", rec.Code)
+	}
+	if store.Len() != 0 {
+		t.Errorf("store touched on rejected request: %d", store.Len())
+	}
+}
+
+// A valid proof is honored even with nothing to bind it to, so a client that
+// follows the challenge is not locked out.
+func TestJWTMiddleware_DPoPScheme_UnboundTokenWithValidProofAccepted(t *testing.T) {
+	f, store := newZeroDPoPFixture(t)
+	signer, tok := newUnboundDPoPCaller(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+
+	proof, err := crypto.CreateDPoPProof(signer, "unbound-jti", defaultMethod, urlStr, time.Now(), "", crypto.ComputeATH(tok))
+	if err != nil {
+		t.Fatalf("proof: %v", err)
+	}
+
+	rec := f.serveDPoP(t, tok, proof, defaultMethod, urlStr)
+	if !f.called || rec.Code != http.StatusOK {
+		t.Fatalf("valid proof rejected for an unbound token: status=%d called=%v body=%q", rec.Code, f.called, rec.Body.String())
+	}
+	if store.Len() != 1 {
+		t.Errorf("JTI not consumed: store size %d, want 1", store.Len())
+	}
+}
+
+// The proof is validated, not merely required: a stale one is refused.
+func TestJWTMiddleware_DPoPScheme_UnboundTokenStaleProofRejected(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	signer, tok := newUnboundDPoPCaller(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+
+	stale, err := crypto.CreateDPoPProof(signer, "unbound-stale", defaultMethod, urlStr, time.Now().Add(-90*time.Second), "", crypto.ComputeATH(tok))
+	if err != nil {
+		t.Fatalf("proof: %v", err)
+	}
+
+	rec := f.serveDPoP(t, tok, stale, defaultMethod, urlStr)
+	if f.called || rec.Code != http.StatusUnauthorized {
+		t.Errorf("stale proof accepted for an unbound token: status=%d called=%v", rec.Code, f.called)
+	}
+}
+
+// Regression guard on the blast radius: the Bearer path for an unbound token
+// is untouched — no proof is demanded of a caller that never claimed to have
+// one.
+func TestJWTMiddleware_BearerScheme_UnboundTokenUnaffected(t *testing.T) {
+	f, store := newZeroDPoPFixture(t)
+	_, tok := newUnboundDPoPCaller(t, f, resourceA)
+
+	rec := f.serveBearer(t, tok, "http://server.local"+resourcePath)
+	if !f.called || rec.Code != http.StatusOK {
+		t.Fatalf("plain Bearer request broken: status=%d called=%v body=%q", rec.Code, f.called, rec.Body.String())
+	}
+	if store.Len() != 0 {
+		t.Errorf("Bearer request touched the DPoP store: %d", store.Len())
+	}
+}
+
+// ============================================================================
+// The DPoP-failure challenge names what actually works
+// ============================================================================
+
+// An unbound token that fails the DPoP path can still get in under Bearer, and
+// the challenge has to say so. Naming DPoP alone sends the caller back to the
+// scheme that just failed — the same advertisement-vs-behavior dead end the
+// tokenless challenge exists to close.
+func TestJWTMiddleware_DPoPFailure_UnboundTokenIsOfferedBearer(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	_, tok := newUnboundDPoPCaller(t, f, resourceA)
+
+	req := httptest.NewRequestWithContext(context.Background(), defaultMethod, "http://server.local"+resourcePath, nil)
+	req.Header.Set("Authorization", "DPoP "+tok) // DPoP scheme, no proof
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want 401", rec.Code)
+	}
+	challenges := rec.Header().Values("WWW-Authenticate")
+	if len(challenges) != 1 {
+		t.Fatalf("challenge spread over %d field lines (%q); want 1", len(challenges), challenges)
+	}
+	got := challenges[0]
+	if !strings.Contains(got, "Bearer ") {
+		t.Errorf("challenge %q: want Bearer offered, since this token works under it", got)
+	}
+	if !strings.Contains(got, "DPoP ") {
+		t.Errorf("challenge %q: want DPoP named too", got)
+	}
+}
+
+// RFC 6750 §3: a request that presented a token and failed SHOULD carry the
+// error attribute. Naming Bearer without one tells a client library nothing,
+// and it is the attribute they read to choose between refreshing the token and
+// starting authorization over.
+func TestJWTMiddleware_TwoSchemeChallenge_BothCarryTheirErrorCode(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	urlStr := "http://server.local" + resourcePath
+	_, unbound := newUnboundDPoPCaller(t, f, resourceA)
+
+	dpopNoProof := func(tok string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), defaultMethod, urlStr, nil)
+		req.Header.Set("Authorization", "DPoP "+tok)
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"invalid token":    f.serveBearer(t, "not-a-jwt", urlStr),
+		"unbound no proof": dpopNoProof(unbound),
+	} {
+		got := challengeOf(t, rec)
+		for _, part := range strings.Split(got, ",") {
+			part = strings.TrimSpace(part)
+			scheme, params, _ := strings.Cut(part, " ")
+			if scheme != "Bearer" && scheme != "DPoP" {
+				t.Fatalf("%s: unexpected part %q in %q", name, part, got)
+			}
+			if !strings.Contains(params, "error=") {
+				t.Errorf("%s: %q challenge carries no error attribute in %q", name, scheme, got)
+			}
+		}
+	}
+}
+
+// A DPoP-specific code must not appear on a Bearer challenge, whose parameter
+// vocabulary RFC 6750 defines, and a proof fault must not be reported as a
+// token fault — the client would fetch a new token instead of re-signing.
+func TestJWTMiddleware_ErrorCodeMatchesTheScheme(t *testing.T) {
+	urlStr := "http://server.local" + resourcePath
+
+	t.Run("invalid proof is invalid_dpop_proof on DPoP, invalid_token on Bearer", func(t *testing.T) {
+		f, _ := newZeroDPoPFixture(t)
+		_, tok := newUnboundDPoPCaller(t, f, resourceA)
+		req := httptest.NewRequestWithContext(context.Background(), defaultMethod, urlStr, nil)
+		req.Header.Set("Authorization", "DPoP "+tok)
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+
+		got := challengeOf(t, rec)
+		if !strings.Contains(got, `Bearer error="invalid_token"`) {
+			t.Errorf("challenge %q: Bearer must carry an RFC 6750 code", got)
+		}
+		if !strings.Contains(got, `DPoP error="invalid_dpop_proof"`) {
+			t.Errorf("challenge %q: a proof fault is invalid_dpop_proof (RFC 9449 §7.1)", got)
+		}
+	})
+
+	// RFC 9449 §7.2: a bound token presented as a bearer token is rejected per
+	// RFC 6750, so the code is invalid_token — nothing is wrong with the proof.
+	t.Run("wrong scheme is invalid_token, not a proof fault", func(t *testing.T) {
+		f, _ := newZeroDPoPFixture(t)
+		mat := newDPoPMaterial(t, f, resourceA)
+		rec := f.serveBearer(t, mat.token, urlStr)
+
+		got := challengeOf(t, rec)
+		if !strings.Contains(got, `error="invalid_token"`) {
+			t.Errorf("challenge %q: want invalid_token for a scheme mismatch", got)
+		}
+		if strings.Contains(got, "invalid_dpop_proof") {
+			t.Errorf("challenge %q blames the proof for a scheme mismatch", got)
+		}
+	})
+
+	t.Run("the body carries the same code as the challenge", func(t *testing.T) {
+		f, _ := newZeroDPoPFixture(t)
+		_, tok := newUnboundDPoPCaller(t, f, resourceA)
+		req := httptest.NewRequestWithContext(context.Background(), defaultMethod, urlStr, nil)
+		req.Header.Set("Authorization", "DPoP "+tok)
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+
+		if !strings.Contains(rec.Body.String(), `"error":"invalid_dpop_proof"`) {
+			t.Errorf("body %q disagrees with the DPoP challenge code", rec.Body.String())
+		}
+	})
+}
+
+// The mirror case, and the one that keeps the fix honest: a bound token has no
+// Bearer option, so offering it would be a new lie in the other direction.
+func TestJWTMiddleware_DPoPFailure_BoundTokenIsNotOfferedBearer(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	mat := newDPoPMaterial(t, f, resourceA)
+
+	req := httptest.NewRequestWithContext(context.Background(), defaultMethod, "http://server.local"+resourcePath, nil)
+	req.Header.Set("Authorization", "DPoP "+mat.token) // bound, no proof
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); strings.Contains(got, "Bearer") {
+		t.Errorf("challenge %q offers Bearer for a DPoP-bound token, which the middleware rejects", got)
+	}
+}
+
+// The 401 body reaches the client verbatim, and this branch now serves unbound
+// tokens too — so it must not tell an operator their token carries cnf.jkt.
+func TestJWTMiddleware_DPoPFailure_UnboundTokenErrorDoesNotClaimBinding(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	_, tok := newUnboundDPoPCaller(t, f, resourceA)
+
+	req := httptest.NewRequestWithContext(context.Background(), defaultMethod, "http://server.local"+resourcePath, nil)
+	req.Header.Set("Authorization", "DPoP "+tok)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	if body := rec.Body.String(); strings.Contains(body, "DPoP-bound") {
+		t.Errorf("401 body %q asserts the token is DPoP-bound; it is not", body)
+	}
+}
+
+// The two public entry points must give the same zero value the same meaning.
+// WithDPoP once stored it verbatim, pinning the window to zero and rejecting
+// every proof while the challenge still advertised DPoP — a compliant client
+// sending a perfectly fresh proof could never get in.
+func TestJWTMiddleware_WithDPoPZeroValue_FallsBackToDefault(t *testing.T) {
+	f := newJWTFixture(t)
+	f.mw.WithAudience(resourceA)
+	f.mw.WithDPoPProofStore(newMemoryProofStore())
+	f.mw.WithDPoP(DPoPJWTConfig{}) // stored verbatim: ProofLifetime == 0
+
+	mat := newDPoPMaterial(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+	proof, err := crypto.CreateDPoPProof(mat.signer, "withdpop-zero", defaultMethod, urlStr, time.Now(), "", crypto.ComputeATH(mat.token))
+	if err != nil {
+		t.Fatalf("proof: %v", err)
+	}
+
+	rec := f.serveDPoP(t, mat.token, proof, defaultMethod, urlStr)
+	if !f.called || rec.Code != http.StatusOK {
+		t.Errorf("WithDPoP(DPoPJWTConfig{}) rejected a fresh proof: status=%d called=%v body=%q — it must normalise to the 60s default like NewResourceJWTMiddleware", rec.Code, f.called, rec.Body.String())
+	}
+}
+
+// ============================================================================
+// Every 401 names the schemes that would work, not just the tokenless one
+// ============================================================================
+
+// challengeOf returns the single WWW-Authenticate field line, failing the test
+// if the response carries none or splits them across lines.
+func challengeOf(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	v := rec.Header().Values("WWW-Authenticate")
+	if len(v) != 1 {
+		t.Fatalf("challenge spread over %d field lines (%q); want exactly 1", len(v), v)
+	}
+	return v[0]
+}
+
+// The branch a DPoP client hits most: its bound token merely expired. Telling
+// it "Bearer" sends it to refresh, retry under Bearer, and be rejected for
+// using Bearer — the dead end this middleware exists to close, on the most
+// traveled of the four 401 paths.
+func TestJWTMiddleware_ExpiredToken_ChallengeStillNamesDPoP(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	expired := f.mint(t, crypto.AccessTokenClaims{
+		Audience: []string{resourceA},
+		IssuedAt: time.Now().Add(-2 * time.Hour).Unix(),
+		Expiry:   time.Now().Add(-time.Hour).Unix(),
+	})
+
+	rec := f.serveBearer(t, expired, "http://server.local"+resourcePath)
+	if f.called || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired token: status=%d called=%v", rec.Code, f.called)
+	}
+	if got := challengeOf(t, rec); !strings.Contains(got, "DPoP") {
+		t.Errorf("challenge %q omits DPoP; a DPoP client cannot tell which scheme to retry with", got)
+	}
+}
+
+// Audience mismatch is the one branch where the token verified, so boundness
+// is known and the challenge can be exact.
+func TestJWTMiddleware_AudienceMismatch_ChallengeMatchesBoundness(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		bound      bool
+		wantBearer bool
+	}{
+		{"unbound token keeps its Bearer option", false, true},
+		{"bound token is never offered Bearer", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := newZeroDPoPFixture(t) // configured for resourceA
+			claims := crypto.AccessTokenClaims{Audience: []string{resourceB}}
+			if tc.bound {
+				claims.Cnf = map[string]interface{}{"jkt": "some-thumbprint"}
+			}
+			tok := f.mint(t, claims)
+
+			rec := f.serveBearer(t, tok, "http://server.local"+resourcePath)
+			if f.called || rec.Code != http.StatusUnauthorized {
+				t.Fatalf("cross-audience token: status=%d called=%v", rec.Code, f.called)
+			}
+			got := challengeOf(t, rec)
+			if !strings.Contains(got, "DPoP") {
+				t.Errorf("challenge %q omits DPoP", got)
+			}
+			if hasBearer := strings.Contains(got, "Bearer"); hasBearer != tc.wantBearer {
+				t.Errorf("challenge %q: Bearer present=%v, want %v", got, hasBearer, tc.wantBearer)
+			}
+		})
+	}
+}
+
+// A client that simply splits WWW-Authenticate on "," must still recover the
+// correct set of schemes. A trailing auth-param fragment it does not recognize
+// is tolerable; a missing or unknown scheme is not. This is the invariant that
+// lets a single-scheme line carry error_description while a two-scheme line
+// may not.
+func TestJWTMiddleware_Challenges_SurviveNaiveCommaSplit(t *testing.T) {
+	f, _ := newZeroDPoPFixture(t)
+	_, unboundTok := newUnboundDPoPCaller(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+
+	dpopNoProof := func(tok string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), defaultMethod, urlStr, nil)
+		req.Header.Set("Authorization", "DPoP "+tok)
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	cases := []struct {
+		name string
+		rec  *httptest.ResponseRecorder
+		want []string
+	}{
+		{"tokenless", dpopNoProof(""), []string{"Bearer", "DPoP"}},
+		{"invalid token", f.serveBearer(t, "not-a-jwt", urlStr), []string{"Bearer", "DPoP"}},
+		{"unbound, no proof", dpopNoProof(unboundTok), []string{"Bearer", "DPoP"}},
+		{"bound under Bearer", f.serveBearer(t, newDPoPMaterial(t, f, resourceA).token, urlStr), []string{"DPoP"}},
+	}
+
+	for _, tc := range cases {
+		got := challengeOf(t, tc.rec)
+		var schemes []string
+		for _, part := range strings.Split(got, ",") {
+			head, _, _ := strings.Cut(strings.TrimSpace(part), " ")
+			if strings.Contains(head, "=") {
+				continue // an auth-param fragment, not a scheme
+			}
+			schemes = append(schemes, head)
+		}
+		if strings.Join(schemes, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%s: challenge %q splits to schemes %v, want %v", tc.name, got, schemes, tc.want)
+		}
+	}
+}
+
+// A single-scheme challenge carries the actual reason, not a fixed string: this
+// branch is reachable through several causes, and naming the wrong one sends
+// the caller to the wrong fix. A two-scheme challenge carries none, so the
+// naive-split invariant above holds.
+func TestJWTMiddleware_Challenge_DescriptionIsCauseSpecific(t *testing.T) {
+	urlStr := "http://server.local" + resourcePath
+
+	t.Run("bound token under Bearer names the scheme problem", func(t *testing.T) {
+		f, _ := newZeroDPoPFixture(t)
+		mat := newDPoPMaterial(t, f, resourceA)
+		rec := f.serveBearer(t, mat.token, urlStr)
+		if got := challengeOf(t, rec); !strings.Contains(got, `error_description="DPoP-bound token must use DPoP authorization scheme"`) {
+			t.Errorf("challenge %q does not name the scheme mismatch", got)
+		}
+	})
+
+	t.Run("bound token without a proof names the missing header", func(t *testing.T) {
+		f, _ := newZeroDPoPFixture(t)
+		mat := newDPoPMaterial(t, f, resourceA)
+		req := httptest.NewRequestWithContext(context.Background(), defaultMethod, urlStr, nil)
+		req.Header.Set("Authorization", "DPoP "+mat.token)
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+		if got := challengeOf(t, rec); !strings.Contains(got, "proof header required") {
+			t.Errorf("challenge %q does not name the missing proof header", got)
+		}
+	})
+
+	t.Run("two-scheme challenge carries no description", func(t *testing.T) {
+		f, _ := newZeroDPoPFixture(t)
+		_, tok := newUnboundDPoPCaller(t, f, resourceA)
+		req := httptest.NewRequestWithContext(context.Background(), defaultMethod, urlStr, nil)
+		req.Header.Set("Authorization", "DPoP "+tok)
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+		if got := challengeOf(t, rec); strings.Contains(got, "error_description") {
+			t.Errorf("challenge %q carries a description on a two-scheme line", got)
+		}
+	})
+}
+
+// Error text reaches the header, so it must not be able to break out of the
+// quoted-string or pad the response.
+func TestSanitizeChallengeText(t *testing.T) {
+	if got := sanitizeChallengeText(`he said "hi"` + "\r\nX-Evil: 1"); strings.ContainsAny(got, "\"\r\n") {
+		t.Errorf("sanitize left a quote or control character: %q", got)
+	}
+	if got := sanitizeChallengeText(strings.Repeat("a", 500)); len(got) > 160 {
+		t.Errorf("sanitize returned %d bytes; want it bounded", len(got))
+	}
+}
+
+// A caller-chosen JTI must not become an unbounded key in a store shared with
+// the token endpoint.
+func TestJWTMiddleware_OversizedProofJTI_Rejected(t *testing.T) {
+	f, store := newZeroDPoPFixture(t)
+	signer, tok := newUnboundDPoPCaller(t, f, resourceA)
+	urlStr := "http://server.local" + resourcePath
+
+	huge := strings.Repeat("A", maxDPoPProofJTILen+1)
+	proof, err := crypto.CreateDPoPProof(signer, huge, defaultMethod, urlStr, time.Now(), "", crypto.ComputeATH(tok))
+	if err != nil {
+		t.Fatalf("proof: %v", err)
+	}
+
+	rec := f.serveDPoP(t, tok, proof, defaultMethod, urlStr)
+	if f.called || rec.Code != http.StatusUnauthorized {
+		t.Errorf("oversized jti accepted: status=%d called=%v", rec.Code, f.called)
+	}
+	if store.Len() != 0 {
+		t.Errorf("oversized jti reached the store: %d entries", store.Len())
 	}
 }

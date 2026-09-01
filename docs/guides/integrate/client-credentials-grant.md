@@ -51,6 +51,8 @@ client_credentials:
 
 The client needs `grant_types=client_credentials` and at least one scope. Pick `--auth-method client_secret_post` (or `client_secret_basic`) — `none` is for public clients and won't work here.
 
+> **Machine clients are registered here, not through DCR.** `POST /oauth/register` creates user-delegated clients and never grants scopes, so a `client_credentials` client created that way has an empty ceiling: every explicit scope fails with `invalid_scope`. See [Which door a client comes through](../../concepts/resources-and-scopes.md#which-door-a-client-comes-through).
+
 ```bash
 # Command verified against docs/reference/cli.md#cli-admin-client-create
 authserver admin client create \
@@ -165,7 +167,9 @@ echo "$ACCESS_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss,sub,aud,sc
 | `unsupported_grant_type` | `client_credentials.enabled: false` on the server | Set `AUTHPLANE_CLIENT_CREDENTIALS_ENABLED=true` and restart ([env-vars.md](../../reference/env-vars.md)) |
 | `unauthorized_client` | Client's `grant_types` doesn't include `client_credentials` | Recreate with `--grant-types client_credentials` or update via admin API |
 | `invalid_client` | Wrong `client_id` or `client_secret`, or `--auth-method` was `none` | Re-check both values (case-sensitive); register with `--auth-method client_secret_post` or `client_secret_basic` |
-| `invalid_scope` | Requested scope not in the client's registered set | List scopes: `authserver admin client list`; update with `authserver admin client update --id <id> --scope '...'` |
+| `invalid_scope` — "created through dynamic registration" | The client came from `POST /oauth/register` or CIMD, which create user-delegated clients | Create a machine client instead: `authserver admin client create --grant-types client_credentials --scope '...'`. Patching the DCR client is not the fix |
+| `invalid_scope` — "the client has no registered scopes" | An admin-provisioned client was created without any scope | Grant them: `authserver admin client update --id <id> --scope '...'` |
+| `invalid_scope` — "exceeds the client's registered scopes" | The client has scopes, but the request asked for one outside that set | Narrow the request, or widen the client with `authserver admin client update --id <id> --scope '...'`. No admin surface reads the ceiling back, so set it explicitly rather than trying to inspect it |
 | Token mints fine but MCP server rejects with audience mismatch | Missing or wrong `resource=` on the token request | Add `-d "resource=<canonical-uri>"` matching the Resource's `--uri` byte-for-byte |
 | Stolen `client_secret` | Logs, env-var dumps, leaked Docker images | (1) `PATCH /admin/clients/{id}/suspend`, (2) `POST /oauth/revoke` for live tokens, (3) `authserver admin client rotate-secret --id <id>` ([cli.md#cli-admin-client-rotate-secret](../../reference/cli.md#cli-admin-client-rotate-secret)), (4) audit logs |
 

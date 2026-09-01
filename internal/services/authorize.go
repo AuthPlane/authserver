@@ -30,7 +30,7 @@ type AuthorizeService struct {
 	consentGrants output.ConsentGrantStore
 	cimd          input.CIMDPort // nil when CIMD is disabled
 	registry      *ResourceRegistry
-	requireScope  bool
+	oauthConfig   output.OAuthConfigProvider
 	logger        *slog.Logger
 	tracer        trace.Tracer
 	metrics       *observability.Metrics
@@ -46,24 +46,28 @@ type ResourceInfo struct {
 }
 
 // NewAuthorizeService creates a new authorize service.
-// requireScope controls whether missing scope in authorize requests is rejected (true,
-// RFC 6749 §3.3 compliant) or defaults to registered scopes (false, ADR-012).
+// oauthConfig supplies per-request OAuth behavior (e.g. RequireScope). Use
+// static.NewOAuthConfigProvider to wrap a boot-time bool (RFC 6749 §3.3 /
+// ADR-012).
 func NewAuthorizeService(
 	clients output.ClientStore,
 	sessions output.SessionStore,
 	consentGrants output.ConsentGrantStore,
 	cimd input.CIMDPort,
 	registry *ResourceRegistry,
-	requireScope bool,
+	oauthConfig output.OAuthConfigProvider,
 	obs *observability.Provider,
 ) *AuthorizeService {
+	if oauthConfig == nil {
+		panic("NewAuthorizeService: oauthConfig must not be nil")
+	}
 	return &AuthorizeService{
 		clients:       clients,
 		sessions:      sessions,
 		consentGrants: consentGrants,
 		cimd:          cimd,
 		registry:      registry,
-		requireScope:  requireScope,
+		oauthConfig:   oauthConfig,
 		logger:        obs.Logger,
 		tracer:        obs.Tracer,
 		metrics:       obs.Metrics,
@@ -148,7 +152,16 @@ func (s *AuthorizeService) StartAuthorization(ctx context.Context, req input.Aut
 
 	// Scope handling: when scope parameter is absent from the authorize request.
 	if req.Scope == "" {
-		if s.requireScope {
+		// RequireScope only matters when scope is absent, so resolve the config
+		// inside this branch — the common scope-present path skips it and can't
+		// fail on an otherwise-irrelevant config error.
+		oauthCfg, err := s.oauthConfig.Config(ctx)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("resolve oauth config: %w", err)
+		}
+		if oauthCfg.RequireScope {
 			// Strict mode (oauth.require_scope=true): reject per RFC 6749 §3.3.
 			err := fmt.Errorf("%w: scope parameter is required (oauth.require_scope=true)", domain.ErrInvalidScope)
 			span.RecordError(err)
@@ -314,11 +327,17 @@ func (s *AuthorizeService) lookupClient(ctx context.Context, clientID string) (*
 // collectDefaultScopes returns all registered scopes for a resource (or all scopes
 // globally if resource is empty) as a space-separated string. Used by ADR-012 to
 // substitute a default scope when the client omits it from the authorize request.
-func (s *AuthorizeService) collectDefaultScopes(_ context.Context, resourceURI string) string {
+func (s *AuthorizeService) collectDefaultScopes(ctx context.Context, resourceURI string) string {
+	resources, err := s.registry.List(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "default scope collection: resource list failed, substituting no scopes", "error", err)
+		return ""
+	}
+
 	seen := make(map[string]bool)
 	var scopes []string
 
-	for _, r := range s.registry.List() {
+	for _, r := range resources {
 		if resourceURI != "" && r.URI != resourceURI {
 			continue
 		}
@@ -340,8 +359,12 @@ func (s *AuthorizeService) validateScopes(ctx context.Context, scopeStr, resourc
 	scopes := strings.Fields(scopeStr)
 
 	// Build allowed set from the resource registry.
+	resources, err := s.registry.List(ctx)
+	if err != nil {
+		return fmt.Errorf("validate scopes: %w", err)
+	}
 	allowed := make(map[string]bool)
-	for _, r := range s.registry.List() {
+	for _, r := range resources {
 		if r.URI == resourceURI {
 			for _, sc := range r.Scopes {
 				allowed[sc] = true

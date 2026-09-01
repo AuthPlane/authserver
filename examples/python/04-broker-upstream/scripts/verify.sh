@@ -91,7 +91,7 @@ prov_resp=$(curl -fsS -X POST "${ADMIN_URL}/admin/broker-providers" \
   "protocol": "oauth",
   "config_data": {
     "client_id": "stub-client-id",
-    "client_secret_env": "AUTHPLANE_ADMIN_API_KEY",
+    "client_secret_ref": "AUTHPLANE_ADMIN_API_KEY",
     "authorize_url": "https://github-stub.example.invalid/login/oauth/authorize",
     "token_url": "https://github-stub.example.invalid/login/oauth/access_token"
   }

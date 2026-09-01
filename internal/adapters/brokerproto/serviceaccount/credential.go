@@ -8,7 +8,7 @@ import (
 // credentialData is the JSON shape persisted in broker_grants.credential_data
 // for providers using the service_account protocol. Unlike oauth or api_key,
 // this row carries no per-user secret — the SA private key is held by the
-// operator and referenced from configData.SAKeyEnv. The only per-user state
+// operator and referenced from configData.SAKeyRef. The only per-user state
 // is the upstream subject the AS impersonates.
 //
 // Per the resource-unification design the AS does not cache the

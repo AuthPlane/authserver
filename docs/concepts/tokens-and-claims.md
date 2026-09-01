@@ -127,10 +127,11 @@ Every login creates a "token family." When the client refreshes:
 3. The client gets a new access token + new refresh token
 
 **If someone replays a consumed refresh token** (indicating possible theft):
-- The **entire family is revoked** — every token in the chain becomes invalid
+- The **entire family is revoked** — every refresh token in the chain becomes invalid
 - Both the attacker and the legitimate client lose access
 - The user must re-authenticate
-- `authplane_refresh_token_reuse_total` fires
+- `authserver_refresh_token_reuse_total` fires
+- Access tokens already issued from the family are not reached: they live to `exp` (15 min by default; 1 hour for tokens exchanged from them) — see [what gets revoked when](../guides/operate/token-design-internals.md#what-gets-revoked-when)
 
 This is the OAuth 2.1 required pattern for refresh token rotation with reuse detection.
 

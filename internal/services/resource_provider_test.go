@@ -1,6 +1,9 @@
 package services
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestStaticResourceLister_List(t *testing.T) {
 	resources := []ResourceInfo{
@@ -9,7 +12,10 @@ func TestStaticResourceLister_List(t *testing.T) {
 	}
 	lister := NewStaticResourceLister(resources)
 
-	got := lister.List()
+	got, err := lister.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: unexpected error: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 resources, got %d", len(got))
 	}
@@ -23,7 +29,10 @@ func TestStaticResourceLister_List(t *testing.T) {
 
 func TestStaticResourceLister_Nil(t *testing.T) {
 	lister := NewStaticResourceLister(nil)
-	got := lister.List()
+	got, err := lister.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: unexpected error: %v", err)
+	}
 	if got != nil {
 		t.Fatalf("expected nil, got %v", got)
 	}

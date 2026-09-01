@@ -25,13 +25,27 @@ services:
   # Per-container CPU/memory. Linux-oriented mounts (the user's load-test host);
   # on Docker Desktop / macOS cAdvisor's container CPU is limited.
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    # v0.53.0+ is REQUIRED on Docker Engine 29+: the daemon raised its minimum
+    # API to 1.44, and only cAdvisor >=0.53 negotiates the API version instead of
+    # hardcoding a 1.41 client. Older images' Docker factory is rejected ("client
+    # version 1.41 is too old"), so they track no containers and report only the
+    # root cgroup — leaving the per-container CPU/mem panels empty.
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
     command: ["--housekeeping_interval=2s", "--docker_only=true"]
     privileged: true
+    devices:
+      # Some kernels need /dev/kmsg for cAdvisor to start its event watcher.
+      - /dev/kmsg
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
+      # cgroup v2 (Ubuntu 22.04+): /sys/fs/cgroup is a separate mount and a plain
+      # /sys bind does NOT reliably carry the submount through, so without this
+      # explicit bind cAdvisor can't read per-container cgroups and reports only
+      # the root series (no `name` label) — leaving the dashboard CPU/mem panels
+      # empty. cgroup v1 hosts bind it harmlessly too.
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
     cpus: "1.0"

@@ -18,6 +18,9 @@ echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss,sub,aud,scope,exp
 echo "$TOKEN" | cut -d. -f1 | base64 -d 2>/dev/null | jq '{alg,kid}'
 
 # 3. Introspect — does the AS still consider it active?
+#    $CID/$CS must be a confidential client entitled to this token: either the
+#    client the token was issued to, or the RS bound to the token's aud (see
+#    the note below). Otherwise you get active:false regardless of the token.
 curl -sS -X POST http://localhost:9000/oauth/introspect \
   -d "token=$TOKEN" -d "client_id=$CID" -d "client_secret=$CS" | jq .
 # → "active": true means the AS is happy; the problem is on the RS side.
@@ -26,6 +29,25 @@ curl -sS -X POST http://localhost:9000/oauth/introspect \
 authserver admin resource list | grep -A1 <slug>
 # → uri must equal the JWT's aud claim exactly
 ```
+
+> **Reading `active: false` correctly.** Introspection answers only callers
+> entitled to the token, so `active: false` has two meanings: the token really
+> is dead, **or** `$CID` is not entitled to ask. The endpoint cannot
+> distinguish them on the wire by design — that is what stops it being used to
+> probe for valid tokens.
+>
+> Before concluding the token is dead, confirm `$CID` is either the token's own
+> `client_id` (visible in the payload you decoded in step 2) or a client
+> authorized to act AS the Resource in `aud`
+> ([runtime-client-binding.md](runtime-client-binding.md)). A public
+> (secret-less) or suspended client gets `401 invalid_client` instead, which is
+> unambiguous. From the server side, a `token.introspect_denied` audit event
+> carries the requesting client and a `reason=`, which is the fastest way to
+> tell the two cases apart — with one gap worth knowing: a `client_id` that
+> matches no registered client is refused without an audit row at all (it names
+> nobody, so the row would record only what the caller typed). If you get
+> `401 invalid_client` and find no audit event, that is the case you are in:
+> check the `client_id` for a typo against `authserver admin client list`.
 
 ## Decision tree
 
@@ -37,6 +59,7 @@ authserver admin resource list | grep -A1 <slug>
 | `insufficient_scope` | RS requires scopes not in JWT `scope` | Either request the wider scope at the AS (and grant via `authserver admin client update --scope ...`), or relax the RS scope check. |
 | `dpop` mismatch | DPoP enabled, but proof header missing/invalid | See [DPoP and proof-of-possession](../../concepts/dpop-and-proof-of-possession.md). |
 | `revoked` | Token was revoked via `/oauth/revoke` | Mint a new one; the old one is dead for the rest of its TTL. |
+| `revoked`, but only after the RS was given credentials | The RS auto-wired introspection and is not authorized to act AS its Resource, so every token reads inactive | `authserver admin resource runtime-client add --client-id <rs-client-id> --slug <slug>` ([runtime-client-binding.md](runtime-client-binding.md)) |
 
 ## Why this works
 
@@ -49,6 +72,7 @@ The Authplane SDKs log the exact verification failure as structured JSON: `level
 | MCP client never sends a token (loops on 401) | The client requires PRM discovery. Confirm `/.well-known/oauth-protected-resource` is reachable and `WWW-Authenticate` carries `resource_metadata=`. |
 | Token verifies in `jwt.io` but fails on the server | Clock skew, or RS is on an old issuer URL. Compare `iss` to RS's `Issuer` env var verbatim. |
 | Logs show `failed to fetch JWKS` | RS host can't reach the AS. NetworkPolicy, DNS, or the AS pod is down. |
+| Every token suddenly rejected as revoked, across all clients | The RS introspects but is not authorized for its Resource. Check the AS log for `introspection attempt for token the caller is not entitled to`, then bind it ([runtime-client-binding.md](runtime-client-binding.md)). |
 
 ## See also
 

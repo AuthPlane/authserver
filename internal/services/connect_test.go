@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/audit"
@@ -234,12 +235,83 @@ func newConnectFixture(
 	rec := &captureAuditRecorder{}
 	svc := NewConnectService(
 		registry, resStore, provStore, grants, pending, bp, enc,
-		[]byte("test-state-secret-32-bytes!!!!!!"),
-		"https://as.test", "https://as.test",
-		allowedGlobalReturn,
+		static.NewConnectStateConfigProvider([]byte("test-state-secret-32-bytes!!!!!!")),
+		static.NewIssuerProvider("https://as.test"),
+		static.NewConnectConfigProvider(output.ConnectConfig{
+			RedirectBaseURL:   "https://as.test",
+			AllowedReturnURLs: allowedGlobalReturn,
+		}),
 		observability.NewNoop(), rec,
 	)
 	return svc, pending, rec
+}
+
+// failingConnectConfigProvider always errors, to assert return-URL validation
+// fails closed (deny) on a config-resolution error rather than allowing the URL.
+type failingConnectConfigProvider struct{ err error }
+
+func (p failingConnectConfigProvider) Config(context.Context) (output.ConnectConfig, error) {
+	return output.ConnectConfig{}, p.err
+}
+
+func TestConnectService_StartConnect_ConfigError_FailsClosed(t *testing.T) {
+	// A connect-config resolution failure must abort StartConnect with the
+	// wrapped error rather than proceeding to sign state / build the upstream
+	// URL (fail closed). StartConnect resolves the config once, up front.
+	wantErr := errors.New("connect config unavailable")
+	provider := githubProvider()
+	provStore := &mockBrokerProviderStore{
+		getByIDFn: func(string) (*resource.BrokerProvider, error) { return provider, nil },
+		getBySlug: func(string) (*resource.BrokerProvider, error) { return provider, nil },
+	}
+	svc, _, _ := newConnectFixture(t, provStore, &mockResourceStore{}, &mockBrokerGrantStore{},
+		&configurableConnectAdapter{}, []string{testReturnURL})
+	svc.connectConfig = failingConnectConfigProvider{err: wantErr}
+
+	if _, err := svc.StartConnect(context.Background(), testUserID, testProvSlug, "", testReturnURL); err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("StartConnect: expected error wrapping %v on config failure, got %v", wantErr, err)
+	}
+}
+
+// failingConnectStateConfigProvider always errors, to assert the connect-state
+// signing path propagates a config-resolution error rather than signing or
+// verifying with no key.
+type failingConnectStateConfigProvider struct{ err error }
+
+func (p failingConnectStateConfigProvider) Config(context.Context) (output.ConnectStateConfig, error) {
+	return output.ConnectStateConfig{}, p.err
+}
+
+// emptyKeyConnectStateConfigProvider returns a config with no key, to assert the
+// defensive empty-key guard rejects signing/verification under an alternate
+// provider.
+type emptyKeyConnectStateConfigProvider struct{}
+
+func (emptyKeyConnectStateConfigProvider) Config(context.Context) (output.ConnectStateConfig, error) {
+	return output.ConnectStateConfig{}, nil
+}
+
+func TestConnectService_StateToken_ConfigError_Propagates(t *testing.T) {
+	wantErr := errors.New("state config unavailable")
+	svc := &ConnectService{stateConfig: failingConnectStateConfigProvider{err: wantErr}}
+
+	if _, err := svc.generateStateToken(context.Background(), "u", "p", "r"); err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("generateStateToken: expected error wrapping %v, got %v", wantErr, err)
+	}
+	if _, err := svc.verifyStateToken(context.Background(), "id.sig", "u", "p", "r"); err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("verifyStateToken: expected error wrapping %v, got %v", wantErr, err)
+	}
+}
+
+func TestConnectService_StateToken_EmptyKey_Rejected(t *testing.T) {
+	svc := &ConnectService{stateConfig: emptyKeyConnectStateConfigProvider{}}
+
+	if _, err := svc.generateStateToken(context.Background(), "u", "p", "r"); err == nil {
+		t.Fatal("generateStateToken: expected error on empty key, got nil")
+	}
+	if _, err := svc.verifyStateToken(context.Background(), "id.sig", "u", "p", "r"); err == nil {
+		t.Fatal("verifyStateToken: expected error on empty key, got nil")
+	}
 }
 
 // --- StartConnect ---
@@ -444,12 +516,14 @@ func TestConnectService_IsReturnURLAllowed_GlobalFallback(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := &ConnectService{allowedReturnURLs: tt.globalList}
+			svc := &ConnectService{
+				issuerProvider: static.NewIssuerProvider("https://as.test"),
+			}
 			var target *resource.Resource
 			if !tt.targetIsNil {
 				target = withAllowedReturnURLs(tt.targetList)
 			}
-			got := svc.isReturnURLAllowed(tt.returnURL, target)
+			got := svc.isReturnURLAllowed(context.Background(), "", tt.returnURL, tt.globalList, target)
 			if got != tt.wantAllowed {
 				t.Errorf("isReturnURLAllowed(%q, target=%+v) = %v, want %v",
 					tt.returnURL, tt.targetList, got, tt.wantAllowed)
@@ -690,12 +764,14 @@ func TestConnectService_IsReturnURLAllowed_LoopbackWildcards(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := &ConnectService{allowedReturnURLs: tt.globalList}
+			svc := &ConnectService{
+				issuerProvider: static.NewIssuerProvider("https://as.test"),
+			}
 			var target *resource.Resource
 			if !tt.targetIsNil {
 				target = withTargetList(tt.targetList)
 			}
-			got := svc.isReturnURLAllowed(tt.returnURL, target)
+			got := svc.isReturnURLAllowed(context.Background(), "", tt.returnURL, tt.globalList, target)
 			if got != tt.want {
 				t.Errorf("isReturnURLAllowed(%q) global=%v target=%v = %v, want %v",
 					tt.returnURL, tt.globalList, tt.targetList, got, tt.want)

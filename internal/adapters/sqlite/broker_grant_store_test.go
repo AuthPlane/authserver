@@ -27,7 +27,7 @@ func TestBrokerGrantStore(t *testing.T) {
 // TestBrokerGrantStore_CredentialData_StoredByteForByte verifies the contract
 // documented in internal/ports/output/broker_grant_store.go: the adapter
 // round-trips credential_data byte-for-byte without any transformation
-// (no JSON wrapping, hex-encoding, compression, etc.). The 
+// (no JSON wrapping, hex-encoding, compression, etc.). The
 // BrokerIssuer relies on this contract — it encrypts plaintext with the
 // DataEncryptor and stores the resulting ciphertext via this adapter; if
 // the adapter silently transformed the bytes, decryption would fail at

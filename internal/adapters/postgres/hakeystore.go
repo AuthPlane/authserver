@@ -8,7 +8,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,15 +31,15 @@ import (
 // WHERE is_current = TRUE. If two pods try to rotate simultaneously, one gets
 // a unique violation and retries with backoff.
 //
-// A cached atomic.Pointer holds the current signing key for fast reads;
-// the listener invalidates it on NOTIFY and the JWKS service reloads.
+// HAKeyStore performs no caching of its own. Fast-path reads are provided by a
+// caching decorator (signing.WrapKeyStore) layered over it; the listener
+// invalidates that decorator on NOTIFY and the JWKS service reloads.
 type HAKeyStore struct {
 	pool      *pgxpool.Pool
 	encryptor output.DataEncryptor
 	logger    *slog.Logger
 	tracer    trace.Tracer
 	metrics   *observability.Metrics
-	cached    atomic.Pointer[output.SigningKey]
 }
 
 var _ output.KeyStore = (*HAKeyStore)(nil)
@@ -57,14 +56,8 @@ func NewHAKeyStore(pool *pgxpool.Pool, encryptor output.DataEncryptor, obs *obse
 }
 
 // LoadCurrent returns the current signing key.
-// Uses an atomic cache for fast-path reads.
 // Returns nil, nil if no current key exists.
 func (s *HAKeyStore) LoadCurrent(ctx context.Context) (*output.SigningKey, error) {
-	// Fast path: return cached key.
-	if cached := s.cached.Load(); cached != nil {
-		return cached, nil
-	}
-
 	ctx, span := s.tracer.Start(ctx, "HAKeyStore.LoadCurrent")
 	defer span.End()
 
@@ -89,8 +82,6 @@ func (s *HAKeyStore) LoadCurrent(ctx context.Context) (*output.SigningKey, error
 		return nil, fmt.Errorf("decrypt current key: %w", err)
 	}
 
-	// Populate cache.
-	s.cached.Store(sk)
 	return sk, nil
 }
 
@@ -215,8 +206,7 @@ func (s *HAKeyStore) Save(ctx context.Context, key *output.SigningKey) error {
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		err = s.doSaveTx(ctx, id, key.KeyID, key.Algorithm, encPrivate, now)
 		if err == nil {
-			// Success — update cache and record metric.
-			s.cached.Store(key)
+			// Success — record metric.
 			if s.metrics != nil && s.metrics.KeyRotationTotal != nil {
 				s.metrics.KeyRotationTotal.Add(ctx, 1)
 			}
@@ -287,12 +277,6 @@ func (s *HAKeyStore) doSaveTx(ctx context.Context, id, kid, algorithm string, en
 	}
 
 	return tx.Commit(ctx)
-}
-
-// InvalidateCache clears the cached current key.
-// Called by the listener on NOTIFY.
-func (s *HAKeyStore) InvalidateCache() {
-	s.cached.Store(nil)
 }
 
 // decryptAndParse decrypts an encrypted PEM and parses it into a SigningKey.

@@ -14,7 +14,7 @@ Run the production Helm chart end-to-end on a local kind cluster: Postgres, OIDC
 
 - Docker Desktop (or any Docker daemon) running.
 - [`kind`](https://kind.sigs.k8s.io/), [`helm`](https://helm.sh/) 3.8+, [`kubectl`](https://kubernetes.io/docs/tasks/tools/), `jq`, `openssl`.
-- Go 1.26.3+ if you want to build the image from source (matches `go.mod`).
+- Go 1.26.6+ if you want to build the image from source (matches `go.mod`).
 - Read [Helm](helm.md) first — this page deliberately leaves chart values shallow.
 
 ## Steps

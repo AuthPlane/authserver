@@ -94,7 +94,7 @@ Names come straight from `internal/observability/metrics.go`. The prefix is curr
 | --- | --- |
 | `authserver_tokens_issued_total{grant_type}` | Throughput baseline, anomaly detection. |
 | `authserver_refresh_token_reuse_total` | Stolen-token reuse (RFC 6749 §10.4). Page on any non-zero increase. |
-| `authserver_auth_denied_total{reason}` | `locked_out` = brute-force; `invalid_client` = misconfigured caller. |
+| `authserver_auth_denied_total{reason}` | Why an authentication was refused. The login path emits `user_not_found`, `user_disabled`, `user_not_local`, `invalid_credentials` and `unusable_stored_hash`; the OIDC callback emits `user_disabled`. A sustained `user_not_found` rate is address enumeration or credential stuffing against a list. `unusable_stored_hash` means an account whose stored password hash cannot be derived against — a broken row, not a bad password; alert on any non-zero value. |
 | `authserver_tokens_revoked_total{reason}` | Family-level revocations propagating through. |
 | `authserver_login_attempts_total{result}` | Login success/failure ratio. |
 | `authplane_dpop_proofs_rejected_total` | Token-binding violations. |
@@ -115,7 +115,7 @@ Names come straight from `internal/observability/metrics.go`. The prefix is curr
 | Metric | Why |
 | --- | --- |
 | `authserver_active_clients` | Drift detection on registered clients. |
-| `authserver_active_token_families` | Outstanding token-family count; sizing input for the purge schedule. |
+| `authserver_active_token_families` | Outstanding token-family count. No purge target trims families today, so it grows with every authorization-code exchange. |
 
 The exhaustive list lives in [`docs/reference/metrics.md`](../../reference/metrics.md), generated from `internal/observability/metrics.go` (the source-of-truth on conflicts).
 
@@ -131,6 +131,20 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: "Refresh token reuse — possible theft"
+
+      - alert: RefreshReuseRevocationFailed      # page-worthy: detection fired, family still live (its access tokens are denylisted unless the jti alert fired too)
+        expr: increase(authserver_revocation_failures_total{path="reuse",half="family"}[5m]) > 0
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: "Reuse detected but the family could not be revoked — revoke it now (runbook)"
+
+      - alert: RefreshReuseDenylistFailed        # the family's access tokens outlive detection until exp; alone it means the family is dead
+        expr: increase(authserver_revocation_failures_total{path="reuse",half="jti"}[5m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "JTI denylist failed on reuse — family dead only if RefreshReuseRevocationFailed did not also fire; re-run the admin revoke or wait exp"
 
       - alert: HighAuthDenialRate                # likely an attack or a regression
         expr: rate(authserver_auth_denied_total[5m]) > 10

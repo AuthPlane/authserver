@@ -43,6 +43,26 @@ checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
+# Software Bill of Materials, one per archive (generated with syft).
+sboms:
+  - id: archive
+    artifacts: archive
+
+# Keyless cosign signature over the checksums file (covers every artifact).
+# Requires `id-token: write` and cosign in the release workflow.
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    signature: "${artifact}.sig"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
 changelog:
   sort: asc
   use: github
@@ -119,5 +139,14 @@ docker_manifests:
     image_templates:
       - "authplane/authserver:{{ .Version }}-amd64"
       - "authplane/authserver:{{ .Version }}-arm64"
+
+# Keyless cosign signatures over the published multi-arch image manifests.
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "--yes"
+      - "${artifact}@${digest}"
 
 # No snapcraft, homebrew, or scoop — not yet

@@ -32,6 +32,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -389,6 +391,29 @@ func buildOperation(r httpRoute, dtoByName map[string]httpDTO, refs map[string]b
 			"`metrics.basic_auth_*` config; not modeled as an OpenAPI security scheme."
 	}
 
+	// What the endpoint does, in prose. OpenAPI-only: the Markdown reference
+	// carries this through routeBodyHints, which the projection below consumes
+	// structurally instead. Without it an operation whose only description is a
+	// routeNotes caveat reads as if the caveat were its purpose.
+	if desc := routeDescriptions[r.Method+" "+r.Path]; desc != "" {
+		if op.Description != "" {
+			op.Description += " "
+		}
+		op.Description += desc
+	}
+
+	// Behavioral caveats (same source the Markdown "**Note**" paragraph uses),
+	// so client codegen and Swagger UI carry them too.
+	if note := routeNotes[r.Method+" "+r.Path]; note != "" {
+		if op.Description != "" {
+			op.Description += " "
+		}
+		// Uppercase the leading rune, not the leading byte — a note starting
+		// with a multi-byte rune would otherwise be split mid-UTF-8.
+		first, size := utf8.DecodeRuneInString(note)
+		op.Description += string(unicode.ToUpper(first)) + note[size:]
+	}
+
 	// Parse the hand-curated hint (same source the Markdown uses).
 	hint := routeBodyHints[r.Method+" "+r.Path]
 	parsed := parseHint(hint)
@@ -589,9 +614,17 @@ type successResponse struct {
 }
 
 var (
-	hintDTORE      = regexp.MustCompile(`\{\{dto:([A-Za-z][A-Za-z0-9_]*)\}\}`)
-	hintRequestRE  = regexp.MustCompile(`(?s)\*\*Request\*\*[^*]*?(?:\{\{dto:([A-Za-z][A-Za-z0-9_]*)\}\}|form-encoded)`)
-	hintResponseRE = regexp.MustCompile(`(?s)\*\*Response (\d{3})\*\*([^*]*?)(?:\*\*|\z)`)
+	hintDTORE     = regexp.MustCompile(`\{\{dto:([A-Za-z][A-Za-z0-9_]*)\}\}`)
+	hintRequestRE = regexp.MustCompile(`(?s)\*\*Request\*\*[^*]*?(?:\{\{dto:([A-Za-z][A-Za-z0-9_]*)\}\}|form-encoded)`)
+	// Matches only the HEADER of a response block. The body is sliced between
+	// consecutive headers by the caller rather than captured here.
+	//
+	// It used to capture the body with a consumed `**` terminator, which ate the
+	// opening marker of the NEXT response: FindAllStringSubmatch resumed past it
+	// and silently dropped every other one, so three documented responses became
+	// two. Go's regexp is RE2 and has no lookahead, so the terminator cannot
+	// simply be made non-consuming — hence the index walk.
+	hintResponseRE = regexp.MustCompile(`\*\*Response (\d{3})\*\*`)
 	hintErrorsRE   = regexp.MustCompile(`(?s)\*\*Errors\*\*([^*]*?)(?:\*\*|\z)`)
 	// hintStatusCodeRE matches "NNN `code`" where NNN is a real 3-digit HTTP
 	// status, not the tail of a longer number. The `(^|\D)` anchor avoids
@@ -615,11 +648,24 @@ func parseHint(hint string) parsedHint {
 		}
 	}
 
-	// Success responses — every "**Response NNN**" segment up to the next
-	// "**" (which is whatever follows: next Response, Errors, etc.).
-	for _, m := range hintResponseRE.FindAllStringSubmatch(hint, -1) {
-		status := m[1]
-		segment := m[2]
+	// Success responses. Each "**Response NNN**" header owns the text up to the
+	// next header, or to the end of the hint for the last one — sliced by index
+	// so no marker is consumed and none is skipped.
+	headers := hintResponseRE.FindAllStringSubmatchIndex(hint, -1)
+	for i, h := range headers {
+		status := hint[h[2]:h[3]]
+
+		// A segment ends at the next response header, or — for the last one — at
+		// whatever marker comes after it. Running the last segment to the end of
+		// the hint would swallow the **Errors** block, so any {{dto:…}} cited
+		// there would be attributed to the final success response.
+		end := len(hint)
+		if i+1 < len(headers) {
+			end = headers[i+1][0]
+		} else if next := strings.Index(hint[h[1]:], "**"); next >= 0 {
+			end = h[1] + next
+		}
+		segment := hint[h[1]:end]
 		var dtos []string
 		for _, dm := range hintDTORE.FindAllStringSubmatch(segment, -1) {
 			dtos = append(dtos, dm[1])

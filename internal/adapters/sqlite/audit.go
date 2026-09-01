@@ -43,9 +43,20 @@ func scanAuditEvent(row interface{ Scan(...any) error }) (*audit.Event, error) {
 }
 
 // Record implements output.AuditStore.
+//
+// The store owns created_at (see the port), unless the caller set it — an
+// explicit override for backfill, import, and tests.
+//
+// SQLite is embedded and single-writer, so the process clock IS the store's
+// clock: there is no second writer to disagree with, and strftime('now') would
+// buy nothing while costing sub-millisecond precision.
 func (s *AuditStore) Record(ctx context.Context, e *audit.Event) error {
 	ctx, span := s.tracer.Start(ctx, "SQLite.AuditRecord")
 	defer span.End()
+
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now().UTC()
+	}
 
 	start := time.Now()
 	_, err := dbOrTx(ctx, s.db).ExecContext(ctx,

@@ -32,7 +32,13 @@ type AdminService struct {
 	txManager     output.TransactionManager // optional — nil if not available
 	audit         AuditRecorder
 	audits        output.AuditStore
-	enabledGrants []string // grant types the AS is configured to honor; empty = no enforcement
+	// grantsProvider resolves the grant types the AS honors, per request.
+	// nil ⇒ no enforcement (tests). Optional, injected via WithEnabledGrants.
+	grantsProvider output.EnabledGrantsProvider
+	// auditQueryCfg bounds how far back the audit feed may be read, per request.
+	// nil ⇒ the built-in bound, never "unbounded": an unbounded audit scan is a
+	// defect regardless of who configured it.
+	auditQueryCfg output.AuditQueryConfigProvider
 	logger        *slog.Logger
 	tracer        trace.Tracer
 	metrics       *observability.Metrics
@@ -58,12 +64,19 @@ func WithTransactionManager(tm output.TransactionManager) AdminServiceOpt {
 	return func(a *AdminService) { a.txManager = tm }
 }
 
-// WithEnabledGrants sets the grant types the running AS is configured to
-// honor. AdminService rejects CreateClient/UpdateClient requests carrying
-// a grant outside this set so operators can't register clients that will
-// only fail later at /oauth/token.
-func WithEnabledGrants(grants []string) AdminServiceOpt {
-	return func(a *AdminService) { a.enabledGrants = grants }
+// WithAuditQueryConfig injects the per-request audit-feed lookback bound.
+// Omitting it leaves the built-in bound in force — the audit feed is never
+// unbounded, whether or not a deployment configures it.
+func WithAuditQueryConfig(p output.AuditQueryConfigProvider) AdminServiceOpt {
+	return func(a *AdminService) { a.auditQueryCfg = p }
+}
+
+// WithEnabledGrants injects the per-request enabled-grants provider.
+// AdminService rejects CreateClient/UpdateClient requests carrying a grant
+// outside the set the provider returns so operators can't register clients that
+// will only fail later at /oauth/token.
+func WithEnabledGrants(p output.EnabledGrantsProvider) AdminServiceOpt {
+	return func(a *AdminService) { a.grantsProvider = p }
 }
 
 // NewAdminService creates a new admin service.
@@ -112,7 +125,13 @@ func (s *AdminService) CreateClient(ctx context.Context, req input.CreateClientR
 	}
 	params.Defaults()
 
-	if err := dclient.ValidateCreateParams(params, s.enabledGrants); err != nil {
+	enabledGrants, gErr := resolveEnabledGrants(ctx, s.grantsProvider)
+	if gErr != nil {
+		span.RecordError(gErr)
+		span.SetStatus(codes.Error, gErr.Error())
+		return nil, gErr
+	}
+	if err := dclient.ValidateCreateParams(params, enabledGrants); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidClient, err)
@@ -265,7 +284,13 @@ func (s *AdminService) UpdateClient(ctx context.Context, id string, req input.Up
 		IsAgent:                 c.IsAgent,
 		AgentDescription:        c.AgentDescription,
 	}
-	if err := dclient.ValidateCreateParams(params, s.enabledGrants); err != nil {
+	enabledGrants, gErr := resolveEnabledGrants(ctx, s.grantsProvider)
+	if gErr != nil {
+		span.RecordError(gErr)
+		span.SetStatus(codes.Error, gErr.Error())
+		return nil, gErr
+	}
+	if err := dclient.ValidateCreateParams(params, enabledGrants); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidClient, err)
@@ -594,7 +619,7 @@ func (s *AdminService) RevokeToken(ctx context.Context, jti string) error {
 	// Try revoking as a token family first.
 	family, err := s.tokens.GetFamily(ctx, jti)
 	if err == nil && family != nil {
-		if err := s.tokens.RevokeFamily(ctx, jti); err != nil {
+		if _, err := s.tokens.RevokeFamily(ctx, jti); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("revoke family: %w", err)
@@ -919,22 +944,72 @@ func (s *AdminService) ForceLogoutUser(ctx context.Context, id string) (int, err
 
 // --- Audit ---
 
+const (
+	// defaultAuditSinceWindow is the lookback applied when the caller omits
+	// since. Mirrors the issuances feed.
+	defaultAuditSinceWindow = 24 * time.Hour
+
+	// maxAuditSinceWindow caps the lookback. audit_events is the highest-volume
+	// table in the schema; without a bound, omitting since and paging on offset
+	// walks all of it.
+	maxAuditSinceWindow = 30 * 24 * time.Hour
+
+	// defaultAuditQueryLimit is the page size applied when the caller omits
+	// limit. Mirrors the issuances feed.
+	defaultAuditQueryLimit = 50
+
+	// maxAuditQueryLimit caps the page size. The since window bounds how far
+	// back a query reaches; this bounds how many rows one response may
+	// materialize. Raise it here if a deployment needs bigger pages.
+	maxAuditQueryLimit = 1000
+
+	// maxAuditQueryOffset caps offset paging. Postgres serves a deep OFFSET by
+	// scanning and discarding everything before it, so an unbounded offset is
+	// an unbounded scan even inside a bounded window.
+	maxAuditQueryOffset = 100_000
+)
+
 // QueryAudit implements input.AdminPort.
+//
+// The lookback bound is applied here rather than in the HTTP handler, so that no
+// query parameter — present or added later — can route around it. The bound is a
+// lookback and nothing more: this service does not know, and must not know, why
+// a deployment chose the number.
 func (s *AdminService) QueryAudit(ctx context.Context, filter input.AuditFilter) ([]audit.Event, error) {
 	ctx, span := s.tracer.Start(ctx, "AdminService.QueryAudit")
 	defer span.End()
 
-	f := output.AuditFilter{
-		Action:   filter.Action,
-		ActorID:  filter.ActorID,
-		ClientID: filter.ClientID,
-		Limit:    filter.Limit,
-		Offset:   filter.Offset,
+	since, err := s.boundAuditSince(ctx, filter.Since)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
 	}
-	if filter.Since != nil {
-		f.SinceUnix = filter.Since.Unix()
+	limit, offset, err := boundAuditPage(filter.Limit, filter.Offset)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	f := output.AuditFilter{
+		Action:    filter.Action,
+		ActorID:   filter.ActorID,
+		ClientID:  filter.ClientID,
+		Limit:     limit,
+		Offset:    offset,
+		SinceUnix: since.Unix(),
 	}
 	if filter.Until != nil {
+		// until only ever narrows the window — it cannot route around the since
+		// bound — so it is not clamped. But an until at or before the effective
+		// since describes an empty interval, and returning a silently-empty page
+		// for it lets a caller mistake a malformed range for "no events". Reject
+		// it, consistent with the rest of the bounds telling a caller no rather
+		// than handing back something it will misread.
+		if !filter.Until.After(since) {
+			err = domain.NewInvalidRequestError("until must be after the effective since")
+			span.RecordError(err)
+			return nil, err
+		}
 		f.UntilUnix = filter.Until.Unix()
 	}
 	result, err := s.audits.Query(ctx, f)
@@ -944,6 +1019,74 @@ func (s *AdminService) QueryAudit(ctx context.Context, filter input.AuditFilter)
 		return nil, err
 	}
 	return result, nil
+}
+
+// boundAuditSince resolves the effective lower bound of an audit query.
+//
+// An omitted since becomes the default lookback — never "the beginning of time",
+// which is what makes offset paging over audit_events unbounded today. A since
+// beyond the max is rejected rather than quietly narrowed: a caller asking for
+// ninety days should be told it cannot have them, not handed thirty and left to
+// believe that was all there was.
+func (s *AdminService) boundAuditSince(ctx context.Context, since *time.Time) (time.Time, error) {
+	cfg := output.AuditQueryConfig{
+		DefaultLookback: defaultAuditSinceWindow,
+		MaxLookback:     maxAuditSinceWindow,
+	}
+	if s.auditQueryCfg != nil {
+		resolved, err := s.auditQueryCfg.Config(ctx)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("resolve audit query config: %w", err)
+		}
+		if resolved.DefaultLookback > 0 {
+			cfg.DefaultLookback = resolved.DefaultLookback
+		}
+		// A zero MaxLookback keeps the built-in cap. A provider handing back a
+		// default-constructed config — a deployment whose visibility setting
+		// was never populated — must inherit the bound, not silently remove it.
+		if resolved.MaxLookback > 0 {
+			cfg.MaxLookback = resolved.MaxLookback
+		}
+	}
+
+	now := time.Now().UTC()
+	if cfg.MaxLookback > 0 && cfg.DefaultLookback > cfg.MaxLookback {
+		cfg.DefaultLookback = cfg.MaxLookback
+	}
+	if since == nil {
+		return now.Add(-cfg.DefaultLookback), nil
+	}
+	if cfg.MaxLookback > 0 && now.Sub(*since) > cfg.MaxLookback {
+		return time.Time{}, domain.NewInvalidRequestError(fmt.Sprintf(
+			"since exceeds the maximum audit lookback of %s", cfg.MaxLookback))
+	}
+	return since.UTC(), nil
+}
+
+// boundAuditPage resolves the effective page of an audit query — the sibling of
+// boundAuditSince, and in the service for the same reason: no query parameter
+// may route around the bound. The since window caps how far back a query
+// reaches; without this, limit and offset still cap nothing, and a single
+// request can ask the store to materialize or scan-and-discard an arbitrary
+// number of rows. Oversized values are rejected rather than clamped: a caller
+// asking for more rows than it may have should be told so, not handed a
+// truncated page it will mistake for the end of the data.
+func boundAuditPage(limit, offset int) (int, int, error) {
+	if limit <= 0 {
+		limit = defaultAuditQueryLimit
+	}
+	if limit > maxAuditQueryLimit {
+		return 0, 0, domain.NewInvalidRequestError(fmt.Sprintf(
+			"limit exceeds the maximum of %d", maxAuditQueryLimit))
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxAuditQueryOffset {
+		return 0, 0, domain.NewInvalidRequestError(fmt.Sprintf(
+			"offset exceeds the maximum of %d", maxAuditQueryOffset))
+	}
+	return limit, offset, nil
 }
 
 // --- Stats ---

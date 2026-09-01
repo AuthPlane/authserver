@@ -31,6 +31,10 @@ services:
       AUTHPLANE_DPOP_ENABLED: "false"
       AUTHPLANE_CLIENT_CREDENTIALS_ENABLED: "true"
       AUTHPLANE_RATE_LIMIT_ENABLED: "false"
+      # Token exchange on, with self-exchange allowed so the load test can mint a
+      # subject token (client_credentials) and exchange it back as the same client.
+      AUTHPLANE_TOKEN_EXCHANGE_ENABLED: "true"
+      AUTHPLANE_TOKEN_EXCHANGE_ALLOW_SELF_EXCHANGE: "true"
       # Client-secret hashing: HMAC-SHA256 (fast) when a pepper is set, vs bcrypt
       # (~hundreds of ms/req). Defaulted ON here so the test measures the real
       # ceiling, not the bcrypt cost. A/B against bcrypt with

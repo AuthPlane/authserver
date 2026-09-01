@@ -6,10 +6,13 @@ import (
 	"io"
 	"os"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/spf13/cobra"
 
+	"github.com/authplane/authserver/internal/adapters/cache"
 	"github.com/authplane/authserver/internal/adapters/encryption"
 	adaptersigning "github.com/authplane/authserver/internal/adapters/signing"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/adapters/storage"
 	"github.com/authplane/authserver/internal/config"
 	"github.com/authplane/authserver/internal/observability"
@@ -33,9 +36,19 @@ type cliEnv struct {
 	frontingAdminSvc       input.FrontingAdminPort
 }
 
-// loadConfig loads config using the --config flag or auto-detect.
+// loadConfig loads config using the --config flag or auto-detect. It also
+// enforces the OSS admin API-key policy (ValidateAdminAPIKey), which is not
+// part of the shared config.Validate() so that deployments fronting the admin
+// API with external authentication can opt out of the built-in API-key gate.
 func loadConfig() (*config.Config, error) {
-	return config.Load(cfgFile)
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateAdminAPIKey(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+	return cfg, nil
 }
 
 // openCLIEnv is the cliEnv-opener seam used by the unified-resource admin
@@ -53,24 +66,55 @@ func openAdminCLI() (*cliEnv, func(), error) {
 	}
 
 	obs := observability.NewNoop()
+
+	// Setup data encryptor if configured so CLI-driven broker-provider creates
+	// can route inline secrets onto the encrypted-column path, matching serve.go.
+	var dataEncryptor output.DataEncryptor
+	if cfg.DataEncryption.Driver != "" {
+		dataEncryptor, err = encryption.Open(context.Background(), cfg.DataEncryption, obs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("setup data encryptor: %w", err)
+		}
+	}
+	closeEncryptor := func() {
+		if c, ok := dataEncryptor.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}
+
 	ds, err := storage.Open(context.Background(), cfg.Storage, obs)
 	if err != nil {
+		closeEncryptor()
 		return nil, nil, fmt.Errorf("open database: %w", err)
 	}
 
 	if err := ds.Migrate(context.Background()); err != nil {
 		_ = ds.Close()
+		closeEncryptor()
 		return nil, nil, fmt.Errorf("migrate: %w", err)
 	}
 
+	var fieldEnc output.FieldEncryptor
+	if dataEncryptor != nil {
+		fieldEnc = static.NewDataEncryptorFieldEncryptor(dataEncryptor)
+	}
+	brokerConfigSecrets := static.NewConfigSecretBackend(fieldEnc)
+
 	auditSvc := services.NewAuditService(ds.Audit(), obs.WithComponent("audit"))
+	grantsProvider := static.NewEnabledGrantsProvider(config.EnabledGrantTypes(cfg))
 	adminSvc := services.NewAdminService(
 		ds.Client(), ds.User(), ds.Token(), ds.Audit(),
 		obs.WithComponent("admin"), auditSvc,
 		services.WithMachineTokenStore(ds.MachineToken()),
 		services.WithRevocationStore(ds.Revocation()),
 		services.WithTransactionManager(ds.Transaction()),
-		services.WithEnabledGrants(config.EnabledGrantTypes(cfg)),
+		services.WithEnabledGrants(grantsProvider),
+		// Same bound as the served admin API — the CLI reads the same feed and
+		// must not have a wider or narrower view of it than HTTP callers.
+		services.WithAuditQueryConfig(static.NewAuditQueryConfigProvider(output.AuditQueryConfig{
+			DefaultLookback: cfg.Admin.AuditDefaultLookback,
+			MaxLookback:     cfg.Admin.AuditMaxLookback,
+		})),
 	)
 
 	frontingAdminSvc := services.NewFrontingService(
@@ -86,6 +130,7 @@ func openAdminCLI() (*cliEnv, func(), error) {
 	brokerProviderAdminSvc := services.NewBrokerProviderAdminService(
 		ds.BrokerProvider(),
 		obs.WithComponent("broker-provider-admin"), auditSvc,
+		brokerConfigSecrets,
 	)
 	grantAdminSvc := services.NewGrantAdminService(
 		ds.ConsentGrant(), ds.BrokerGrant(), ds.Issuance(),
@@ -104,7 +149,10 @@ func openAdminCLI() (*cliEnv, func(), error) {
 		issuanceAdminSvc:       issuanceAdminSvc,
 		frontingAdminSvc:       frontingAdminSvc,
 	}
-	cleanup := func() { _ = ds.Close() }
+	cleanup := func() {
+		_ = ds.Close()
+		closeEncryptor()
+	}
 	return env, cleanup, nil
 }
 
@@ -144,7 +192,7 @@ func openKeyRotationCLI() (*services.JWKSService, func(), error) {
 		return nil, nil, fmt.Errorf("create key store: %w", err)
 	}
 
-	jwksSvc := services.NewJWKSService(keyResult.Store, cfg.Signing.Algorithm, obs.WithComponent("jwks"))
+	jwksSvc := services.NewJWKSService(keyResult.Store, cache.NewMemory[*jose.JSONWebKeySet](), cfg.Signing.Algorithm, obs.WithComponent("jwks"))
 
 	cleanup := func() {
 		if keyResult.Closer != nil {

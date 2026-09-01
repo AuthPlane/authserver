@@ -13,8 +13,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@authplane/fastmcp": "0.2.0",
-    "@authplane/sdk": "0.2.0",
+    "@authplane/fastmcp": "0.3.0",
+    "@authplane/sdk": "0.3.0",
     "fastmcp": "3.35.0",
     "zod": "3.24.0"
   },

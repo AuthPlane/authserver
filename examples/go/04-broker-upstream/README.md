@@ -28,7 +28,7 @@ All the auth-specific code fits inside the `// authplane:begin` /
 that prints the vended-token shape.
 
 <!-- loccount:begin -->
-**Auth-specific code: 19 lines · Total example: 49 lines · SDK: go-sdk v0.1.1**
+**Auth-specific code: 19 lines · Total example: 49 lines · SDK: go-sdk v0.2.0**
 <!-- loccount:end -->
 
 ## What you'll learn
@@ -50,7 +50,7 @@ that prints the vended-token shape.
 |---|---|
 | **Time to run** | ~2 minutes (first build ~90s; subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `go 1.25+`, `curl`, `jq`, a GitHub OAuth App (for live runs) |
-| **SDK** | `github.com/authplane/go-sdk/core` v0.1.1 (Go module proxy) |
+| **SDK** | `github.com/authplane/go-sdk/core` v0.2.0 (Go module proxy) |
 | **Grant** | `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693) |
 | **Upstream** | GitHub by default; the same recipe works for Google / Slack / Notion / Linear / Atlassian — see [`docs/guides/upstream-providers/connecting-providers.md`](../../../docs/guides/upstream-providers/connecting-providers.md) step 2 table |
 | **Builds on** | [Tier 03 — DPoP + per-tool scopes (Go)](../03-mcp-server-dpop-scopes/) — tier 03 vends AS-signed JWTs; tier 04 keeps that foundation and swaps the grant out for the brokered upstream vend. |
@@ -112,7 +112,7 @@ describe what's happening so you can reproduce the flow by hand.
        "protocol": "oauth",
        "config_data": {
          "client_id": "<from github oauth app>",
-         "client_secret_env": "CONNECTOR_GITHUB_SECRET",
+         "client_secret_ref": "CONNECTOR_GITHUB_SECRET",
          "authorize_url": "https://github.com/login/oauth/authorize",
          "token_url": "https://github.com/login/oauth/access_token"
        }

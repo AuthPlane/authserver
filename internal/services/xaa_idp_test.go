@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/audit"
 	"github.com/authplane/authserver/internal/domain/idp"
@@ -104,7 +105,7 @@ func mockDiscoverFail(_ context.Context, _ string) (string, error) {
 
 func newTestXAAIDPService(store *mockIDPStore, cache *mockJWKSCache, discover JWKSDiscoveryFunc) *XAAIDPService {
 	obs := observability.NewNoop()
-	return NewXAAIDPService(store, cache, discover, "https://authplane.example.com", obs, &xaaMockAudit{})
+	return NewXAAIDPService(store, cache, discover, static.NewIssuerProvider("https://authplane.example.com"), obs, &xaaMockAudit{})
 }
 
 func TestXAAIDPService_RegisterIDP(t *testing.T) {

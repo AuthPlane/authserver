@@ -104,9 +104,21 @@ func RunSessionStoreTests(t *testing.T, newStore func(*testing.T) output.Session
 			t.Fatalf("first consume: %v", err)
 		}
 
-		_, err := store.ConsumeByCodeHash(ctx, "hash-double")
+		got, err := store.ConsumeByCodeHash(ctx, "hash-double")
 		if !errors.Is(err, domain.ErrCodeConsumed) {
 			t.Errorf("expected ErrCodeConsumed, got %v", err)
+		}
+		// The session comes back alongside the error so the caller can act on
+		// the replay. This is not a non-consuming read: a fresh code
+		// is always burned.
+		if got == nil {
+			t.Fatal("expected the consumed session alongside ErrCodeConsumed, got nil")
+		}
+		if got.ID != "sess-double" {
+			t.Errorf("id: got %q, want %q", got.ID, "sess-double")
+		}
+		if got.CodeChallenge != "challenge-value" {
+			t.Errorf("code_challenge: got %q, want %q", got.CodeChallenge, "challenge-value")
 		}
 	})
 
@@ -160,6 +172,40 @@ func RunSessionStoreTests(t *testing.T, newStore func(*testing.T) output.Session
 		}
 		if consumed != goroutines-1 {
 			t.Errorf("expected %d ErrCodeConsumed, got %d", goroutines-1, consumed)
+		}
+	})
+
+	t.Run("UpdateCodeHashAndScope_RefusedOnConsumedSession", func(t *testing.T) {
+		// A session whose code has already been redeemed must never accept a
+		// fresh code: that code could never be legitimately redeemed, and a
+		// later "replay" of it would hand ExchangeCode's reuse path the
+		// session's genuine PKCE verifier — treated as a credentialed replay
+		// and revoking the tokens the first redemption issued. Regression
+		// coverage for the UPDATE guard: WHERE ... AND consumed_at IS NULL.
+		store := newStore(t)
+		ctx := context.Background()
+
+		s := newTestSession("sess-consumed-update", "hash-consumed-update")
+		if err := store.Create(ctx, s); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := store.ConsumeByCodeHash(ctx, "hash-consumed-update"); err != nil {
+			t.Fatalf("consume: %v", err)
+		}
+
+		err := store.UpdateCodeHashAndScope(ctx, "sess-consumed-update", "new-hash", "tools/query")
+		if !errors.Is(err, domain.ErrInvalidGrant) {
+			t.Errorf("expected ErrInvalidGrant minting a code onto a consumed session, got %v", err)
+		}
+
+		// The consumed session must be left untouched: no new code_hash, no
+		// scope narrowing.
+		got, gerr := store.GetByID(ctx, "sess-consumed-update")
+		if gerr != nil {
+			t.Fatalf("re-read session: %v", gerr)
+		}
+		if got.CodeHash != "hash-consumed-update" {
+			t.Errorf("code_hash mutated on a refused update: got %q", got.CodeHash)
 		}
 	})
 

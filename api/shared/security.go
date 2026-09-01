@@ -1,8 +1,11 @@
 package shared
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // SecurityHeaders returns middleware that sets standard HTTP security headers.
@@ -39,31 +42,27 @@ func isHTMLRequest(r *http.Request) bool {
 	return p == "/login" || p == "/consent" || strings.HasPrefix(p, "/error")
 }
 
-// CORSConfig controls Cross-Origin Resource Sharing.
-type CORSConfig struct {
-	AllowedOrigins []string // Exact origins to allow. Empty = no CORS headers.
-}
-
-// CORSMiddleware returns middleware that handles CORS preflight and response headers.
-// Only endpoints that need cross-origin access (token, DCR, discovery, revoke)
-// get CORS headers. Login/consent are same-origin only.
-func CORSMiddleware(cfg CORSConfig) func(http.Handler) http.Handler {
-	origins := make(map[string]struct{}, len(cfg.AllowedOrigins))
-	allowAll := false
-	for _, o := range cfg.AllowedOrigins {
-		if o == "*" {
-			allowAll = true
-		}
-		origins[o] = struct{}{}
-	}
-
+// CORSMiddleware returns middleware that handles CORS preflight and response
+// headers. Only endpoints that need cross-origin access (token, DCR, discovery,
+// revoke) get CORS headers; login/consent are same-origin only.
+//
+// The allowed-origins allowlist is resolved from the provider per request
+// rather than snapshotted at construction, so a deployment can vary origin
+// policy per request. Resolution failures fail closed: no CORS headers are
+// emitted for that request, never a fallback to a stale or process-wide list.
+// The provider must be non-nil; api/public wires the static boot default when
+// no alternative is supplied.
+//
+// A non-nil logger is used to record provider resolution failures at Error —
+// otherwise a persistently failing alternative provider would disable CORS with
+// no signal. The error is never written to the response. A nil logger disables
+// this logging (used by tests that don't assert on it).
+func CORSMiddleware(provider output.CORSConfigProvider, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if len(origins) == 0 {
-				next.ServeHTTP(w, r)
-				return
-			}
-
+			// Restrict per-request resolution to the CORS-eligible endpoints
+			// with an Origin header — everything else (login/consent, same-origin
+			// calls) short-circuits before touching the provider.
 			if !isCORSEndpoint(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
@@ -75,7 +74,30 @@ func CORSMiddleware(cfg CORSConfig) func(http.Handler) http.Handler {
 				return
 			}
 
-			_, allowed := origins[origin]
+			allowedOrigins, err := provider.AllowedOrigins(r.Context())
+			if err != nil {
+				// Fail closed: emit no CORS headers for this request. Surface
+				// the failure so a persistently broken provider is not silent;
+				// never leak the error into the response.
+				if logger != nil {
+					logger.ErrorContext(r.Context(),
+						"cors: allowed-origins resolution failed; failing closed (no CORS headers)",
+						"error", err, "path", r.URL.Path)
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			allowAll := false
+			allowed := false
+			for _, o := range allowedOrigins {
+				if o == "*" {
+					allowAll = true
+				}
+				if o == origin {
+					allowed = true
+				}
+			}
 			if !allowed && !allowAll {
 				next.ServeHTTP(w, r)
 				return

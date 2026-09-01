@@ -23,11 +23,10 @@ type idTokenClaims struct {
 	Groups   []string             `json:"groups"`
 }
 
-func (p *Provider) verifyIDToken(ctx context.Context, rawToken, expectedNonce string) (*output.OIDCTokenResult, error) {
+func (p *Provider) verifyIDToken(ctx context.Context, cfg output.OIDCConfig, doc DiscoveryDoc, jwks *jose.JSONWebKeySet, rawToken, expectedNonce string) (*output.OIDCTokenResult, error) {
 	ctx, span := p.tracer.Start(ctx, "OIDC.verifyIDToken")
 	defer span.End()
 
-	// Parse the JWT.
 	tok, err := josejwt.ParseSigned(rawToken, []jose.SignatureAlgorithm{
 		jose.RS256, jose.RS384, jose.RS512,
 		jose.ES256, jose.ES384, jose.ES512,
@@ -37,56 +36,46 @@ func (p *Provider) verifyIDToken(ctx context.Context, rawToken, expectedNonce st
 		return nil, fmt.Errorf("parse ID token: %w", err)
 	}
 
-	// Find the signing key.
 	headers := tok.Headers
 	if len(headers) == 0 {
 		return nil, fmt.Errorf("ID token has no headers")
 	}
 	kid := headers[0].KeyID
 
-	keys := p.getKeys(kid)
+	keys := getKeys(jwks, kid)
 	if len(keys) == 0 {
-		// kid miss — try re-fetching JWKS.
-		p.logger.DebugContext(ctx, "JWKS kid miss, re-fetching", "kid", kid)
-		p.metrics.OIDCJWKSCacheMisses.Add(ctx, 1)
-		if err := p.fetchJWKS(ctx); err != nil {
-			return nil, fmt.Errorf("JWKS re-fetch: %w", err)
+		// kid miss — the signing key likely rotated. Force a fresh fetch that
+		// bypasses the cache (configured bytes stay authoritative and cannot be
+		// refreshed). The cache hit/miss counters live in resolveJWKS, where
+		// they reflect whether we went to the network.
+		p.logger.DebugContext(ctx, "JWKS kid miss, refreshing", "kid", kid)
+		refreshed, ferr := p.refreshJWKS(ctx, cfg, doc)
+		if ferr != nil {
+			return nil, fmt.Errorf("JWKS refresh: %w", ferr)
 		}
-		keys = p.getKeys(kid)
+		keys = getKeys(refreshed, kid)
 		if len(keys) == 0 {
 			return nil, fmt.Errorf("no matching key for kid %q", kid)
 		}
-	} else {
-		p.metrics.OIDCJWKSCacheHits.Add(ctx, 1)
 	}
 
-	// Verify signature and extract claims.
 	var claims idTokenClaims
 	if err := tok.Claims(keys[0].Key, &claims); err != nil {
 		return nil, fmt.Errorf("verify ID token signature: %w", err)
 	}
 
-	// Validate issuer.
-	if claims.Issuer != p.issuer {
-		return nil, fmt.Errorf("ID token issuer %q does not match expected %q", claims.Issuer, p.issuer)
+	if claims.Issuer != cfg.Issuer {
+		return nil, fmt.Errorf("ID token issuer %q does not match expected %q", claims.Issuer, cfg.Issuer)
 	}
-
-	// Validate audience.
-	if !claims.Audience.Contains(p.clientID) {
-		return nil, fmt.Errorf("ID token audience does not contain client_id %q", p.clientID)
+	if !claims.Audience.Contains(cfg.ClientID) {
+		return nil, fmt.Errorf("ID token audience does not contain client_id %q", cfg.ClientID)
 	}
-
-	// Validate expiry.
 	if claims.Expiry == nil || claims.Expiry.Time().Before(time.Now()) {
 		return nil, fmt.Errorf("ID token is expired")
 	}
-
-	// Validate nonce.
 	if claims.Nonce != expectedNonce {
 		return nil, fmt.Errorf("ID token nonce mismatch")
 	}
-
-	// Validate subject is present.
 	if claims.Subject == "" {
 		return nil, fmt.Errorf("ID token missing sub claim")
 	}
@@ -100,15 +89,12 @@ func (p *Provider) verifyIDToken(ctx context.Context, rawToken, expectedNonce st
 	}, nil
 }
 
-func (p *Provider) getKeys(kid string) []jose.JSONWebKey {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.jwks == nil {
+func getKeys(jwks *jose.JSONWebKeySet, kid string) []jose.JSONWebKey {
+	if jwks == nil {
 		return nil
 	}
 	if kid == "" {
-		// No kid — return all keys. The caller will try the first.
-		return p.jwks.Keys
+		return jwks.Keys
 	}
-	return p.jwks.Key(kid)
+	return jwks.Key(kid)
 }

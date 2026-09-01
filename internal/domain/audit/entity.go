@@ -4,13 +4,29 @@ package audit
 import "time"
 
 // Action identifies what happened.
+//
+// A "_denied" action means the request did not succeed — not that it was refused
+// on its merits. The grant-issuance denials (ActionTokenIssueDenied,
+// ActionTokenRefreshDenied) are recorded off the named error return, so every
+// non-success path is covered, including internal failures that surface to the
+// client as server_error. A consumer must not read "_denied" as "authorization
+// refused": the denied reason carries the OAuth error code, and an outage is a
+// denied event with reason=server_error, not a rejected credential.
 type Action string
 
 const (
 	// ActionTokenIssued records a token issuance event.
 	ActionTokenIssued Action = "token.issued"
+	// ActionTokenIssueDenied records an authorization-code exchange that did not
+	// issue a token. "Denied" means "did not succeed", including internal errors
+	// surfaced as server_error — see the Action type doc.
+	ActionTokenIssueDenied Action = "token.issue_denied"
 	// ActionTokenRefreshed records a token refresh event.
 	ActionTokenRefreshed Action = "token.refreshed"
+	// ActionTokenRefreshDenied records a refresh-token rotation that did not issue
+	// a token. "Denied" means "did not succeed", including internal errors
+	// surfaced as server_error — see the Action type doc.
+	ActionTokenRefreshDenied Action = "token.refresh_denied"
 	// ActionTokenRevoked records a token revocation event.
 	ActionTokenRevoked Action = "token.revoked"
 	// ActionConsentGranted records a consent grant event.
@@ -39,12 +55,35 @@ const (
 	ActionKeyRotated Action = "key.rotated"
 	// ActionFamilyRevoked records a refresh token family revocation event.
 	ActionFamilyRevoked Action = "family.revoked"
+	// ActionFamilyRevocationFailed records a reuse detection whose family
+	// revocation failed — nothing was revoked and the family is still live.
+	// Written best-effort like every audit event; its absence is never proof
+	// of success, only the family.revoked row is.
+	ActionFamilyRevocationFailed Action = "family.revocation_failed"
+	// ActionFamilyDenylistFailed records a family revocation whose access-token
+	// JTI denylist failed: the family's already-issued access tokens keep
+	// passing introspection and token exchange until exp. Additive to the
+	// family row (family.revoked or family.revocation_failed), never instead
+	// of it.
+	ActionFamilyDenylistFailed Action = "family.denylist_failed"
+	// ActionAuthCodeReused records a replayed authorization code. Written on
+	// every detection, including when the verifier does not validate and
+	// nothing is revoked: the forensic signal must not depend on whether the
+	// destructive action ran.
+	ActionAuthCodeReused Action = "auth_code.reused"
 	// ActionUserOIDCLogin records a successful OIDC-federated user login event.
 	ActionUserOIDCLogin Action = "user.oidc_login"
 	// ActionUserOIDCLoginFailed records a failed OIDC-federated user login event.
 	ActionUserOIDCLoginFailed Action = "user.oidc_login_failed"
 	// ActionTokenIntrospected records a token introspection event.
 	ActionTokenIntrospected Action = "token.introspected"
+	// ActionTokenIntrospectDenied records an introspection call that did not
+	// return an active token. "Denied" means "did not succeed", including a
+	// token that is simply expired or revoked — see the Action type doc. The
+	// endpoint is oracle-shaped, so the negative half is the half worth
+	// watching: a caller probing token values leaves a trail here, not in
+	// ActionTokenIntrospected.
+	ActionTokenIntrospectDenied Action = "token.introspect_denied"
 	// ActionBrokerGrantCreated records a user-self-service upstream-connection
 	// creation event (POST /connect/{provider}/callback persists a fresh
 	// broker_grants row). Distinguishes user-driven flows from the admin-driven
@@ -161,24 +200,30 @@ const (
 
 // Event records a security-relevant action.
 type Event struct {
-	ID        string
-	Action    Action
-	ActorID   string // user ID, client ID, or "system"
-	ClientID  string // OAuth client involved (may be empty)
-	IP        string // source IP address
-	Detail    string // human-readable or JSON detail
-	TraceID   string // OTel trace ID for correlation (may be empty)
+	ID       string
+	Action   Action
+	ActorID  string // user ID, client ID, or "system"
+	ClientID string // OAuth client involved (may be empty)
+	IP       string // source IP address
+	Detail   string // human-readable or JSON detail
+	TraceID  string // OTel trace ID for correlation (may be empty)
+	// CreatedAt is normally left zero and stamped by the store on write, so that
+	// every row shares one clock: replicas do not, and a pod running slow would
+	// otherwise write rows behind a cursor that has already read past them.
+	//
+	// A non-zero value is an explicit override — for backfill, import, and tests
+	// that need to place an event at a chosen time. The store honors it as given.
 	CreatedAt time.Time
 }
 
-// NewEvent creates an Event with the current timestamp.
+// NewEvent creates an Event for something that just happened. CreatedAt is left
+// zero on purpose: the store stamps it (see the field's doc).
 func NewEvent(action Action, actorID, clientID, ip, detail string) Event {
 	return Event{
-		Action:    action,
-		ActorID:   actorID,
-		ClientID:  clientID,
-		IP:        ip,
-		Detail:    detail,
-		CreatedAt: time.Now().UTC(),
+		Action:   action,
+		ActorID:  actorID,
+		ClientID: clientID,
+		IP:       ip,
+		Detail:   detail,
 	}
 }

@@ -130,3 +130,18 @@ func TestConsentRequiredError_DeniedReason_Roundtrip(t *testing.T) {
 		t.Errorf("Error() = %q, want it to contain ResourceSlug", got)
 	}
 }
+
+// ErrReuseRevocationFailed must be a distinct identity (errors.Is tells the
+// two reuse outcomes apart) with ErrFamilyRevoked's code and message (the
+// wire must not tell them apart, and a domain error's message is wire text).
+func TestReuseRevocationFailed_SameWireAsFamilyRevoked(t *testing.T) {
+	if errors.Is(ErrReuseRevocationFailed, ErrFamilyRevoked) || errors.Is(ErrFamilyRevoked, ErrReuseRevocationFailed) {
+		t.Fatal("ErrReuseRevocationFailed and ErrFamilyRevoked must be distinct identities")
+	}
+	if ErrReuseRevocationFailed.Error() != ErrFamilyRevoked.Error() {
+		t.Errorf("message = %q, want ErrFamilyRevoked's %q", ErrReuseRevocationFailed.Error(), ErrFamilyRevoked.Error())
+	}
+	if ErrorCode(ErrReuseRevocationFailed) != ErrorCode(ErrFamilyRevoked) {
+		t.Errorf("code = %q, want %q", ErrorCode(ErrReuseRevocationFailed), ErrorCode(ErrFamilyRevoked))
+	}
+}

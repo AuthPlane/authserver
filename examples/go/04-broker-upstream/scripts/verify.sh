@@ -109,7 +109,7 @@ provider_resp=$(curl -sS -X POST "${ADMIN_URL}/admin/broker-providers" \
   "protocol": "oauth",
   "config_data": {
     "client_id": "${CONNECTOR_GITHUB_CLIENT_ID}",
-    "client_secret_env": "CONNECTOR_GITHUB_SECRET",
+    "client_secret_ref": "CONNECTOR_GITHUB_SECRET",
     "authorize_url": "https://github.com/login/oauth/authorize",
     "token_url": "https://github.com/login/oauth/access_token"
   }

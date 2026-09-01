@@ -4,6 +4,7 @@ package services_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -300,7 +301,7 @@ func TestAdmin_CreateClient_GrantNotEnabled_Rejected(t *testing.T) {
 		obs, nil,
 		services.WithMachineTokenStore(stores.MachineToken),
 		services.WithRevocationStore(stores.Revocation),
-		services.WithEnabledGrants([]string{"authorization_code", "refresh_token"}),
+		services.WithEnabledGrants(staticGrantsForTest{grants: []string{"authorization_code", "refresh_token"}}),
 	)
 
 	_, err := adminSvc.CreateClient(context.Background(), input.CreateClientRequest{
@@ -329,7 +330,7 @@ func TestAdmin_UpdateClient_GrantNotEnabled_Rejected(t *testing.T) {
 		obs, nil,
 		services.WithMachineTokenStore(stores.MachineToken),
 		services.WithRevocationStore(stores.Revocation),
-		services.WithEnabledGrants([]string{"authorization_code", "refresh_token"}),
+		services.WithEnabledGrants(staticGrantsForTest{grants: []string{"authorization_code", "refresh_token"}}),
 	)
 
 	resp, err := adminSvc.CreateClient(context.Background(), input.CreateClientRequest{
@@ -1049,5 +1050,28 @@ func TestAdmin_DeleteUser_WithTokens_Force(t *testing.T) {
 	_, err = setup.stores.Stores.User.GetByID(ctx, u.ID)
 	if err == nil {
 		t.Fatal("expected error for deleted user")
+	}
+}
+
+// TestAdmin_CreateClient_GrantsProviderError_Rejected verifies fail-closed: when
+// the enabled-grants provider errors, CreateClient rejects.
+func TestAdmin_CreateClient_GrantsProviderError_Rejected(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+	adminSvc := services.NewAdminService(
+		stores.Client, stores.User, stores.Token, stores.Audit,
+		obs, nil,
+		services.WithMachineTokenStore(stores.MachineToken),
+		services.WithRevocationStore(stores.Revocation),
+		services.WithEnabledGrants(failingGrantsForTest{}),
+	)
+
+	_, err := adminSvc.CreateClient(context.Background(), input.CreateClientRequest{
+		Name:         "fail closed",
+		RedirectURIs: []string{"https://app.example.com/callback"},
+		GrantTypes:   []string{"authorization_code"},
+	})
+	if !errors.Is(err, errGrantsUnavailable) {
+		t.Fatalf("expected wrapped errGrantsUnavailable, got %v", err)
 	}
 }

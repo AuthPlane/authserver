@@ -46,21 +46,20 @@ type CompleteConnectResult = input.CompleteConnectResult
 // is rejected at StartConnect with a typed error — those protocols have no
 // per-user connect dance.
 type ConnectService struct {
-	registry          *ResourceRegistry
-	resources         output.ResourceStore
-	providers         output.BrokerProviderStore
-	grants            output.BrokerGrantStore
-	pending           output.ConnectPendingStateStore
-	adapters          *brokerproto.Registry
-	encryptor         output.DataEncryptor
-	stateKey          []byte
-	issuer            string
-	redirectBaseURL   string
-	allowedReturnURLs []string
-	audit             AuditRecorder
-	logger            *slog.Logger
-	tracer            trace.Tracer
-	metrics           *observability.Metrics
+	registry       *ResourceRegistry
+	resources      output.ResourceStore
+	providers      output.BrokerProviderStore
+	grants         output.BrokerGrantStore
+	pending        output.ConnectPendingStateStore
+	adapters       *brokerproto.Registry
+	encryptor      output.DataEncryptor
+	stateConfig    output.ConnectStateConfigProvider
+	issuerProvider output.IssuerProvider
+	connectConfig  output.ConnectConfigProvider
+	audit          AuditRecorder
+	logger         *slog.Logger
+	tracer         trace.Tracer
+	metrics        *observability.Metrics
 }
 
 // NewConnectService constructs the unified ConnectService.
@@ -72,33 +71,38 @@ func NewConnectService(
 	pending output.ConnectPendingStateStore,
 	adapters *brokerproto.Registry,
 	encryptor output.DataEncryptor,
-	stateKey []byte,
-	issuer string,
-	redirectBaseURL string,
-	allowedReturnURLs []string,
+	stateConfig output.ConnectStateConfigProvider,
+	issuerProvider output.IssuerProvider,
+	connectConfig output.ConnectConfigProvider,
 	obs *observability.Provider,
 	auditor AuditRecorder,
 ) *ConnectService {
+	if issuerProvider == nil {
+		panic("services.NewConnectService: issuerProvider is required")
+	}
+	if connectConfig == nil {
+		panic("NewConnectService: connectConfig must not be nil")
+	}
+	if stateConfig == nil {
+		panic("NewConnectService: stateConfig must not be nil")
+	}
 	s := &ConnectService{
-		registry:          registry,
-		resources:         resources,
-		providers:         providers,
-		grants:            grants,
-		pending:           pending,
-		adapters:          adapters,
-		encryptor:         encryptor,
-		stateKey:          stateKey,
-		issuer:            strings.TrimRight(issuer, "/"),
-		redirectBaseURL:   strings.TrimRight(redirectBaseURL, "/"),
-		allowedReturnURLs: allowedReturnURLs,
-		audit:             auditor,
-		logger:            obs.Logger.With("component", "connect"),
-		tracer:            obs.Tracer,
-		metrics:           obs.Metrics,
+		registry:       registry,
+		resources:      resources,
+		providers:      providers,
+		grants:         grants,
+		pending:        pending,
+		adapters:       adapters,
+		encryptor:      encryptor,
+		stateConfig:    stateConfig,
+		issuerProvider: issuerProvider,
+		connectConfig:  connectConfig,
+		audit:          auditor,
+		logger:         obs.Logger.With("component", "connect"),
+		tracer:         obs.Tracer,
+		metrics:        obs.Metrics,
 	}
-	if redirectBaseURL == "" {
-		s.logger.Warn("connect.redirect_base_url is empty — falling back to issuer for upstream callback URLs")
-	}
+
 	return s
 }
 
@@ -166,7 +170,16 @@ func (s *ConnectService) StartConnect(
 		target = anchor
 	}
 
-	if !s.isReturnURLAllowed(returnURL, target) {
+	connectCfg, err := s.connectConfig.Config(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("resolve connect config: %w", err)
+	}
+	redirectBase := strings.TrimRight(connectCfg.RedirectBaseURL, "/")
+
+	returnURLAllowed := s.isReturnURLAllowed(ctx, redirectBase, returnURL, connectCfg.AllowedReturnURLs, target)
+	if !returnURLAllowed {
 		span.RecordError(domain.ErrInvalidReturnURL)
 		span.SetStatus(codes.Error, "return URL not allowed")
 		return "", domain.ErrInvalidReturnURL
@@ -179,7 +192,12 @@ func (s *ConnectService) StartConnect(
 		return "", fmt.Errorf("lookup brokerproto adapter %q: %w", provider.Protocol, err)
 	}
 
-	stateToken := s.generateStateToken(userID, providerSlug, returnURL)
+	stateToken, err := s.generateStateToken(ctx, userID, providerSlug, returnURL)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("generate state token: %w", err)
+	}
 
 	res := target
 	if res == nil {
@@ -197,7 +215,7 @@ func (s *ConnectService) StartConnect(
 		requestedScopes = append(requestedScopes, sc.Name)
 	}
 
-	callbackURL := s.callbackURL(providerSlug)
+	callbackURL := s.callbackURL(ctx, redirectBase, providerSlug)
 	upstreamURL, pendingState, err := adapter.BuildConnectURL(ctx, provider, res, userID, returnURL, callbackURL, requestedScopes)
 	if err != nil {
 		if errors.Is(err, output.ErrNoConnectStep) {
@@ -280,7 +298,13 @@ func (s *ConnectService) CompleteConnect(
 		return CompleteConnectResult{}, fmt.Errorf("lookup broker provider: %w", err)
 	}
 
-	if !s.verifyStateToken(stateToken, userID, provider.Slug, pendingState.ReturnURL) {
+	stateOK, err := s.verifyStateToken(ctx, stateToken, userID, provider.Slug, pendingState.ReturnURL)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return CompleteConnectResult{}, err
+	}
+	if !stateOK {
 		span.RecordError(domain.ErrInvalidState)
 		span.SetStatus(codes.Error, "tampered state token")
 		return CompleteConnectResult{}, domain.ErrInvalidState
@@ -306,7 +330,15 @@ func (s *ConnectService) CompleteConnect(
 		res = &resource.Resource{}
 	}
 
-	callbackURL := s.callbackURL(provider.Slug)
+	connectCfg, err := s.connectConfig.Config(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return CompleteConnectResult{}, fmt.Errorf("resolve connect config: %w", err)
+	}
+	redirectBase := strings.TrimRight(connectCfg.RedirectBaseURL, "/")
+
+	callbackURL := s.callbackURL(ctx, redirectBase, provider.Slug)
 	credPlain, scopesGranted, err := adapter.HandleCallback(ctx, provider, res, code, callbackURL, pendingState)
 	if err != nil {
 		span.RecordError(err)
@@ -500,11 +532,11 @@ func (s *ConnectService) ListConnections(ctx context.Context, userID string) ([]
 // ignored, which made AUTHPLANE_CONNECT_ALLOWED_RETURN_URLS dead config in any
 // deployment with a Broker resource — the FK-anchor lookup in StartConnect
 // always populates target before this check runs. See ticket.
-func (s *ConnectService) isReturnURLAllowed(returnURL string, target *resource.Resource) bool {
+func (s *ConnectService) isReturnURLAllowed(ctx context.Context, redirectBaseURL, returnURL string, allowedReturnURLs []string, target *resource.Resource) bool {
 	if returnURL == "" {
 		return false
 	}
-	if s.matchesASelf(returnURL) {
+	if s.matchesASelf(ctx, redirectBaseURL, returnURL) {
 		return true
 	}
 	if target != nil {
@@ -514,7 +546,7 @@ func (s *ConnectService) isReturnURLAllowed(returnURL string, target *resource.R
 			}
 		}
 	}
-	for _, allowed := range s.allowedReturnURLs {
+	for _, allowed := range allowedReturnURLs {
 		if matchReturnURL(allowed, returnURL) {
 			return true
 		}
@@ -618,8 +650,17 @@ func (s *ConnectService) singleBrokerResourceForProvider(ctx context.Context, pr
 
 // matchesASelf reports whether the URL is exactly the AS's own /connections
 // page — the canonical destination the consent_url synthesizer sends users to.
-func (s *ConnectService) matchesASelf(returnURL string) bool {
-	for _, b := range []string{s.redirectBaseURL, s.issuer} {
+func (s *ConnectService) matchesASelf(ctx context.Context, redirectBaseURL, returnURL string) bool {
+	// Best-effort: if issuer resolution fails, treat it as empty so only
+	// redirectBaseURL is checked (safe conservative behavior).
+	issuer, err := s.issuerProvider.Issuer(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "treating issuer as empty; redirect_uri validation may reject legitimate URLs",
+			"error", err,
+			"site", "matchesASelf",
+		)
+	}
+	for _, b := range []string{redirectBaseURL, issuer} {
 		if b == "" {
 			continue
 		}
@@ -640,10 +681,20 @@ func (s *ConnectService) matchesASelf(returnURL string) bool {
 // Returns "" when neither redirect_base_url nor issuer are set; the
 // adapter then omits redirect_uri (acceptable for upstreams that fall back
 // to the OAuth client's single registered redirect URI).
-func (s *ConnectService) callbackURL(providerSlug string) string {
-	base := s.redirectBaseURL
-	if base == "" {
-		base = s.issuer
+func (s *ConnectService) callbackURL(ctx context.Context, redirectBaseURL, providerSlug string) string {
+	base := redirectBaseURL
+	if redirectBaseURL == "" {
+		// Best-effort: if issuer resolution fails, fall back to empty so the
+		// adapter omits redirect_uri (acceptable for upstreams with a single
+		// registered redirect URI).
+		var issuerErr error
+		base, issuerErr = s.issuerProvider.Issuer(ctx)
+		if issuerErr != nil {
+			s.logger.WarnContext(ctx, "treating issuer as empty; upstream callback URL may omit base",
+				"error", issuerErr,
+				"site", "callbackURL",
+			)
+		}
 	}
 	if base == "" {
 		return ""
@@ -654,23 +705,45 @@ func (s *ConnectService) callbackURL(providerSlug string) string {
 // generateStateToken produces an HMAC-bound state token. The atomic Consume
 // on ConnectPendingStateStore is the primary CSRF gate; the HMAC is
 // defense-in-depth against state-row forgery.
-func (s *ConnectService) generateStateToken(userID, providerSlug, returnURL string) string {
+func (s *ConnectService) generateStateToken(ctx context.Context, userID, providerSlug, returnURL string) (string, error) {
+	key, err := s.resolveStateKey(ctx)
+	if err != nil {
+		return "", err
+	}
 	stateID := crypto.GenerateRandomString(16)
-	mac := computeStateHMAC(s.stateKey, stateID, userID, providerSlug, returnURL)
-	return stateID + "." + base64.RawURLEncoding.EncodeToString(mac)
+	mac := computeStateHMAC(key, stateID, userID, providerSlug, returnURL)
+	return stateID + "." + base64.RawURLEncoding.EncodeToString(mac), nil
 }
 
-func (s *ConnectService) verifyStateToken(stateToken, userID, providerSlug, returnURL string) bool {
+func (s *ConnectService) verifyStateToken(ctx context.Context, stateToken, userID, providerSlug, returnURL string) (bool, error) {
+	key, err := s.resolveStateKey(ctx)
+	if err != nil {
+		return false, err
+	}
 	parts := strings.SplitN(stateToken, ".", 2)
 	if len(parts) != 2 {
-		return false
+		return false, nil
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return false
+		return false, nil
 	}
-	expected := computeStateHMAC(s.stateKey, parts[0], userID, providerSlug, returnURL)
-	return hmac.Equal(sig, expected)
+	expected := computeStateHMAC(key, parts[0], userID, providerSlug, returnURL)
+	return hmac.Equal(sig, expected), nil
+}
+
+// resolveStateKey resolves the per-call HMAC signing key and rejects an empty
+// one defensively, so an alternate provider cannot cause signing/verification
+// with no key.
+func (s *ConnectService) resolveStateKey(ctx context.Context) ([]byte, error) {
+	cfg, err := s.stateConfig.Config(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("connect: resolve state config: %w", err)
+	}
+	if len(cfg.Key) == 0 {
+		return nil, fmt.Errorf("connect: empty state signing key")
+	}
+	return cfg.Key, nil
 }
 
 func computeStateHMAC(key []byte, stateID, userID, providerSlug, returnURL string) []byte {

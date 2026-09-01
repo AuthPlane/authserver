@@ -1,7 +1,7 @@
 # Tier 04 — MCP server fronting a Broker (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 26 lines · Total example: 59 lines · SDK: python-sdk 0.2.0**
+**Auth-specific code: 26 lines · Total example: 59 lines · SDK: python-sdk 0.3.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call a third-party API on the user's
@@ -46,7 +46,7 @@ has the end-to-end sequence diagram.
 |---|---|
 | **Time to run** | ~2 minutes (first build is ~60s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, **Python 3.12+** (only if you run outside Docker — `pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` 0.2.0 (PyPI) |
+| **SDK** | `authplane-sdk` 0.3.0 (PyPI) |
 | **Topology** | Agent ↔ Authserver only — no MCP server in this tier |
 
 ## Run it in 3 commands
@@ -112,7 +112,7 @@ describe what's happening so you can reproduce the flow by hand.
        "protocol": "oauth",
        "config_data": {
          "client_id": "stub-client-id",
-         "client_secret_env": "AUTHPLANE_ADMIN_API_KEY",
+         "client_secret_ref": "AUTHPLANE_ADMIN_API_KEY",
          "authorize_url": "https://github-stub.example.invalid/login/oauth/authorize",
          "token_url":     "https://github-stub.example.invalid/login/oauth/access_token"
        }

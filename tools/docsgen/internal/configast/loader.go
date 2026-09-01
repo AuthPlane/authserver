@@ -1,8 +1,10 @@
 package configast
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
+	"os"
 	"strings"
 )
 
@@ -24,6 +26,7 @@ var loaderHelpers = map[string]bool{
 	"getEnvInt":         true,
 	"getEnvFloat64":     true,
 	"getEnvDuration":    true,
+	"getEnvDurationE":   true, // strict variant: (value, error) — see two-value handling below
 	"getEnvStringSlice": true,
 }
 
@@ -94,7 +97,7 @@ func collectEnvBindings(f *ast.File, structs map[string]*structInfo) []envBindin
 		// cfg.X.Y = getEnv("AUTHPLANE_...", cfg.X.Y).
 		ast.Inspect(fn.Body, func(stmt ast.Node) bool {
 			as, ok := stmt.(*ast.AssignStmt)
-			if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			if !ok || len(as.Rhs) != 1 {
 				return true
 			}
 			call, ok := as.Rhs[0].(*ast.CallExpr)
@@ -109,9 +112,31 @@ func collectEnvBindings(f *ast.File, structs map[string]*structInfo) []envBindin
 			if envName == "" || !strings.HasPrefix(envName, "AUTHPLANE_") {
 				return true
 			}
-			yamlPath := resolveSelectorPath(as.Lhs[0], cfgType, yamlByGoField, goTypeByGoField)
+			// Resolve the YAML path. The conventional single-value form
+			// (cfg.X = getEnv("KEY", cfg.X)) resolves it from the assignment
+			// target. The strict two-value form (d, err := getEnvDurationE(
+			// "KEY", cfg.X)) puts no struct field on the LHS, so resolve from
+			// the default argument instead — by convention it is the field.
+			var yamlPath string
+			twoValue := len(as.Lhs) != 1
+			switch {
+			case !twoValue:
+				yamlPath = resolveSelectorPath(as.Lhs[0], cfgType, yamlByGoField, goTypeByGoField)
+			case len(call.Args) >= 2:
+				yamlPath = resolveSelectorPath(call.Args[1], cfgType, yamlByGoField, goTypeByGoField)
+			}
 			if prefix := sectionByType[cfgType]; prefix != "" && yamlPath != "" {
 				yamlPath = prefix + "." + yamlPath
+			}
+			// For the two-value strict form that carries a default argument
+			// (`d, err := getEnvDurationE("KEY", cfg.X)`), the path comes from
+			// that argument — so an empty result means it wasn't the cfg field
+			// (e.g. a literal like 10*time.Minute), and the row would land with no
+			// config key. Warn. Two-value reads with no default arg
+			// (`v, ok := os.LookupEnv("KEY")`) are the tolerated stray-read case
+			// and single-value empties are handled by the standalone walker.
+			if twoValue && len(call.Args) >= 2 && yamlPath == "" {
+				fmt.Fprintf(os.Stderr, "docsgen: warning: %s (%s) resolves to no YAML path — pass the cfg field as the default argument so the key can be documented\n", envName, helper)
 			}
 			out = appendUnique(out, envBinding{
 				name:     envName,

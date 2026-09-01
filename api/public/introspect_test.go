@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +16,6 @@ import (
 
 	apipublic "github.com/authplane/authserver/api/public"
 	"github.com/authplane/authserver/internal/adapters/keyfile"
-	"github.com/authplane/authserver/internal/config"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/domain/user"
@@ -44,7 +42,7 @@ func newIntrospectTestServer(t *testing.T) *introspectTestEnv {
 	if err != nil {
 		t.Fatalf("keyfile: %v", err)
 	}
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 
 	// Get signing key and build a key pair for signing test tokens.
 	sk, err := jwksSvc.GetSigningKey(t.Context())
@@ -89,19 +87,18 @@ func newIntrospectTestServer(t *testing.T) *introspectTestEnv {
 	// Create introspection service.
 	introspectSvc := services.NewIntrospectionService(
 		jwksSvc, stores.Revocation, stores.MachineToken, stores.Client, stores.User,
-		"https://auth.example.com", obs, nil,
+		staticIssuerForTest("https://auth.example.com"), obs, nil,
 	)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		Introspect:      introspectSvc,
-		ResourceServers: testResourceServers(),
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		Introspect:            introspectSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -277,41 +274,5 @@ func TestIntrospectHTTP_GarbageToken_Inactive(t *testing.T) {
 
 	if result["active"] != false {
 		t.Fatal("expected active=false for garbage token")
-	}
-}
-
-func TestIntrospectHTTP_ASMetadata_IncludesIntrospection(t *testing.T) {
-	env := newIntrospectTestServer(t)
-
-	resp, err := http.Get(env.ts.URL + "/.well-known/oauth-authorization-server")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d, want 200", resp.StatusCode)
-	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	var meta map[string]any
-	json.Unmarshal(bodyBytes, &meta)
-
-	introspectEndpoint, ok := meta["introspection_endpoint"]
-	if !ok {
-		t.Fatal("AS metadata missing introspection_endpoint field")
-	}
-	expected := "https://auth.example.com/oauth/introspect"
-	if introspectEndpoint != expected {
-		t.Errorf("introspection_endpoint = %v, want %v", introspectEndpoint, expected)
-	}
-
-	authMethods, ok := meta["introspection_endpoint_auth_methods_supported"]
-	if !ok {
-		t.Fatal("AS metadata missing introspection_endpoint_auth_methods_supported")
-	}
-	methods, ok := authMethods.([]any)
-	if !ok || len(methods) != 2 {
-		t.Fatalf("introspection_endpoint_auth_methods_supported: expected 2 methods, got %v", authMethods)
 	}
 }

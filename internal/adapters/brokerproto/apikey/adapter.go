@@ -24,27 +24,18 @@ import (
 	"github.com/authplane/authserver/internal/ports/output"
 )
 
-// SecretResolver is kept on the adapter constructor for symmetry with the
-// other BrokerProtocol adapters (oauth, service_account) and to leave a
-// seam for future header-templating where a configured env-var name might
-// expand into the header value at vend time. It is not consulted by the
-// current implementation.
-type SecretResolver interface {
-	Resolve(envVarName string) (string, error)
-}
-
 // Adapter implements output.BrokerProtocol for the api_key protocol. One
 // adapter instance handles every BrokerProvider whose Protocol is
 // "api_key"; per-provider state lives in BrokerProvider.ConfigData and
 // per-user state lives in broker_grants.credential_data.
 type Adapter struct {
-	secretResolver SecretResolver
+	secretResolver output.SecretResolver
 }
 
 // New builds an Adapter. The SecretResolver is accepted for interface
 // symmetry (see package comment) but is unused by the current
 // implementation.
-func New(sr SecretResolver) *Adapter {
+func New(sr output.SecretResolver) *Adapter {
 	return &Adapter{secretResolver: sr}
 }
 

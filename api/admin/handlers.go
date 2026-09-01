@@ -409,36 +409,55 @@ func (h *handlers) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 // --- Audit ---
 
 func (h *handlers) handleQueryAudit(w http.ResponseWriter, r *http.Request) {
+	// A malformed parameter is a 400, never silently dropped: a caller that
+	// fat-fingers a value must not be handed the default window it did not
+	// ask for.
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
-	if limit <= 0 {
-		limit = 50
-	}
-
 	filter := input.AuditFilter{
 		Action:   q.Get("action"),
 		ActorID:  q.Get("actor_id"),
 		ClientID: q.Get("client_id"),
-		Limit:    limit,
-		Offset:   offset,
 	}
 
-	if sinceStr := q.Get("since"); sinceStr != "" {
-		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
-			filter.Since = &t
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "limit must be an integer")
+			return
 		}
+		filter.Limit = n
+	}
+	if v := q.Get("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "offset must be an integer")
+			return
+		}
+		filter.Offset = n
+	}
+	if sinceStr := q.Get("since"); sinceStr != "" {
+		t, err := time.Parse(time.RFC3339, sinceStr)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "since must be an RFC 3339 timestamp")
+			return
+		}
+		filter.Since = &t
 	}
 	if untilStr := q.Get("until"); untilStr != "" {
-		if t, err := time.Parse(time.RFC3339, untilStr); err == nil {
-			filter.Until = &t
+		t, err := time.Parse(time.RFC3339, untilStr)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "until must be an RFC 3339 timestamp")
+			return
 		}
+		filter.Until = &t
 	}
 
+	// The lookback and paging bounds (and the default page size) live in the
+	// service, not here, so no query parameter can route around them. A
+	// request past a bound is a 400, not a 500.
 	events, err := h.admin.QueryAudit(r.Context(), filter)
 	if err != nil {
-		h.obs.Logger.ErrorContext(r.Context(), "query audit failed", "error", err)
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		writeDomainOrInternalError(w, r, h.obs, "query audit failed", err)
 		return
 	}
 	shared.WriteJSON(w, http.StatusOK, newAuditEventViews(events))

@@ -79,8 +79,10 @@ func findActiveConsentGrants(t *testing.T, h *e2e.TestHarness, userID, clientID,
 //     scopes — confirming the now store binding (the legacy
 //     consent_grants table is gone; there is no parallel-write to assert).
 //     The assertion is now driven through the public admin API
+//
 // (GET /admin/users/{id}/grants) per — direct ConsentGrantStore
-//     access from e2e is forbidden.
+//
+//	access from e2e is forbidden.
 //
 // Sub-tests cover the deny path, scope-narrowing, and the broker-resource
 // rejection flavour ( ErrConsentResourceNotMint → 400 Invalid
@@ -242,7 +244,7 @@ func TestPerMCPConsent_FullLifecycle(t *testing.T) {
 			Protocol:    "oauth",
 			ConfigData: map[string]any{
 				"client_id":         "stub",
-				"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+				"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 				"authorize_url":     "http://stub/authorize",
 				"token_url":         "http://stub/token",
 				"response_format":   "standard",

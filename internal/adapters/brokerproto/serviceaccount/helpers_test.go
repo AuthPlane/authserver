@@ -1,9 +1,12 @@
 package serviceaccount
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/authplane/authserver/internal/domain/resource"
 )
 
 // Error-path coverage for the internal helpers parseConfigData,
@@ -36,9 +39,9 @@ func TestParseConfigData_MissingRequiredFields(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{"missing token_url", `{"sa_email":"a","sa_key_env":"K"}`, "token_url"},
-		{"missing sa_email", `{"token_url":"https://x","sa_key_env":"K"}`, "sa_email"},
-		{"missing sa_key_env", `{"token_url":"https://x","sa_email":"a"}`, "sa_key_env"},
+		{"missing token_url", `{"sa_email":"a","sa_key_ref":"K"}`, "token_url"},
+		{"missing sa_email", `{"token_url":"https://x","sa_key_ref":"K"}`, "sa_email"},
+		{"missing sa_key_ref", `{"token_url":"https://x","sa_email":"a"}`, "sa_key_ref"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,7 +57,7 @@ func TestParseConfigData_MissingRequiredFields(t *testing.T) {
 }
 
 func TestParseConfigData_DefaultsAlgorithmRS256(t *testing.T) {
-	cfg, err := parseConfigData([]byte(`{"token_url":"https://x","sa_email":"a","sa_key_env":"K"}`))
+	cfg, err := parseConfigData([]byte(`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K"}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +68,7 @@ func TestParseConfigData_DefaultsAlgorithmRS256(t *testing.T) {
 
 func TestParseConfigData_RejectsUnsupportedAlgorithm(t *testing.T) {
 	_, err := parseConfigData([]byte(
-		`{"token_url":"https://x","sa_email":"a","sa_key_env":"K","algorithm":"HS256"}`))
+		`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K","algorithm":"HS256"}`))
 	if err == nil {
 		t.Fatal("algorithm=HS256: expected error, got nil")
 	}
@@ -76,7 +79,7 @@ func TestParseConfigData_RejectsUnsupportedAlgorithm(t *testing.T) {
 
 func TestParseConfigData_DefaultsTTLWhenZero(t *testing.T) {
 	cfg, err := parseConfigData([]byte(
-		`{"token_url":"https://x","sa_email":"a","sa_key_env":"K"}`))
+		`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K"}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -87,7 +90,7 @@ func TestParseConfigData_DefaultsTTLWhenZero(t *testing.T) {
 
 func TestParseConfigData_RejectsNegativeTTL(t *testing.T) {
 	_, err := parseConfigData([]byte(
-		`{"token_url":"https://x","sa_email":"a","sa_key_env":"K","token_ttl_seconds":-30}`))
+		`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K","token_ttl_seconds":-30}`))
 	if err == nil {
 		t.Fatal("negative TTL: expected error, got nil")
 	}
@@ -100,7 +103,7 @@ func TestParseConfigData_RejectsNegativeTTL(t *testing.T) {
 func TestParseConfigData_RejectsTTLBelowFloor(t *testing.T) {
 	// 29s is below the 30s floor.
 	_, err := parseConfigData([]byte(
-		`{"token_url":"https://x","sa_email":"a","sa_key_env":"K","token_ttl_seconds":29}`))
+		`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K","token_ttl_seconds":29}`))
 	if err == nil {
 		t.Fatal("TTL=29 (below 30s floor): expected error, got nil")
 	}
@@ -112,7 +115,7 @@ func TestParseConfigData_RejectsTTLBelowFloor(t *testing.T) {
 func TestParseConfigData_RejectsTTLAboveCeiling(t *testing.T) {
 	// 3601s is above the 3600s ceiling.
 	_, err := parseConfigData([]byte(
-		`{"token_url":"https://x","sa_email":"a","sa_key_env":"K","token_ttl_seconds":3601}`))
+		`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K","token_ttl_seconds":3601}`))
 	if err == nil {
 		t.Fatal("TTL=3601 (above 3600s ceiling): expected error, got nil")
 	}
@@ -120,7 +123,7 @@ func TestParseConfigData_RejectsTTLAboveCeiling(t *testing.T) {
 
 func TestParseConfigData_AcceptsTTLAtFloor(t *testing.T) {
 	cfg, err := parseConfigData([]byte(
-		`{"token_url":"https://x","sa_email":"a","sa_key_env":"K","token_ttl_seconds":30}`))
+		`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K","token_ttl_seconds":30}`))
 	if err != nil {
 		t.Fatalf("TTL=30 (exact floor): unexpected error: %v", err)
 	}
@@ -131,7 +134,7 @@ func TestParseConfigData_AcceptsTTLAtFloor(t *testing.T) {
 
 func TestParseConfigData_AcceptsTTLAtCeiling(t *testing.T) {
 	cfg, err := parseConfigData([]byte(
-		`{"token_url":"https://x","sa_email":"a","sa_key_env":"K","token_ttl_seconds":3600}`))
+		`{"token_url":"https://x","sa_email":"a","sa_key_ref":"K","token_ttl_seconds":3600}`))
 	if err != nil {
 		t.Fatalf("TTL=3600 (exact ceiling): unexpected error: %v", err)
 	}
@@ -168,23 +171,7 @@ func TestParseCredential_MissingImpersonateSub(t *testing.T) {
 
 func TestResolveSAKey_EmptyEnvName(t *testing.T) {
 	a := &Adapter{secretResolver: &stubSecretResolver{pem: "x"}}
-	_, err := a.resolveSAKey("")
-	if !errors.Is(err, errSAKeyLookup) {
-		t.Errorf("expected errSAKeyLookup, got %v", err)
-	}
-}
-
-func TestResolveSAKey_InvalidEnvNamePattern(t *testing.T) {
-	a := &Adapter{secretResolver: &stubSecretResolver{pem: "x"}}
-	_, err := a.resolveSAKey("not-valid")
-	if !errors.Is(err, errSAKeyLookup) {
-		t.Errorf("expected errSAKeyLookup, got %v", err)
-	}
-}
-
-func TestResolveSAKey_NilResolver(t *testing.T) {
-	a := &Adapter{secretResolver: nil}
-	_, err := a.resolveSAKey("CONNECTOR_SA_KEY")
+	_, err := a.resolveSAKey(context.Background(), &resource.BrokerProvider{ID: "p1"}, "")
 	if !errors.Is(err, errSAKeyLookup) {
 		t.Errorf("expected errSAKeyLookup, got %v", err)
 	}
@@ -192,7 +179,7 @@ func TestResolveSAKey_NilResolver(t *testing.T) {
 
 func TestResolveSAKey_ResolverReturnsError(t *testing.T) {
 	a := &Adapter{secretResolver: &stubSecretResolver{err: errors.New("secret unavailable")}}
-	_, err := a.resolveSAKey("CONNECTOR_SA_KEY")
+	_, err := a.resolveSAKey(context.Background(), &resource.BrokerProvider{ID: "p1"}, "CONNECTOR_SA_KEY")
 	if !errors.Is(err, errSAKeyLookup) {
 		t.Errorf("expected errSAKeyLookup wrap, got %v", err)
 	}
@@ -200,7 +187,7 @@ func TestResolveSAKey_ResolverReturnsError(t *testing.T) {
 
 func TestResolveSAKey_ResolverReturnsEmpty(t *testing.T) {
 	a := &Adapter{secretResolver: &stubSecretResolver{pem: ""}}
-	_, err := a.resolveSAKey("CONNECTOR_SA_KEY")
+	_, err := a.resolveSAKey(context.Background(), &resource.BrokerProvider{ID: "p1"}, "CONNECTOR_SA_KEY")
 	if !errors.Is(err, errSAKeyLookup) {
 		t.Errorf("expected errSAKeyLookup, got %v", err)
 	}

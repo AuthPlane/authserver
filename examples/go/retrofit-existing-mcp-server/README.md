@@ -100,7 +100,7 @@ same `make verify`, just longer first build (~1 min).
 |---|---|
 | **Time to run** | Under a minute warm-cache (`go build` of two small binaries + AS image pull) |
 | **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.4.1` |
-| **SDK** | `github.com/authplane/go-sdk/mcp v0.1.1` (in `after/` only) |
+| **SDK** | `github.com/authplane/go-sdk/mcp v0.2.0` (in `after/` only) |
 
 ## Troubleshooting
 
@@ -137,15 +137,15 @@ it with `brew install jq` (macOS) or `apt install jq` (Debian/Ubuntu).
 
 **`go: cannot find module providing package github.com/authplane/go-sdk/mcp`**
 The SDK is published to the public Go module proxy as
-`github.com/authplane/go-sdk` v0.1.1. If you're behind a corporate proxy,
+`github.com/authplane/go-sdk` v0.2.0. If you're behind a corporate proxy,
 configure `GOPROXY` to allow it (or set `GOPRIVATE` if you mirror SDKs
 internally).
 
 **`missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`**
-`go get github.com/authplane/go-sdk/mcp@v0.1.1` adds the `mcp` adapter but
+`go get github.com/authplane/go-sdk/mcp@v0.2.0` adds the `mcp` adapter but
 *not* its transitive dependency `go-sdk/core`, so the very next `go build`
 fails on the missing checksum. Run **`go mod tidy`** (or
-`go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.1.1`) to record
+`go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.2.0`) to record
 the `core` entries in `go.sum`. This example's committed `go.mod`/`go.sum`
 already include them — you only hit this when wiring the adapter into your
 own module.

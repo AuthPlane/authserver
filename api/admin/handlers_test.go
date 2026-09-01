@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -44,6 +45,15 @@ import (
 
 const testAPIKey = "test-admin-api-key-123"
 
+// noopSecretEncoder is a passthrough SecretEncoder for the admin HTTP tests: it
+// returns the ref unchanged (env-backend semantics), so config_data is persisted
+// verbatim.
+type noopSecretEncoder struct{}
+
+func (noopSecretEncoder) Encode(_ context.Context, in output.SecretInput) (output.EncodedSecret, error) {
+	return output.EncodedSecret{Ref: in.Ref}, nil
+}
+
 func testObs() *observability.Provider {
 	return observability.NewNoop()
 }
@@ -65,7 +75,7 @@ func newAdminTestServer(t *testing.T) *adminTestEnv {
 		services.WithRevocationStore(stores.Revocation),
 	)
 
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  testAPIKey,
@@ -657,6 +667,37 @@ func TestAdmin_GetStats(t *testing.T) {
 	}
 }
 
+// A malformed or out-of-bounds audit query parameter is a 400, never silently
+// replaced with a default the caller did not ask for.
+func TestAdmin_QueryAudit_ParamValidation(t *testing.T) {
+	env := newAdminTestServer(t)
+
+	cases := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{"no params", "", http.StatusOK},
+		{"valid since and limit", "?limit=10&since=" + time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), http.StatusOK},
+		{"malformed since", "?since=garbage", http.StatusBadRequest},
+		{"malformed until", "?until=yesterday", http.StatusBadRequest},
+		{"malformed limit", "?limit=abc", http.StatusBadRequest},
+		{"malformed offset", "?offset=1e9", http.StatusBadRequest},
+		{"limit beyond the cap", "?limit=1000000000", http.StatusBadRequest},
+		{"offset beyond the cap", "?offset=100000000", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := env.doRequest(t, "GET", "/admin/audit"+tc.query, nil)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tc.want {
+				body, _ := io.ReadAll(resp.Body)
+				t.Errorf("status: got %d, want %d (body: %s)", resp.StatusCode, tc.want, body)
+			}
+		})
+	}
+}
+
 // Matrix: 18.14 — Admin API rejects all when API key is empty
 func TestAdmin_EmptyKey_RejectsAll(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
@@ -668,7 +709,7 @@ func TestAdmin_EmptyKey_RejectsAll(t *testing.T) {
 	)
 
 	// Server with EMPTY API key.
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  "", // empty!
@@ -727,7 +768,7 @@ func TestAdmin_RateLimited(t *testing.T) {
 	)
 
 	// Create admin server with rate limiting: 2 req/s, burst 2.
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled:           true,
 		Address:           ":0",
 		APIKey:            testAPIKey,
@@ -1145,7 +1186,7 @@ func newAdminKeysTestServer(t *testing.T) *httptest.Server {
 	)
 
 	keyStore := &mockKeyStore{}
-	jwksSvc := services.NewJWKSService(keyStore, "ES256", obs)
+	jwksSvc := services.NewJWKSService(keyStore, nil, "ES256", obs)
 
 	auditor := &mockAdminAuditRecorder{}
 
@@ -1154,7 +1195,7 @@ func newAdminKeysTestServer(t *testing.T) *httptest.Server {
 		Audit:    auditor,
 	}
 
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  testAPIKey,
@@ -1269,11 +1310,19 @@ func TestAdminHandler_RotateKey_ThenListKeys_ShowsBoth(t *testing.T) {
 
 // mockDCRAdmin implements admin.DCRAdmin for handler tests.
 type mockDCRAdmin struct {
-	mode string
+	mode   string
+	getErr error // when set, GetMode fails closed (provider unavailable)
+	setErr error // when set, SetMode fails
 }
 
-func (m *mockDCRAdmin) GetMode() string     { return m.mode }
-func (m *mockDCRAdmin) SetMode(mode string) { m.mode = mode }
+func (m *mockDCRAdmin) GetMode(ctx context.Context) (string, error) { return m.mode, m.getErr }
+func (m *mockDCRAdmin) SetMode(ctx context.Context, mode string) error {
+	if m.setErr != nil {
+		return m.setErr
+	}
+	m.mode = mode
+	return nil
+}
 
 func newAdminDCRTestServer(t *testing.T) (*httptest.Server, *mockDCRAdmin) {
 	t.Helper()
@@ -1292,7 +1341,7 @@ func newAdminDCRTestServer(t *testing.T) (*httptest.Server, *mockDCRAdmin) {
 		Audit:    nil,
 	}
 
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  testAPIKey,
@@ -1322,6 +1371,45 @@ func doDCRRequest(t *testing.T, ts *httptest.Server, method, path string, body s
 		t.Fatalf("request failed: %v", err)
 	}
 	return resp
+}
+
+func TestAdminHandler_GetDCRSettings_500_OnProviderError(t *testing.T) {
+	ts, mockDCR := newAdminDCRTestServer(t)
+	mockDCR.getErr = errors.New("dcr mode provider unavailable")
+
+	resp := doDCRRequest(t, ts, "GET", "/admin/settings/dcr", "")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status: got %d, want 500 (fail closed), body: %s", resp.StatusCode, body)
+	}
+}
+
+// When GetMode fails on an update, the handler must 500 before persisting or
+// applying the new mode.
+func TestAdminHandler_UpdateDCRSettings_500_OnProviderError(t *testing.T) {
+	ts, mockDCR := newAdminDCRTestServer(t)
+	mockDCR.getErr = errors.New("dcr mode provider unavailable")
+
+	resp := doDCRRequest(t, ts, "PATCH", "/admin/settings/dcr", `{"mode":"admin_only"}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status: got %d, want 500 (fail closed), body: %s", resp.StatusCode, body)
+	}
+}
+
+// When applying the new mode at runtime fails, the handler must 500.
+func TestAdminHandler_UpdateDCRSettings_500_OnSetError(t *testing.T) {
+	ts, mockDCR := newAdminDCRTestServer(t)
+	mockDCR.setErr = errors.New("apply failed")
+
+	resp := doDCRRequest(t, ts, "PATCH", "/admin/settings/dcr", `{"mode":"admin_only"}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status: got %d, want 500, body: %s", resp.StatusCode, body)
+	}
 }
 
 func TestAdminHandler_GetDCRSettings_200(t *testing.T) {
@@ -1358,8 +1446,9 @@ func TestAdminHandler_UpdateDCRSettings_200(t *testing.T) {
 	}
 
 	// Verify the runtime DCR service was updated.
-	if mockDCR.GetMode() != "admin_only" {
-		t.Errorf("mockDCR mode: got %v, want admin_only", mockDCR.GetMode())
+	gotMode, _ := mockDCR.GetMode(context.Background())
+	if gotMode != "admin_only" {
+		t.Errorf("mockDCR mode: got %v, want admin_only", gotMode)
 	}
 }
 
@@ -1428,7 +1517,7 @@ func TestMetrics_AvailableOnAdminServer(t *testing.T) {
 		services.WithRevocationStore(stores.Revocation),
 	)
 
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  testAPIKey,
@@ -1478,10 +1567,10 @@ func newAdminTestServerWithUnifiedResources(t *testing.T) *adminTestEnv {
 		stores.Resource, stores.BrokerProvider, stores.Client, obs, nil,
 	)
 	brokerProviderAdminSvc := services.NewBrokerProviderAdminService(
-		stores.BrokerProvider, obs, nil,
+		stores.BrokerProvider, obs, nil, noopSecretEncoder{},
 	)
 
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  testAPIKey,
@@ -1542,7 +1631,7 @@ func TestAdmin_BrokerProviders_FullCRUD(t *testing.T) {
 		"protocol":     "oauth",
 		"config_data": map[string]any{
 			"client_id":         "x",
-			"client_secret_env": "GH_SECRET",
+			"client_secret_ref": "GH_SECRET",
 		},
 	}
 	resp := env.doRequest(t, "POST", "/admin/broker-providers", createBody)
@@ -1924,7 +2013,7 @@ func TestAdmin_BrokerProviders_ConfigDataRoundTrip(t *testing.T) {
 
 	cfg := map[string]any{
 		"client_id":         "abc",
-		"client_secret_env": "X",
+		"client_secret_ref": "X",
 		"authorize_url":     "https://example.com/authorize",
 		"nested":            map[string]any{"a": []any{1.0, 2.0}},
 	}

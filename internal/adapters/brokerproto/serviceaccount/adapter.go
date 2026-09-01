@@ -30,7 +30,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain/resource"
 	"github.com/authplane/authserver/internal/ports/output"
@@ -48,15 +47,6 @@ const jwtBearerGrantType = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 // sibling oauth adapter.
 const maxResponseBodySize = 1 << 20
 
-// SecretResolver resolves an environment-variable name (as configured in
-// configData.SAKeyEnv) to PEM-encoded private-key bytes. The
-// implementation must reject names that fall outside the
-// connector.ValidEnvVarName allowlist to prevent enumeration of arbitrary
-// process env vars. Wired in the cmd/ layer.
-type SecretResolver interface {
-	Resolve(envVarName string) (string, error)
-}
-
 // Adapter implements output.BrokerProtocol for the service_account
 // protocol. One adapter instance handles every BrokerProvider whose
 // Protocol is "service_account"; per-provider state lives in
@@ -64,7 +54,7 @@ type SecretResolver interface {
 // broker_grants.credential_data.
 type Adapter struct {
 	httpClient     *http.Client
-	secretResolver SecretResolver
+	secretResolver output.SecretResolver
 	allowLoopback  bool
 }
 
@@ -85,7 +75,7 @@ func WithAllowLoopback(allow bool) Option {
 // New builds an Adapter with the given HTTP client and secret resolver.
 // The HTTP client should set conservative timeouts and disable redirect
 // following on POST flows; the wiring layer is responsible for that.
-func New(httpClient *http.Client, sr SecretResolver, opts ...Option) *Adapter {
+func New(httpClient *http.Client, sr output.SecretResolver, opts ...Option) *Adapter {
 	a := &Adapter{
 		httpClient:     httpClient,
 		secretResolver: sr,
@@ -153,7 +143,7 @@ func (a *Adapter) Vend(
 	if err != nil {
 		return "", 0, nil, err
 	}
-	keyPEM, err := a.resolveSAKey(cfg.SAKeyEnv)
+	keyPEM, err := a.resolveSAKey(ctx, p, cfg.SAKeyRef)
 	if err != nil {
 		return "", 0, nil, err
 	}
@@ -202,25 +192,23 @@ func (a *Adapter) Revoke(_ context.Context, _ *resource.BrokerProvider, _ []byte
 	return nil
 }
 
-// resolveSAKey runs the configured env-var lookup with the connector
-// domain's existing pattern check. Uses ValidEnvVarName as defense-in-depth
-// even if the SecretResolver also checks. Mirrors the oauth adapter.
-func (a *Adapter) resolveSAKey(envVarName string) (string, error) {
-	if envVarName == "" {
-		return "", fmt.Errorf("%w: sa_key_env is empty", errSAKeyLookup)
+// resolveSAKey runs the configured secret lookup through the wired
+// SecretResolver, building a SecretSource from the provider's encrypted-column
+// value (if any) and the config_data env reference. Resolution order is owned
+// by the resolver: Data (decrypted under the provider's ownerContext) →
+// Ref (env var). The empty-result guard stays as defense-in-depth; the
+// empty-reference guard only fires when there is also no ciphertext to fall
+// back on (env-only path). Mirrors the oauth adapter.
+func (a *Adapter) resolveSAKey(ctx context.Context, p *resource.BrokerProvider, ref string) (string, error) {
+	if ref == "" && len(p.EncSecretData) == 0 {
+		return "", fmt.Errorf("%w: sa_key_ref is empty", errSAKeyLookup)
 	}
-	if !brokerproto.ValidEnvVarName(envVarName) {
-		return "", fmt.Errorf("%w: invalid env var name %q", errSAKeyLookup, envVarName)
-	}
-	if a.secretResolver == nil {
-		return "", fmt.Errorf("%w: no secret resolver configured", errSAKeyLookup)
-	}
-	pemBytes, err := a.secretResolver.Resolve(envVarName)
+	pemBytes, err := a.secretResolver.Resolve(ctx, output.GetSecretSourceForBrokerProvider(p, ref))
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", errSAKeyLookup, err)
 	}
 	if pemBytes == "" {
-		return "", fmt.Errorf("%w: env var %q not set", errSAKeyLookup, envVarName)
+		return "", fmt.Errorf("%w: reference %q resolved to empty", errSAKeyLookup, ref)
 	}
 	return pemBytes, nil
 }

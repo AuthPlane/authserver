@@ -26,7 +26,7 @@ func TestIntrospection_ActiveTokenContainsAllFields(t *testing.T) {
 
 	tokens := client.FullFlow("intro-full@example.com", "pass123", "tools/echo tools/get_time", false)
 
-	ir := h.IntrospectToken(tokens.AccessToken, clientID)
+	ir := h.IntrospectAsResourceServer(tokens.AccessToken, rs.URI)
 	if !ir.Active {
 		t.Fatal("expected active=true")
 	}

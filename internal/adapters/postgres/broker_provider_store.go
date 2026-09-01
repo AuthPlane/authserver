@@ -26,7 +26,7 @@ type BrokerProviderStore struct {
 
 var _ output.BrokerProviderStore = (*BrokerProviderStore)(nil)
 
-const brokerProviderColumns = `id, slug, display_name, protocol, config_data, created_at, updated_at`
+const brokerProviderColumns = `id, slug, display_name, protocol, config_data, enc_secret_data, enc_secret_backend, created_at, updated_at`
 
 // GetByID returns the BrokerProvider with the given id.
 func (s *BrokerProviderStore) GetByID(ctx context.Context, id string) (*resource.BrokerProvider, error) {
@@ -122,9 +122,11 @@ func (s *BrokerProviderStore) Create(ctx context.Context, p *resource.BrokerProv
 
 	_, err = dbOrTx(ctx, s.pool).Exec(ctx,
 		`INSERT INTO broker_providers (`+brokerProviderColumns+`)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)`,
 		p.ID, p.Slug, p.DisplayName, string(p.Protocol),
 		configDataBytes(p.ConfigData),
+		nullableBytes(p.EncSecretData),
+		nullableText(p.EncSecretBackend),
 		toUTC(p.CreatedAt), toUTC(p.UpdatedAt),
 	)
 	s.recordDB(ctx, "broker_provider_create", start)
@@ -152,10 +154,14 @@ func (s *BrokerProviderStore) Update(ctx context.Context, p *resource.BrokerProv
 	tag, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`UPDATE broker_providers
 		    SET slug = $1, display_name = $2, protocol = $3,
-		        config_data = $4::jsonb, updated_at = $5
-		  WHERE id = $6`,
+		        config_data = $4::jsonb,
+		        enc_secret_data = $5, enc_secret_backend = $6,
+		        updated_at = $7
+		  WHERE id = $8`,
 		p.Slug, p.DisplayName, string(p.Protocol),
 		configDataBytes(p.ConfigData),
+		nullableBytes(p.EncSecretData),
+		nullableText(p.EncSecretBackend),
 		toUTC(p.UpdatedAt), p.ID,
 	)
 	s.recordDB(ctx, "broker_provider_update", start)
@@ -201,14 +207,17 @@ func (s *BrokerProviderStore) recordDB(ctx context.Context, op string, start tim
 // scanBrokerProvider scans a single broker_providers row.
 func scanBrokerProvider(row interface{ Scan(...any) error }) (*resource.BrokerProvider, error) {
 	var (
-		p          resource.BrokerProvider
-		protocol   string
-		configData []byte
-		createdAt  time.Time
-		updatedAt  time.Time
+		p             resource.BrokerProvider
+		protocol      string
+		configData    []byte
+		encSecretData []byte
+		encBackend    *string
+		createdAt     time.Time
+		updatedAt     time.Time
 	)
 	if err := row.Scan(
 		&p.ID, &p.Slug, &p.DisplayName, &protocol, &configData,
+		&encSecretData, &encBackend,
 		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, err
@@ -216,6 +225,10 @@ func scanBrokerProvider(row interface{ Scan(...any) error }) (*resource.BrokerPr
 	p.Protocol = resource.Protocol(protocol)
 	if len(configData) > 0 {
 		p.ConfigData = configData
+	}
+	p.EncSecretData = encSecretData
+	if encBackend != nil {
+		p.EncSecretBackend = *encBackend
 	}
 	p.CreatedAt = createdAt.UTC()
 	p.UpdatedAt = updatedAt.UTC()
@@ -229,4 +242,13 @@ func configDataBytes(data []byte) []byte {
 		return []byte("{}")
 	}
 	return data
+}
+
+// nullableBytes returns nil when the slice is empty so pgx persists
+// SQL NULL rather than a zero-length BYTEA.
+func nullableBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }

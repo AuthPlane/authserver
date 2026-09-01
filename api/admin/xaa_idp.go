@@ -8,6 +8,7 @@ import (
 	"github.com/authplane/authserver/api/shared"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // XAADeps holds optional XAA dependencies for the admin server.
@@ -15,6 +16,7 @@ type XAADeps struct {
 	IDP            input.XAAIDPPort
 	Policy         input.XAAPolicyPort
 	SubjectMapping input.SubjectMappingPort
+	Config         output.XAAConfigProvider // per-request feature gate
 }
 
 // xaaIDPHandler handles admin API requests for trusted IdP management.

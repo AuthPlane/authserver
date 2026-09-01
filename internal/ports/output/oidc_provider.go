@@ -23,12 +23,16 @@ type OIDCUserInfo struct {
 type OIDCProvider interface {
 	// AuthorizationURL returns the URL to redirect the user to the upstream IdP.
 	// codeChallenge is the S256 PKCE challenge to send to the upstream IdP.
-	AuthorizationURL(state, nonce, codeChallenge, redirectURI string) string
+	// ctx and error let an implementation resolve the upstream configuration for
+	// the request and perform discovery I/O, so it honors ctx (cancellation/
+	// deadlines) and can return a non-nil error when the URL cannot be produced;
+	// callers must not redirect on error.
+	AuthorizationURL(ctx context.Context, state, nonce, codeChallenge string) (string, error)
 
 	// ExchangeCode exchanges an authorization code for tokens and verifies the ID token.
 	// The nonce must match the one sent in the authorization request.
 	// codeVerifier is the PKCE verifier corresponding to the challenge sent at authorization time.
-	ExchangeCode(ctx context.Context, code, nonce, codeVerifier, redirectURI string) (*OIDCTokenResult, error)
+	ExchangeCode(ctx context.Context, code, nonce, codeVerifier string) (*OIDCTokenResult, error)
 
 	// GetUserInfo calls the upstream UserInfo endpoint with the given access token.
 	// Returns nil, nil if the upstream does not expose a userinfo_endpoint.

@@ -34,7 +34,7 @@ From OCI:
 
 ```bash
 helm install authplane oci://ghcr.io/authplane/charts/authplane \
-  --version 0.2.1 -f values-production.yaml
+  --version 0.3.0 -f values-production.yaml
 ```
 
 ### 2. Pre-create the secrets (production)
@@ -204,7 +204,7 @@ config:
     enabled: true
     issuer: https://accounts.google.com
     client_id: "YOUR_CLIENT_ID"
-    client_secret_env: AUTHPLANE_OIDC_CLIENT_SECRET   # secret injected via extraEnv
+    client_secret_ref: CONNECTOR_OIDC_CLIENT_SECRET   # secret injected via extraEnv
 
 extraEnv:
   - name: AUTHPLANE_OIDC_CLIENT_SECRET

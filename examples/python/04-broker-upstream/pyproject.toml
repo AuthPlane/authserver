@@ -13,7 +13,7 @@ dependencies = [
   # depends on the core SDK for `client_credentials` (base machine token),
   # `exchange` (RFC 8693 Token Exchange), and the typed
   # `ConsentRequiredError` carrying `consent_url`.
-  "authplane-sdk==0.2.0",
+  "authplane-sdk==0.3.0",
   # httpx is already a transitive dep of authplane-sdk, but pin it
   # explicitly because verify.sh reaches into the container with httpx
   # if it ever needs to bypass the SDK.

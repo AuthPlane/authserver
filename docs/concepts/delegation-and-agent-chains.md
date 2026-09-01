@@ -124,8 +124,14 @@ oldest, but `max_chain_depth` should catch problems earlier.
 
 ## Who's allowed to exchange
 
-When a client requests a token exchange against a resource, three policies
-are checked in order. Any one passing authorizes the exchange:
+When a client requests a token exchange against a **registered** resource,
+the gates run in sequence — operator allowlist (3 below), subject-scope
+ceiling, user consent (skipped for Mint self-exchange and on fronted
+paths, Mint→Mint and Mint→Broker alike); see
+[Token Exchange grant → Step 3](../guides/upstream-providers/token-exchange-grant.md#step-3-gate-the-resource-with-policyexchangeallowed_client_ids).
+When `resource` is omitted (legacy fall-through), exactly one of (1) and
+(2) below runs — never both. Which one is decided by whether the acting
+`client_id` equals the subject token's:
 
 1. **Self-exchange** — `allow_self_exchange: true` AND the requesting
    client's `client_id` matches the subject token's `client_id`. Used for
@@ -135,11 +141,15 @@ are checked in order. Any one passing authorizes the exchange:
    pre-authorized this specific actor.
 3. **Per-resource policy** — the target resource's
    `policy.exchange.allowed_client_ids` includes the acting client (empty
-   list allows any consented client). For [Broker](glossary.md#glossary-broker-backend)
+   list allows any client). For [Broker](glossary.md#glossary-broker-backend)
    resources, the three-bound [consent](glossary.md#glossary-consent) check
    then runs on top.
 
-If none pass, the exchange is denied with `access_denied`.
+The operator gate (3) and the legacy fall-through (1 and 2) deny with
+`access_denied`. The other sequential gates fail differently: the
+subject-scope ceiling returns `invalid_scope`, and the user-consent gate
+returns `consent_required` (with a `consent_missing` / `scope_insufficient`
+cause).
 
 ## Agent identity is opt-in
 

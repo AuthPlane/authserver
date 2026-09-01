@@ -396,7 +396,10 @@ func TestResourceRegistry_List_ReturnsResourceInfo(t *testing.T) {
 	}
 	reg := newRegistry(rs, &mockBrokerProviderStore{})
 
-	infos := reg.List()
+	infos, err := reg.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: unexpected error: %v", err)
+	}
 	if len(infos) != 1 {
 		t.Fatalf("List returned %d infos, want 1", len(infos))
 	}
@@ -428,7 +431,10 @@ func TestResourceRegistry_List_BackendKindFilteredCorrectly(t *testing.T) {
 	}
 	reg := newRegistry(rs, &mockBrokerProviderStore{})
 
-	infos := reg.List()
+	infos, err := reg.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: unexpected error: %v", err)
+	}
 	if len(infos) != 2 {
 		t.Fatalf("List returned %d infos, want 2 (one mint + one broker)", len(infos))
 	}
@@ -439,5 +445,23 @@ func TestResourceRegistry_List_BackendKindFilteredCorrectly(t *testing.T) {
 	}
 	if !uris[broker.URI] {
 		t.Errorf("broker URI %q missing from List result %v — consumers like authorize need both kinds", broker.URI, uris)
+	}
+}
+
+func TestResourceRegistry_List_SurfacesStoreError(t *testing.T) {
+	wantErr := errors.New("db unavailable")
+	rs := &mockResourceStore{
+		listFn: func(_ output.ResourceFilter) ([]*resource.Resource, error) {
+			return nil, wantErr
+		},
+	}
+	reg := newRegistry(rs, &mockBrokerProviderStore{})
+
+	infos, err := reg.List(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("List error = %v, want chain containing %v", err, wantErr)
+	}
+	if infos != nil {
+		t.Errorf("List infos = %v, want nil on error", infos)
 	}
 }

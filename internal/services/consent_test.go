@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/authplane/authserver/internal/adapters/sqlite"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/audit"
@@ -312,13 +313,13 @@ func TestConsent_DenyConsent_AuditEvent(t *testing.T) {
 // session owned by user A. Returns the consent service, session, and stores so
 // individual tests can call GrantConsent / DenyConsent and inspect state.
 type twoUserFixture struct {
-	stores  *sqlite.Stores
-	svc     *services.ConsentService
-	sess    *session.AuthSession
-	client  *client.Client
-	resURI  string
-	userA   string
-	userB   string
+	stores *sqlite.Stores
+	svc    *services.ConsentService
+	sess   *session.AuthSession
+	client *client.Client
+	resURI string
+	userA  string
+	userB  string
 }
 
 func setupTwoUserFixture(t *testing.T) *twoUserFixture {
@@ -502,6 +503,149 @@ func TestConsent_EmptyReqUser_Rejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("empty req.UserID must be rejected — no anonymous consent")
+	}
+}
+
+// TestConsent_BackButtonReplay_DoesNotRevokeLiveTokens is the regression test
+// for the reproduced bug this fix closes: UpdateCodeHashAndScope could mint a
+// fresh authorization code onto a session whose code had already been
+// redeemed. The exploitable sequence was: user completes the flow, the client
+// redeems the code and gets tokens, the user presses Back to
+// /consent?session_id=... (a plain GET) and clicks Allow again — minting a
+// second, never-redeemed code onto the already-consumed session. When that
+// second code was replayed, ConsumeByCodeHash found consumed_at already set
+// and answered ErrCodeConsumed with the session attached; the reuse path then
+// saw the session's genuine PKCE verifier and client_id, treated the "replay"
+// as credentialed, and revoked the family the first (legitimate) redemption
+// created — logging the user out by pressing Back.
+//
+// The fix adds `AND consumed_at IS NULL` to UpdateCodeHashAndScope's UPDATE
+// (internal/adapters/{sqlite,postgres}/session.go), so the second GrantConsent
+// in this sequence is refused outright with ErrInvalidGrant and never reaches
+// the point where a second code could exist at all.
+func TestConsent_BackButtonReplay_DoesNotRevokeLiveTokens(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+	auditSvc := services.NewAuditService(stores.Audit, obs)
+	registry := newTestRegistry(stores)
+
+	const uri = "https://mcp.example.com"
+	seedMintResource(t, stores, "mcp-backbtn", "Back Button MCP", uri,
+		resource.Scope{Name: "tools/query", Description: "Query"},
+	)
+
+	consentSvc := services.NewConsentService(
+		stores.ConsentGrant, stores.Session, stores.Client, registry, obs, auditSvc,
+	)
+
+	// Shares stores with consentSvc so both services see the same session and
+	// family rows — newTokenTestSetupWithOverrides also seeds the "user-42"
+	// user this test authenticates as.
+	tokenSetup := newTokenTestSetupWithOverrides(t, static.NewTokenConfigProvider(output.TokenConfig{
+		AccessTokenExpiry:  15 * time.Minute,
+		RefreshTokenExpiry: 24 * time.Hour,
+	}), tokenTestOverrides{stores: stores, obs: obs})
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	c := &client.Client{
+		ID:                      crypto.GenerateClientID(),
+		Name:                    "Back Button Client",
+		RedirectURIs:            []string{"https://app.example.com/callback"},
+		GrantTypes:              []string{"authorization_code"},
+		ResponseTypes:           []string{"code"},
+		TokenEndpointAuthMethod: "none",
+		Status:                  client.StatusActive,
+		RegistrationSource:      client.SourceDCR,
+		IssuedAt:                now,
+		UpdatedAt:               now,
+	}
+	if err := stores.Client.Create(ctx, c); err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+
+	verifier := crypto.GenerateVerifier()
+	challenge := crypto.ComputeS256Challenge(verifier)
+
+	// A pending authorization session: no code yet, exactly as /authorize
+	// leaves it before consent.
+	sess := &session.AuthSession{
+		ID:                  crypto.GenerateRandomString(16),
+		ClientID:            c.ID,
+		UserID:              "user-42",
+		RedirectURI:         "https://app.example.com/callback",
+		Scope:               "tools/query",
+		Resource:            uri,
+		State:               "state-back-button",
+		CodeChallenge:       challenge,
+		CodeChallengeMethod: "S256",
+		ExpiresAt:           now.Add(session.AuthCodeTTL),
+		CreatedAt:           now,
+	}
+	if err := stores.Session.Create(ctx, sess); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Step 1: user completes consent — mints the one legitimate code.
+	grant1, err := consentSvc.GrantConsent(ctx, input.GrantConsentRequest{
+		SessionID:      sess.ID,
+		UserID:         "user-42",
+		ApprovedScopes: []string{"tools/query"},
+	})
+	if err != nil {
+		t.Fatalf("first GrantConsent: %v", err)
+	}
+
+	// Step 2: the client redeems the code — tokens issued, family created.
+	tokens, err := tokenSetup.tokenSvc.ExchangeCode(ctx, input.ExchangeCodeRequest{
+		Code:         grant1.Code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange code: %v", err)
+	}
+
+	fam, err := stores.Token.GetFamilyByAuthSessionID(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("get family: %v", err)
+	}
+	if !fam.IsActive() {
+		t.Fatal("family not active right after the legitimate redemption")
+	}
+
+	// Step 3: the user presses Back to /consent?session_id=... (still holding
+	// the session cookie) and clicks Allow again. Pre-fix, this minted a
+	// second, never-redeemed code onto the already-consumed session; here it
+	// must be refused outright.
+	_, err = consentSvc.GrantConsent(ctx, input.GrantConsentRequest{
+		SessionID:      sess.ID,
+		UserID:         "user-42",
+		ApprovedScopes: []string{"tools/query"},
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("second GrantConsent (Back-button replay): got %v, want ErrInvalidGrant", err)
+	}
+
+	// The first redemption's tokens must still be live. Pre-fix, the second
+	// GrantConsent above would have succeeded and minted a second code; the
+	// eventual replay of that code would have looked like a credentialed
+	// reuse of the first code and revoked this family — logging the user out
+	// by pressing Back.
+	fam, err = stores.Token.GetFamily(ctx, fam.ID)
+	if err != nil {
+		t.Fatalf("get family after the Back-button replay attempt: %v", err)
+	}
+	if !fam.IsActive() {
+		t.Error("pressing Back and clicking Allow again revoked the first redemption's tokens")
+	}
+
+	if _, err := tokenSetup.tokenSvc.RefreshToken(ctx, input.RefreshTokenRequest{
+		RefreshToken: tokens.RefreshToken, ClientID: c.ID,
+	}); err != nil {
+		t.Errorf("the first (legitimate) redemption's refresh token no longer rotates: %v", err)
 	}
 }
 

@@ -437,7 +437,7 @@ export async function updateDCRSettings(req: UpdateDCRSettingsRequest): Promise<
 //   - a Mint resource — Authplane mints JWTs for it (e.g. an MCP server we
 //     issue audience-scoped tokens for); or
 //   - a Broker resource — Authplane brokers an upstream credential to it
-//     (e.g. a SaaS API we hold an OAuth token for).
+//     (e.g. a third-party API we hold an OAuth token for).
 //
 // `backend_kind` discriminates. Broker resources reference a BrokerProvider
 // (the upstream-config row) via `broker_provider_id`.

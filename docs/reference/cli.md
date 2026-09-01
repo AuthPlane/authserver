@@ -562,13 +562,13 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 
 **Long**
 
-> Create a broker provider. --config-data points to a file holding the protocol-specific JSON. For OAuth providers the JSON's `client_secret_env` field carries the NAME of the env var the AS will look up at runtime, NOT the secret value itself.
+> Create a broker provider. --config-data points to a file holding the protocol-specific JSON. For OAuth providers the JSON's `client_secret_ref` field carries the NAME of the env var the AS will look up at runtime, NOT the secret value itself.
 
 ### Required flags
 
 | Flag | Type | Notes |
 | --- | --- | --- |
-| `--config-data` | `string` | Path to JSON file holding the provider's protocol-specific config . For OAuth, client_secret_env is the env var NAME, not the secret. |
+| `--config-data` | `string` | Path to JSON file holding the provider's protocol-specific config . For OAuth, client_secret_ref is the env var NAME, not the secret. |
 | `--display-name` | `string` | Human-readable name |
 | `--protocol` | `string` | Protocol: oauth \| api_key \| service_account |
 | `--slug` | `string` | Provider slug |
@@ -1025,7 +1025,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 
 > Start the Authplane MCP Authorization Server.
 
-**Source** — `cmd/authserver/serve.go:42`
+**Source** — `cmd/authserver/serve.go:46`
 
 ## `authserver version`
 

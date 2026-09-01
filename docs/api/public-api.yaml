@@ -16,6 +16,7 @@ tags:
   - name: connections
   - name: consent
   - name: health
+  - name: livez
   - name: login
   - name: logout
   - name: oauth
@@ -145,6 +146,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+  /livez:
+    get:
+      operationId: http-public-livez
+      summary: '`GET /livez`'
+      tags:
+        - livez
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
   /login:
     get:
       operationId: http-public-login
@@ -160,8 +174,14 @@ paths:
       tags:
         - login
       responses:
-        default:
-          description: See `docs/reference/http-api.md` for the response shape.
+        "303":
+          description: Status 303
+        "404":
+          description: Not Found
+        "422":
+          description: Status 422
+        "429":
+          description: Too Many Requests
   /logout:
     post:
       operationId: http-public-logout-post
@@ -203,6 +223,7 @@ paths:
     post:
       operationId: http-public-oauth-register
       summary: '`POST /oauth/register`'
+      description: This endpoint creates **user-delegated clients**. Their scopes come from the user at consent time, so a `scope` member in the request is **discarded** and the response carries none. **Register machine-to-machine clients (`client_credentials`, jwt-bearer) with `POST /admin/clients` instead** — that is the only surface that sets a client's scope ceiling, so a client registered here starts without one and those two grants refuse every explicit `scope` at `POST /oauth/token` with `invalid_scope`.
       tags:
         - oauth
       responses:
@@ -229,6 +250,7 @@ paths:
     post:
       operationId: http-public-oauth-token
       summary: '`POST /oauth/token`'
+      description: 'Issues an access token for the grant named in `grant_type` (RFC 6749 §3.2): `authorization_code`, `refresh_token`, `client_credentials`, token-exchange and jwt-bearer. The request is form-encoded; DPoP-bound clients send a `DPoP` header. `invalid_scope` on `client_credentials` or jwt-bearer usually means an empty client ceiling: the client''s registered `scope` is read only by those two grants, and set only by the admin surface (`POST /admin/clients`, `PATCH /admin/clients/{client_id}`).'
       tags:
         - oauth
       requestBody:
@@ -297,7 +319,7 @@ components:
       required:
         - status
         - time
-      description: healthResponse is the JSON body for GET /health and GET /ready.
+      description: healthResponse is the JSON body for GET /livez, GET /health and GET /ready.
     OAuthErrorResponse:
       type: object
       properties:

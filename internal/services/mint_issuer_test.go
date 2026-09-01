@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain/resource"
 	"github.com/authplane/authserver/internal/observability"
@@ -52,7 +53,7 @@ const testIssuer = "https://auth.example.com"
 
 func newMintIssuerForTest(t *testing.T, keys JWKSSigningKeyProvider, issuances output.IssuanceStore) *MintIssuer {
 	t.Helper()
-	return NewMintIssuer(keys, issuances, testIssuer, observability.NewNoop())
+	return NewMintIssuer(keys, issuances, static.NewIssuerProvider(testIssuer), observability.NewNoop())
 }
 
 func mintBaseRequest() IssueRequest {

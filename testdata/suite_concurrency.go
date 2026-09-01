@@ -286,9 +286,11 @@ func RunUserOptimisticLockTests(t *testing.T, newStore func(*testing.T) output.U
 
 // TransactionStores groups stores needed for transaction tests.
 type TransactionStores struct {
-	Client      output.ClientStore
-	User        output.UserStore
-	Transaction output.TransactionManager
+	Client         output.ClientStore
+	User           output.UserStore
+	BrokerProvider output.BrokerProviderStore
+	BrokerGrant    output.BrokerGrantStore
+	Transaction    output.TransactionManager
 }
 
 // RunTransactionManagerTests runs the shared TransactionManager test suite.
@@ -337,6 +339,38 @@ func RunTransactionManagerTests(t *testing.T, newStores func(*testing.T) Transac
 		_, err = s.Client.GetByID(ctx, "tx-rollback")
 		if !errors.Is(err, domain.ErrInvalidClient) {
 			t.Errorf("expected ErrInvalidClient after rollback, got %v", err)
+		}
+	})
+
+	t.Run("BrokerGrant_RollbackOnError", func(t *testing.T) {
+		s := newStores(t)
+		ctx := context.Background()
+
+		// Seed the (user, provider) FK chain outside the transaction so the
+		// grant insert inside the tx is the only thing under test.
+		seedUser(t, s.User, "u-bg-tx")
+		seedBrokerProvider(t, s.BrokerProvider, "p-bg-tx", "bg-tx")
+
+		err := s.Transaction.WithTransaction(ctx, func(txCtx context.Context) error {
+			if err := s.BrokerGrant.Create(txCtx, newBrokerGrant("bg-tx", "u-bg-tx", "p-bg-tx")); err != nil {
+				return err
+			}
+			// Return an error to trigger rollback of the whole transaction.
+			return errors.New("deliberate failure")
+		})
+		if err == nil {
+			t.Fatal("expected error from transaction")
+		}
+
+		// The grant write must have rolled back with the outer transaction.
+		// If the store used the raw pool/handle instead of dbOrTx, the row
+		// would have been committed on a separate connection and survive.
+		got, err := s.BrokerGrant.Get(ctx, "u-bg-tx", "p-bg-tx")
+		if err != nil {
+			t.Fatalf("get after rollback: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("expected grant to be rolled back (nil), got %+v", got)
 		}
 	})
 

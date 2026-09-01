@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 45 lines · SDK: go-sdk v0.1.1**
+**Auth-specific code: 5 lines · Total example: 45 lines · SDK: go-sdk v0.2.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP
@@ -27,7 +27,7 @@ tool handler that needs to talk to the other resource — the standalone
 |---|---|
 | **Time to run** | ~30 seconds once tier-01 is up |
 | **Prereqs** | The tier-01 example is up (`cd ../01-mcp-server-basic && make run && make verify`), plus `go 1.25+`, `curl`, `jq` |
-| **SDK** | `github.com/authplane/go-sdk/core` v0.1.1 (Go module proxy) |
+| **SDK** | `github.com/authplane/go-sdk/core` v0.2.0 (Go module proxy) |
 | **Pairs with** | [Tier 01 — Basic MCP server (Go)](../01-mcp-server-basic/) — the agent calls into the MCP server that tier brings up |
 
 ## Run it in 3 commands

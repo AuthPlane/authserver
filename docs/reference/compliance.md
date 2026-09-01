@@ -98,7 +98,9 @@ The AS itself does **not** serve PRM (it is not a protected resource); the AS's 
 
 ### RFC 7662 — Token Introspection
 
-**Implemented**: Introspection endpoint at `/oauth/introspect`. Accepts access tokens and machine tokens. Requires client authentication (`client_secret_post` or `client_secret_basic`) for confidential clients.
+**Implemented**: Introspection endpoint at `/oauth/introspect`. Accepts access tokens and machine tokens. Requires client authentication (`client_secret_post` or `client_secret_basic`) — public clients are refused, since RFC 6749 §2.3 forbids relying on a public client's authentication to identify it.
+
+Per §4, the caller must also be entitled to the token it asks about: either it issued the token, or it is a resource server authorized to act AS the Resource named in the token's `aud` (see [Runtime Client Binding](../guides/integrate/runtime-client-binding.md)). Callers that qualify for neither receive `{"active": false}` — the same body an invalid token produces, so the endpoint cannot confirm that a token exists.
 
 **No deviations.**
 

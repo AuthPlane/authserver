@@ -109,14 +109,10 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("session.secure must be true when server.issuer is not localhost"))
 	}
 
-	// Admin API key — required when admin is enabled in production
-	if c.Admin.Enabled && c.Admin.APIKey == "" && !isLocalhostIssuer(c.Server.Issuer) {
-		errs = append(errs, errors.New("admin.api_key is required when admin is enabled and server.issuer is not localhost"))
-	} else if c.Admin.Enabled && c.Admin.APIKey != "" && isWeakSecret(c.Admin.APIKey) {
-		errs = append(errs, errors.New("admin.api_key is a known weak/default value — generate a strong random key (e.g. openssl rand -hex 32)"))
-	} else if c.Admin.Enabled && c.Admin.APIKey != "" && !isLocalhostIssuer(c.Server.Issuer) && len(c.Admin.APIKey) < 16 {
-		errs = append(errs, errors.New("admin.api_key must be at least 16 characters in production"))
-	}
+	// NOTE: the admin API-key policy (required/strong in production) is NOT
+	// validated here — it is enforced by the OSS binary via ValidateAdminAPIKey.
+	// A deployment that fronts the admin API with external authentication does
+	// not use the built-in API-key gate and validates admin auth differently.
 
 	// Session same_site
 	switch strings.ToLower(c.Session.SameSite) {
@@ -175,17 +171,17 @@ func (c *Config) Validate() error {
 		if c.OIDC.ClientID == "" {
 			errs = append(errs, errors.New("oidc.client_id is required when oidc is enabled"))
 		}
-		// Resolve client_secret_env (takes precedence over client_secret).
-		if c.OIDC.ClientSecretEnv != "" {
-			val := os.Getenv(c.OIDC.ClientSecretEnv)
-			if val == "" {
-				errs = append(errs, fmt.Errorf("oidc.client_secret_env: env var %s is not set or empty", c.OIDC.ClientSecretEnv))
-			} else {
-				c.OIDC.ClientSecret = val
-			}
+		// Structural check only: require exactly one of an inline client_secret or a
+		// client_secret_ref env-var name — they are mutually exclusive, so configuring
+		// both is rejected rather than silently resolved by precedence. The actual env
+		// var is NOT read here — resolution happens just-in-time at the OIDC token
+		// exchange (oidc.Provider.exchangeCode, via SecretResolver), and the boot
+		// probe (probeSecretRefs) fails fast if the named var is absent.
+		if c.OIDC.ClientSecret == "" && c.OIDC.ClientSecretRef == "" {
+			errs = append(errs, errors.New("oidc: client_secret or client_secret_ref is required when oidc is enabled"))
 		}
-		if c.OIDC.ClientSecret == "" {
-			errs = append(errs, errors.New("oidc.client_secret is required when oidc is enabled"))
+		if c.OIDC.ClientSecret != "" && c.OIDC.ClientSecretRef != "" {
+			errs = append(errs, errors.New("oidc: client_secret and client_secret_ref are mutually exclusive — set only one"))
 		}
 		if c.OIDC.Issuer != "" && !strings.HasPrefix(c.OIDC.Issuer, "https://") && !isLocalhostIssuer(c.OIDC.Issuer) {
 			errs = append(errs, errors.New("oidc.issuer must use HTTPS in production"))
@@ -210,6 +206,39 @@ func (c *Config) Validate() error {
 		if c.ClientCredentials.TokenExpiry <= 0 {
 			errs = append(errs, errors.New("client_credentials.token_expiry must be positive when client_credentials is enabled"))
 		}
+	}
+
+	// OAuth — the OIDC state replay window must be a real, positive bound. A
+	// zero/negative value (from YAML, or a provider) would be clamped back to
+	// the default by EffectiveMaxAge, silently widening the window the operator
+	// meant to tighten; reject it at boot instead.
+	if c.OAuth.StateMaxAge <= 0 {
+		errs = append(errs, errors.New("oauth.state_max_age must be positive"))
+	}
+
+	// Session — same reasoning: a zero/negative session.max_age (from YAML, or a
+	// provider) is clamped up to DefaultSessionMaxAge by SessionConfig.
+	// EffectiveMaxAge, so an operator shortening the session would silently get
+	// 24h. Reject it at boot.
+	if c.Session.MaxAge <= 0 {
+		errs = append(errs, errors.New("session.max_age must be positive"))
+	}
+
+	// Admin audit feed — zero means "package default" to the provider, not
+	// "unbounded", so a zero here would silently restore the built-in bound an
+	// operator was trying to change. Reject it at boot instead.
+	if c.Admin.AuditDefaultLookback <= 0 {
+		errs = append(errs, errors.New("admin.audit_default_lookback must be positive"))
+	}
+	if c.Admin.AuditMaxLookback <= 0 {
+		errs = append(errs, errors.New("admin.audit_max_lookback must be positive"))
+	}
+	// A default beyond the max is contradictory: the service clamps the default
+	// down to the max, so the feed would answer an omitted since with a window
+	// narrower than the one configured. Say so rather than resolve it silently.
+	if c.Admin.AuditDefaultLookback > 0 && c.Admin.AuditMaxLookback > 0 &&
+		c.Admin.AuditDefaultLookback > c.Admin.AuditMaxLookback {
+		errs = append(errs, errors.New("admin.audit_default_lookback must not exceed admin.audit_max_lookback"))
 	}
 
 	// DPoP
@@ -239,6 +268,7 @@ func (c *Config) Validate() error {
 	// validated by the brokerproto adapter at first vend, not at config-load
 	// time).
 	errs = append(errs, c.validateConnect()...)
+	errs = append(errs, c.validateRateLimit()...)
 
 	if len(errs) > 0 {
 		return &ValidationErrors{Errors: errs}
@@ -386,6 +416,83 @@ func (c *Config) validateConnect() []error {
 	return errs
 }
 
+// minTrackedIdentities is the floor for rate_limit.max_tracked_identities.
+// Sized so a deployment sits comfortably above its own steady state rather than
+// permanently at capacity; the ceiling is memory, and 10k entries is ~1.6 MB.
+const minTrackedIdentities = 10_000
+
+// validateRateLimit rejects the auth-lockout durations at zero or below.
+//
+// Zero is rejected rather than defaulted because the two readings are opposite
+// and both are plausible. An operator writing `auth_lockout: 0s` most likely
+// means "turn the lockout off", but zero does not do that — RecordFailure still
+// engages, so the audit event fires and the log reads "auth lockout engaged"
+// while the deadline is already in the past and nobody is blocked. A zero
+// auth_fail_window fails the other way: the failure counter resets on every
+// attempt and no lockout ever engages, silently.
+//
+// Silently substituting the default would be just as wrong in the other
+// direction: an operator who asked for zero would get fifteen minutes. So the
+// server refuses to start and names the switch that does what they meant.
+//
+// AuthLockout keeps its own fallback for the same fields. That is not
+// redundant: it guards a struct literal built by a test or an embedder that
+// never passes through this loader, where failing to start is not an option a
+// library gets to take.
+func (c *Config) validateRateLimit() []error {
+	var errs []error
+
+	// requests_per_second and burst brick the limiter at zero rather than
+	// disabling it: golang.org/x/time/rate treats Limit(0) as "no refill", so a
+	// visitor spends its burst and is denied for the process lifetime, and a
+	// zero burst denies from the first request. The field used to be documented
+	// "0 = no limit", which is the opposite of what it does — an operator
+	// following that comment would have taken their public API down after
+	// `burst` requests per source address. enabled: false is the off switch.
+	//
+	// Only checked when the limiter is on, for the same reason the lockout
+	// durations are skipped when auth_fail_max is 0: a value that does nothing
+	// should not stop the server from starting.
+	if c.RateLimit.Enabled {
+		if c.RateLimit.RequestsPerSecond <= 0 {
+			errs = append(errs, errors.New(
+				"rate_limit.requests_per_second must be greater than zero (set rate_limit.enabled: false to turn throughput limiting off)"))
+		}
+		if c.RateLimit.Burst <= 0 {
+			errs = append(errs, errors.New(
+				"rate_limit.burst must be greater than zero (set rate_limit.enabled: false to turn throughput limiting off)"))
+		}
+	}
+
+	// Nothing to validate when the lockout is off. auth_fail_max: 0 is the
+	// documented way to disable it — and the very thing the errors below tell an
+	// operator to do — so rejecting the durations they zeroed afterwards would
+	// refuse to start on the exact configuration this function recommends.
+	if c.RateLimit.AuthFailMax <= 0 {
+		return nil
+	}
+
+	// A positive-but-tiny cap is the same fail-open this function refuses for a
+	// zero duration, just quieter: at max_tracked_identities: 100 the tracker
+	// spends its whole life at capacity, evicting on every new identity, and the
+	// only report is a log line. Someone trimming memory would not expect that.
+	if c.RateLimit.MaxTrackedIdentities > 0 && c.RateLimit.MaxTrackedIdentities < minTrackedIdentities {
+		errs = append(errs, fmt.Errorf(
+			"rate_limit.max_tracked_identities must be at least %d when set (it bounds memory, not attackers — see the account-lockout notes in docs/concepts/threat-model.md)",
+			minTrackedIdentities))
+	}
+
+	if c.RateLimit.AuthLockout <= 0 {
+		errs = append(errs, errors.New(
+			"rate_limit.auth_lockout must be greater than zero (set rate_limit.auth_fail_max: 0 to disable the account lockout)"))
+	}
+	if c.RateLimit.AuthFailWindow <= 0 {
+		errs = append(errs, errors.New(
+			"rate_limit.auth_fail_window must be greater than zero (set rate_limit.auth_fail_max: 0 to disable the account lockout)"))
+	}
+	return errs
+}
+
 // validateConnectorURL checks that a connector URL is HTTPS (or HTTP for localhost in dev).
 func validateConnectorURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
@@ -404,6 +511,24 @@ func validateConnectorURL(rawURL string) error {
 // isLocalhostHost checks if the hostname is a localhost address.
 func isLocalhostHost(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// ValidateAdminAPIKey enforces the admin API-key policy of the OSS binary: a
+// strong key is required when the admin server is enabled in production
+// (non-localhost issuer), and any key that is set must not be weak or too
+// short. It is deliberately NOT part of Validate(): a deployment that fronts
+// the admin API with external authentication does not use the built-in
+// API-key gate and does not call this.
+func (c *Config) ValidateAdminAPIKey() error {
+	switch {
+	case c.Admin.Enabled && c.Admin.APIKey == "" && !isLocalhostIssuer(c.Server.Issuer):
+		return errors.New("admin.api_key is required when admin is enabled and server.issuer is not localhost")
+	case c.Admin.Enabled && c.Admin.APIKey != "" && isWeakSecret(c.Admin.APIKey):
+		return errors.New("admin.api_key is a known weak/default value — generate a strong random key (e.g. openssl rand -hex 32)")
+	case c.Admin.Enabled && c.Admin.APIKey != "" && !isLocalhostIssuer(c.Server.Issuer) && len(c.Admin.APIKey) < 16:
+		return errors.New("admin.api_key must be at least 16 characters in production")
+	}
+	return nil
 }
 
 // weakSecrets is a blocklist of known insecure default values that must be rejected.

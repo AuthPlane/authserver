@@ -24,7 +24,7 @@ func newDCRTestServer(t *testing.T, mode string, approvedRedirects []string) *ht
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 
-	dcrMode := services.DCRMode{
+	dcrMode := staticDCRModeForTest{
 		Mode:              mode,
 		ApprovedRedirects: approvedRedirects,
 	}
@@ -33,9 +33,13 @@ func newDCRTestServer(t *testing.T, mode string, approvedRedirects []string) *ht
 	jwksSvc := newTestJWKSService(t)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		DCR:             dcrSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		DCR:                   dcrSvc,
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -203,7 +207,7 @@ func TestRegister_RateLimited(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 
-	dcrMode := services.DCRMode{
+	dcrMode := staticDCRModeForTest{
 		Mode: "open",
 	}
 	dcrSvc := services.NewDCRService(stores.Client, dcrMode, obs.WithComponent("dcr"), nil)
@@ -211,9 +215,13 @@ func TestRegister_RateLimited(t *testing.T) {
 
 	// Create server WITH rate limiting enabled (very low: 2 req/s, burst 2).
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		DCR:             dcrSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		DCR:                   dcrSvc,
 		RateLimitCfg: config.RateLimitConfig{
 			Enabled:           true,
 			RequestsPerSecond: 2,

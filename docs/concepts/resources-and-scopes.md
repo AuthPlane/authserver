@@ -120,6 +120,26 @@ flowchart LR
 match one of the strings you put in your `Resource.scopes`. Everything else
 falls out of that.
 
+### Which door a client comes through
+
+> **`POST /oauth/register` creates user-delegated clients. Machine-to-machine
+> clients are pre-registered through the admin API and never call
+> `/oauth/register` at all.**
+
+That is the whole rule, and the client's `scope` field falls out of it. Scope is
+a **per-client ceiling**, not a scope source, and only the admin surface sets it
+(`POST /admin/clients`, `PATCH /admin/clients/{client_id}`). A user-delegated
+client has nothing for registration to grant — its scopes arrive from the user
+at consent time — so a `scope` member sent to `POST /oauth/register` is
+discarded and the response carries none. Clients ingested through CIMD land the
+same way.
+
+The rest is consequence. `/oauth/register` is unauthenticated, and OAuth 2.1
+§4.2 reserves `client_credentials` for resources arranged with the server in
+advance; anonymous and previously-arranged are contradictory, which is why
+machine clients — the ones using `client_credentials` or jwt-bearer — belong on
+the admin surface rather than here.
+
 ## Resource indicators
 
 Clients name the target resource in their requests via the `resource`
@@ -158,7 +178,7 @@ Plus a per-resource exchange policy:
 
 3. The acting client must satisfy
    `resources.policy.exchange.allowed_client_ids` (empty allows any
-   consented client).
+   client).
 
 If any bound fails, authserver returns
 [ConsentRequiredError](glossary.md#glossary-consentrequirederror) with the

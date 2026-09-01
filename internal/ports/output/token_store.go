@@ -17,8 +17,21 @@ type TokenStore interface {
 	// GetFamily returns a token family by ID.
 	GetFamily(ctx context.Context, id string) (*token.Family, error)
 
+	// GetFamilyByAuthSessionID returns the family born from the given auth
+	// session. Not found returns ErrInvalidGrant, matching GetFamily.
+	//
+	// Used only by the authorization-code reuse path: a family exists
+	// only after a code has been redeemed, so this can never reveal anything
+	// about a code that has not been burned yet.
+	GetFamilyByAuthSessionID(ctx context.Context, authSessionID string) (*token.Family, error)
+
 	// RevokeFamily atomically revokes a family and all its refresh tokens.
-	RevokeFamily(ctx context.Context, familyID string) error
+	// revoked reports whether this call changed the family's status: false
+	// with a nil error means no active row matched — the family was already
+	// revoked, or no such family exists — and nothing was written. Callers
+	// that count or audit a revocation gate on it, so two callers racing on
+	// one family report it once.
+	RevokeFamily(ctx context.Context, familyID string) (revoked bool, err error)
 
 	// --- Refresh Tokens ---
 

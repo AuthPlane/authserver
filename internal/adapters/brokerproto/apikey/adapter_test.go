@@ -14,7 +14,9 @@ import (
 // and to assert at compile time that the interface still type-checks.
 type stubSecretResolver struct{}
 
-func (stubSecretResolver) Resolve(string) (string, error) { return "", nil }
+func (stubSecretResolver) Resolve(context.Context, output.SecretSource) (string, error) {
+	return "", nil
+}
 
 func mustProvider() *resource.BrokerProvider {
 	return &resource.BrokerProvider{

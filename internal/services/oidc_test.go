@@ -23,11 +23,11 @@ type mockOIDCProvider struct {
 	userinfoErr    error
 }
 
-func (m *mockOIDCProvider) AuthorizationURL(_, _, _, _ string) string {
-	return m.authURL
+func (m *mockOIDCProvider) AuthorizationURL(_ context.Context, _, _, _ string) (string, error) {
+	return m.authURL, nil
 }
 
-func (m *mockOIDCProvider) ExchangeCode(_ context.Context, _, _, _, _ string) (*output.OIDCTokenResult, error) {
+func (m *mockOIDCProvider) ExchangeCode(_ context.Context, _, _, _ string) (*output.OIDCTokenResult, error) {
 	return m.exchangeResult, m.exchangeErr
 }
 
@@ -53,7 +53,7 @@ func TestAuthenticateOIDC_NewUser(t *testing.T) {
 	facade, users := newOIDCFacade(t, mock)
 	ctx := context.Background()
 
-	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err != nil {
 		t.Fatalf("AuthenticateOIDC: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestAuthenticateOIDC_ExistingUser(t *testing.T) {
 	}
 
 	// Authenticate — should return the existing user.
-	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err != nil {
 		t.Fatalf("AuthenticateOIDC: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAuthenticateOIDC_SuspendedUser(t *testing.T) {
 		t.Fatalf("create disabled user: %v", err)
 	}
 
-	_, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	_, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err == nil {
 		t.Fatal("expected error for disabled user")
 	}
@@ -178,7 +178,7 @@ func TestAuthenticateOIDC_EmailUpdate(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err != nil {
 		t.Fatalf("AuthenticateOIDC: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestAuthenticateOIDC_LastLogin(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	_, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	_, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err != nil {
 		t.Fatalf("AuthenticateOIDC: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestAuthenticateOIDC_NameProvisioned(t *testing.T) {
 	facade, users := newOIDCFacade(t, mock)
 	ctx := context.Background()
 
-	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err != nil {
 		t.Fatalf("AuthenticateOIDC: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestAuthenticateOIDC_NameUpdate(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	u, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err != nil {
 		t.Fatalf("AuthenticateOIDC: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestAuthenticateOIDC_ExchangeFailure(t *testing.T) {
 	facade, _ := newOIDCFacade(t, mock)
 	ctx := context.Background()
 
-	_, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier", "http://localhost/callback")
+	_, err := facade.AuthenticateOIDC(ctx, "code", "nonce", "verifier")
 	if err == nil {
 		t.Fatal("expected error for exchange failure")
 	}

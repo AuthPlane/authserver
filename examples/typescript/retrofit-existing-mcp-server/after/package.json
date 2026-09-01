@@ -12,8 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@authplane/mcp": "0.2.0",
-    "@authplane/sdk": "0.2.0",
+    "@authplane/mcp": "0.3.0",
+    "@authplane/sdk": "0.3.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "express": "4.22.0",
     "zod": "4.4.3"

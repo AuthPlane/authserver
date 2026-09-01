@@ -9,9 +9,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,7 +21,9 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/authplane/authserver/internal/adapters/oidc"
+	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // testIDP is a mock upstream OIDC IdP for testing.
@@ -32,6 +36,16 @@ type testIDP struct {
 	tokenHandler    http.HandlerFunc // custom token handler (nil = default)
 	userinfoHandler http.HandlerFunc // custom userinfo handler (nil = default)
 	scopesSupported []string         // scopes_supported in discovery
+
+	// rotateAfterFirstJWKS, when set, makes the JWKS endpoint serve oldKey on
+	// its first request and key (the rotated key) on every subsequent request.
+	// Other tests leave it false and always get the current key.
+	rotateAfterFirstJWKS bool
+	oldKey               *ecdsa.PrivateKey
+	oldKid               string
+	failJWKSAfterFirst   bool         // when set, the JWKS endpoint 500s on its 2nd+ request
+	jwksRequests         atomic.Int32 // number of JWKS requests served
+	discoveryRequests    atomic.Int32 // number of discovery requests served
 }
 
 func newTestIDP(t *testing.T) *testIDP {
@@ -75,6 +89,7 @@ func (idp *testIDP) close() {
 }
 
 func (idp *testIDP) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
+	idp.discoveryRequests.Add(1)
 	doc := map[string]interface{}{
 		"issuer":                 idp.issuer,
 		"authorization_endpoint": idp.issuer + "/authorize",
@@ -90,9 +105,20 @@ func (idp *testIDP) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (idp *testIDP) handleJWKS(w http.ResponseWriter, _ *http.Request) {
+	n := idp.jwksRequests.Add(1)
+	if idp.failJWKSAfterFirst && n >= 2 {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	pub, kid := idp.key.Public(), idp.kid
+	// On the first request, optionally serve the OLD key set so that a token
+	// signed with the rotated kid forces a re-fetch within a single call.
+	if idp.rotateAfterFirstJWKS && n == 1 {
+		pub, kid = idp.oldKey.Public(), idp.oldKid
+	}
 	jwk := jose.JSONWebKey{
-		Key:       idp.key.Public(),
-		KeyID:     idp.kid,
+		Key:       pub,
+		KeyID:     kid,
 		Algorithm: string(jose.ES256),
 		Use:       "sig",
 	}
@@ -159,18 +185,59 @@ func testClient() oidc.Option {
 	return oidc.WithHTTPClient(&http.Client{Timeout: 10 * time.Second})
 }
 
+// stubConfig is a test output.OIDCConfigProvider returning a fixed config (or err).
+type stubConfig struct {
+	cfg output.OIDCConfig
+	err error
+}
+
+func (s stubConfig) Config(context.Context) (output.OIDCConfig, error) {
+	return s.cfg, s.err
+}
+
+// staticConfig builds an output.OIDCConfigProvider for tests.
+// The secret is carried as inline plaintext bytes (ClientSecret []byte);
+// resolution to plaintext happens JIT in exchangeCode via fakeSecretResolver.
+func staticConfig(issuer, clientID, secret, redirect string, scopes []string, groups bool, connector string) output.OIDCConfigProvider {
+	return stubConfig{cfg: output.OIDCConfig{
+		Issuer:             issuer,
+		ClientID:           clientID,
+		ClientSecret:       []byte(secret), // raw bytes, resolved JIT by secretResolver
+		RedirectURI:        redirect,
+		Scopes:             scopes,
+		IncludeGroupsScope: groups,
+		ConnectorID:        connector,
+	}}
+}
+
+// fakeSecretResolver is a test SecretResolver that returns the Data as-is
+// (treating it as already-plaintext), mirroring ConfigSecretBackend behaviour
+// when no encryptor is configured (the OSS OIDC inline-secret path).
+type fakeSecretResolver struct{}
+
+func (fakeSecretResolver) Resolve(_ context.Context, src output.SecretSource) (string, error) {
+	// For the Data path (OIDC inline): return bytes as-is.
+	if len(src.Data) > 0 {
+		return string(src.Data), nil
+	}
+	return "", nil
+}
+
+// testResolver returns a fakeSecretResolver suitable for integration tests.
+func testResolver() output.SecretResolver { return fakeSecretResolver{} }
+
 // --- Tests: Discovery (18.1-18.3) ---
 
 func TestDiscovery_Success(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("expected success, got: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	url := p.AuthorizationURL("state123", "nonce123", "", "http://localhost/callback")
+	url, err := p.AuthorizationURL(context.Background(), "state123", "nonce123", "")
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
 	if url == "" {
 		t.Fatal("AuthorizationURL returned empty")
 	}
@@ -191,8 +258,8 @@ func TestDiscovery_InvalidIssuer(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	_, err := oidc.New(context.Background(), srv.URL, "client", "secret", nil, false, "", obs(), testClient())
-	if err == nil {
+	p := oidc.New(staticConfig(srv.URL, "client", "secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+	if _, err := p.AuthorizationURL(context.Background(), "s", "n", ""); err == nil {
 		t.Fatal("expected error for issuer mismatch")
 	}
 }
@@ -235,8 +302,8 @@ func TestDiscovery_MissingFields(t *testing.T) {
 			srvURL = srv.URL
 			defer srv.Close()
 
-			_, err := oidc.New(context.Background(), srv.URL, "client", "secret", nil, false, "", obs(), testClient())
-			if err == nil {
+			p := oidc.New(staticConfig(srv.URL, "client", "secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+			if _, err := p.AuthorizationURL(context.Background(), "s", "n", ""); err == nil {
 				t.Fatal("expected error for missing field")
 			}
 		})
@@ -245,35 +312,43 @@ func TestDiscovery_MissingFields(t *testing.T) {
 
 // --- Tests: JWKS (18.5) ---
 
-func TestJWKSCache_HitAndMiss(t *testing.T) {
+func TestJWKS_KidMissRefetch(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	// Rotate to a new key (different kid) on the IDP side.
+	// Set up a key rotation that happens within a single ExchangeCode:
+	//   - oldKey/oldKid: what the JWKS endpoint serves on its FIRST request.
+	//   - key/kid (the rotated key): what it serves on every later request, and
+	//     what the ID token is signed with.
+	// This forces the within-call flow: initial resolveJWKS returns the old key
+	// set, getKeys misses on the rotated kid, and the kid-miss branch re-fetches
+	// via resolveJWKS, which now serves the new key set and hits.
+	idp.oldKey = idp.key
+	idp.oldKid = idp.kid
 	newKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	newKid := "test-kid-2"
 	idp.key = newKey
-	idp.kid = newKid
-	// Now the JWKS endpoint serves the new key.
-	// The provider's cache still has the old key.
+	idp.kid = "test-kid-2"
+	idp.rotateAfterFirstJWKS = true
 
-	// Set token handler to sign with the new key.
-	idp.tokenHandler = func(w http.ResponseWriter, r *http.Request) {
+	// Sign the ID token with the new (rotated) key.
+	idp.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
 		idp.writeTokenResponse(w, nil)
 	}
 
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+
 	// ExchangeCode should trigger a JWKS re-fetch (kid miss) and succeed.
-	result, err := p.ExchangeCode(context.Background(), "auth-code", "test-nonce", "", "http://localhost/callback")
+	result, err := p.ExchangeCode(context.Background(), "auth-code", "test-nonce", "")
 	if err != nil {
 		t.Fatalf("ExchangeCode after key rotation: %v", err)
 	}
 	if result.Subject != "upstream-user-123" {
 		t.Errorf("Subject = %q, want upstream-user-123", result.Subject)
+	}
+	// The miss path must have been taken: the JWKS endpoint was hit at least
+	// twice (initial old-key fetch + re-fetch serving the rotated key).
+	if got := idp.jwksRequests.Load(); got < 2 {
+		t.Errorf("JWKS endpoint hit %d time(s), want >= 2 (kid-miss re-fetch not taken)", got)
 	}
 }
 
@@ -283,12 +358,9 @@ func TestIDToken_ValidSignature(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	result, err := p.ExchangeCode(context.Background(), "auth-code", "test-nonce", "", "http://localhost/callback")
+	result, err := p.ExchangeCode(context.Background(), "auth-code", "test-nonce", "")
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
@@ -326,12 +398,9 @@ func TestIDToken_InvalidSignature(t *testing.T) {
 		json.NewEncoder(w).Encode(resp)
 	}
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	_, err = p.ExchangeCode(context.Background(), "code", "test-nonce", "", "http://localhost/callback")
+	_, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "")
 	if err == nil {
 		t.Fatal("expected error for invalid signature")
 	}
@@ -341,13 +410,10 @@ func TestIDToken_NonceMismatch(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
 	// The token has nonce="test-nonce" but we pass "wrong-nonce".
-	_, err = p.ExchangeCode(context.Background(), "code", "wrong-nonce", "", "http://localhost/callback")
+	_, err := p.ExchangeCode(context.Background(), "code", "wrong-nonce", "")
 	if err == nil {
 		t.Fatal("expected error for nonce mismatch")
 	}
@@ -363,12 +429,9 @@ func TestIDToken_AudMismatch(t *testing.T) {
 		})
 	}
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	_, err = p.ExchangeCode(context.Background(), "code", "test-nonce", "", "http://localhost/callback")
+	_, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "")
 	if err == nil {
 		t.Fatal("expected error for audience mismatch")
 	}
@@ -384,12 +447,9 @@ func TestIDToken_Expired(t *testing.T) {
 		})
 	}
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	_, err = p.ExchangeCode(context.Background(), "code", "test-nonce", "", "http://localhost/callback")
+	_, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "")
 	if err == nil {
 		t.Fatal("expected error for expired token")
 	}
@@ -405,12 +465,9 @@ func TestIDToken_IssMismatch(t *testing.T) {
 		})
 	}
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	_, err = p.ExchangeCode(context.Background(), "code", "test-nonce", "", "http://localhost/callback")
+	_, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "")
 	if err == nil {
 		t.Fatal("expected error for issuer mismatch")
 	}
@@ -437,12 +494,9 @@ func TestIDToken_AlgNone(t *testing.T) {
 		json.NewEncoder(w).Encode(resp)
 	}
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	_, err = p.ExchangeCode(context.Background(), "code", "test-nonce", "", "http://localhost/callback")
+	_, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "")
 	if err == nil {
 		t.Fatal("expected error for alg=none token")
 	}
@@ -452,12 +506,12 @@ func TestAuthorizationURL_ContainsRequiredParams(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", []string{"openid", "email"}, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", []string{"openid", "email"}, false, ""), testResolver(), obs(), testClient())
 
-	u := p.AuthorizationURL("state-abc", "nonce-xyz", "", "http://localhost/callback")
+	u, err := p.AuthorizationURL(context.Background(), "state-abc", "nonce-xyz", "")
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
 	for _, want := range []string{
 		"response_type=code",
 		"client_id=test-client",
@@ -478,12 +532,12 @@ func TestAuthorizationURL_IncludesPKCE(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	u := p.AuthorizationURL("state-abc", "nonce-xyz", "test-challenge-value", "http://localhost/callback")
+	u, err := p.AuthorizationURL(context.Background(), "state-abc", "nonce-xyz", "test-challenge-value")
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
 	if !stringContains(u, "code_challenge=test-challenge-value") {
 		t.Errorf("URL missing code_challenge:\n  %s", u)
 	}
@@ -503,17 +557,45 @@ func TestExchangeCode_SendsCodeVerifier(t *testing.T) {
 		idp.writeTokenResponse(w, nil)
 	}
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	_, err = p.ExchangeCode(context.Background(), "test-code", "test-nonce", "my-test-verifier", "http://localhost/callback")
+	_, err := p.ExchangeCode(context.Background(), "test-code", "test-nonce", "my-test-verifier")
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
 	if receivedVerifier != "my-test-verifier" {
 		t.Errorf("code_verifier = %q, want my-test-verifier", receivedVerifier)
+	}
+}
+
+// emptySecretResolver always resolves to an empty secret, modelling an env var
+// that is present but blank.
+type emptySecretResolver struct{}
+
+func (emptySecretResolver) Resolve(_ context.Context, _ output.SecretSource) (string, error) {
+	return "", nil
+}
+
+// TestExchangeCode_EmptyResolvedSecret_FailsClosed verifies exchangeCode aborts
+// before the token POST when the resolved client secret is empty, rather than
+// sending SetBasicAuth(clientID, "") — mirroring the broker adapters' guard.
+func TestExchangeCode_EmptyResolvedSecret_FailsClosed(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+
+	tokenCalled := false
+	idp.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+		tokenCalled = true
+		idp.writeTokenResponse(w, nil)
+	}
+
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "secret", "http://localhost/callback", nil, false, ""), emptySecretResolver{}, obs(), testClient())
+
+	if _, err := p.ExchangeCode(context.Background(), "code", "test-nonce", ""); err == nil {
+		t.Fatal("expected error when resolved client secret is empty")
+	}
+	if tokenCalled {
+		t.Error("token endpoint must not be called when the secret resolves empty (fail-closed)")
 	}
 }
 
@@ -523,12 +605,12 @@ func TestDexConnectorID_AppendsParam(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "github-connector", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, "github-connector"), testResolver(), obs(), testClient())
 
-	u := p.AuthorizationURL("state", "nonce", "", "http://localhost/callback")
+	u, err := p.AuthorizationURL(context.Background(), "state", "nonce", "")
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
 	if !stringContains(u, "connector_id=github-connector") {
 		t.Errorf("URL missing connector_id:\n  %s", u)
 	}
@@ -541,13 +623,13 @@ func TestGroupsScope_AutoIncluded(t *testing.T) {
 	idp.scopesSupported = []string{"openid", "email", "profile", "groups"}
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret",
-		[]string{"openid", "email"}, true, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback",
+		[]string{"openid", "email"}, true, ""), testResolver(), obs(), testClient())
 
-	u := p.AuthorizationURL("state", "nonce", "", "http://localhost/callback")
+	u, err := p.AuthorizationURL(context.Background(), "state", "nonce", "")
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
 	if !stringContains(u, "groups") {
 		t.Errorf("URL should include groups scope when includeGroupsScope=true and upstream supports it:\n  %s", u)
 	}
@@ -558,13 +640,13 @@ func TestGroupsScope_OptOut(t *testing.T) {
 	idp.scopesSupported = []string{"openid", "email", "profile", "groups"}
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret",
-		[]string{"openid", "email"}, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback",
+		[]string{"openid", "email"}, false, ""), testResolver(), obs(), testClient())
 
-	u := p.AuthorizationURL("state", "nonce", "", "http://localhost/callback")
+	u, err := p.AuthorizationURL(context.Background(), "state", "nonce", "")
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
 	if stringContains(u, "groups") {
 		t.Errorf("URL should NOT include groups scope when includeGroupsScope=false:\n  %s", u)
 	}
@@ -575,13 +657,13 @@ func TestGroupsScope_NotIncludedWhenUpstreamDoesNotSupport(t *testing.T) {
 	idp.scopesSupported = []string{"openid", "email", "profile"}
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret",
-		[]string{"openid", "email"}, true, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback",
+		[]string{"openid", "email"}, true, ""), testResolver(), obs(), testClient())
 
-	u := p.AuthorizationURL("state", "nonce", "", "http://localhost/callback")
+	u, err := p.AuthorizationURL(context.Background(), "state", "nonce", "")
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
 	if stringContains(u, "groups") {
 		t.Errorf("URL should NOT include groups when upstream doesn't support it:\n  %s", u)
 	}
@@ -593,10 +675,7 @@ func TestGetUserInfo_Success(t *testing.T) {
 	idp := newTestIDP(t)
 	defer idp.close()
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
 	info, err := p.GetUserInfo(context.Background(), "test-access-token")
 	if err != nil {
@@ -642,10 +721,7 @@ func TestGetUserInfo_NoEndpoint(t *testing.T) {
 	srvURL = srv.URL
 	defer srv.Close()
 
-	p, err := oidc.New(context.Background(), srvURL, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(srvURL, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
 	info, err := p.GetUserInfo(context.Background(), "test-access-token")
 	if err != nil {
@@ -675,9 +751,9 @@ func TestSSRF_NoRedirects(t *testing.T) {
 		},
 	}
 
-	_, err := oidc.New(context.Background(), srv.URL, "client", "secret", nil, false, "",
-		obs(), oidc.WithHTTPClient(noRedirectClient))
-	if err == nil {
+	p := oidc.New(staticConfig(srv.URL, "client", "secret", "http://localhost/callback", nil, false, ""),
+		testResolver(), obs(), oidc.WithHTTPClient(noRedirectClient))
+	if _, err := p.AuthorizationURL(context.Background(), "s", "n", ""); err == nil {
 		t.Fatal("expected error when discovery redirects")
 	}
 }
@@ -695,12 +771,9 @@ func TestIDToken_NameAndGroups(t *testing.T) {
 		})
 	}
 
-	p, err := oidc.New(context.Background(), idp.issuer, "test-client", "test-secret", nil, false, "", obs(), testClient())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
 
-	result, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "", "http://localhost/callback")
+	result, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "")
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
@@ -712,6 +785,21 @@ func TestIDToken_NameAndGroups(t *testing.T) {
 	}
 }
 
+func TestProvider_ConfigError_Propagates(t *testing.T) {
+	p := oidc.New(stubConfig{err: errTestConfig}, testResolver(), obs())
+	if _, err := p.AuthorizationURL(context.Background(), "s", "n", ""); err == nil {
+		t.Fatal("AuthorizationURL: expected config error")
+	}
+	if _, err := p.ExchangeCode(context.Background(), "code", "nonce", "verifier"); err == nil {
+		t.Fatal("ExchangeCode: expected config error")
+	}
+	if _, err := p.GetUserInfo(context.Background(), "token"); err == nil {
+		t.Fatal("GetUserInfo: expected config error")
+	}
+}
+
+var errTestConfig = errors.New("config boom")
+
 func stringContains(s, sub string) bool {
 	for i := 0; i <= len(s)-len(sub); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -719,4 +807,156 @@ func stringContains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// --- Tests: discovery/JWKS caching ---
+
+func TestDiscovery_Cached(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+
+	for i := 0; i < 3; i++ {
+		if _, err := p.AuthorizationURL(context.Background(), "s", "n", ""); err != nil {
+			t.Fatalf("AuthorizationURL[%d]: %v", i, err)
+		}
+	}
+	if got := idp.discoveryRequests.Load(); got != 1 {
+		t.Errorf("discovery endpoint hit %d time(s) across 3 calls, want 1 (should be cached)", got)
+	}
+}
+
+func TestValidate_WarmsCacheAndValidates(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+
+	if err := p.Validate(context.Background()); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := idp.discoveryRequests.Load(); got != 1 {
+		t.Errorf("Validate should fetch discovery once, got %d", got)
+	}
+	// Validate warmed the cache → a subsequent call does not refetch.
+	if _, err := p.AuthorizationURL(context.Background(), "s", "n", ""); err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
+	if got := idp.discoveryRequests.Load(); got != 1 {
+		t.Errorf("Validate should have warmed the cache; discovery hit %d times, want 1", got)
+	}
+}
+
+func TestValidate_FailsOnUnreachableDiscovery(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+	// Issuer whose discovery endpoint 404s → Validate must fail (boot fail-fast).
+	p := oidc.New(staticConfig(idp.issuer+"/nope", "c", "s", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+	if err := p.Validate(context.Background()); err == nil {
+		t.Fatal("Validate: expected error for unreachable discovery endpoint")
+	}
+}
+
+// recordingJWKSCache is a test oidc.Cache that delegates to fetch but counts
+// Loads, to prove WithJWKSCache wires an alternate cache into the Provider.
+type recordingJWKSCache struct{ loads atomic.Int32 }
+
+func (c *recordingJWKSCache) Load(_ context.Context, _ string, fetch func() (*jose.JSONWebKeySet, error)) (*jose.JSONWebKeySet, error) {
+	c.loads.Add(1)
+	return fetch()
+}
+func (c *recordingJWKSCache) Fresh(context.Context, string) (*jose.JSONWebKeySet, bool) {
+	return nil, false
+}
+func (c *recordingJWKSCache) Peek(context.Context, string) (*jose.JSONWebKeySet, bool) {
+	return nil, false
+}
+func (c *recordingJWKSCache) Store(context.Context, string, *jose.JSONWebKeySet) {}
+
+func TestWithJWKSCache_InjectsAlternateCache(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+
+	custom := &recordingJWKSCache{}
+	p := oidc.New(
+		staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""),
+		testResolver(), obs(), testClient(), oidc.WithJWKSCache(custom),
+	)
+
+	if _, err := p.ExchangeCode(context.Background(), "auth-code", "test-nonce", ""); err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if got := custom.loads.Load(); got == 0 {
+		t.Error("WithJWKSCache: the injected cache was not consulted")
+	}
+}
+
+func TestExchangeCode_InfraError_IsUnavailable(t *testing.T) {
+	// Config resolution failing is an infrastructure error → tagged with
+	// domain.ErrOIDCUnavailable so the handler maps it to 500, not 401.
+	p := oidc.New(stubConfig{err: errors.New("config source down")}, testResolver(), obs())
+	if _, err := p.ExchangeCode(context.Background(), "code", "nonce", ""); !errors.Is(err, domain.ErrOIDCUnavailable) {
+		t.Fatalf("ExchangeCode on config error: want errors.Is(domain.ErrOIDCUnavailable), got %v", err)
+	}
+
+	// Discovery failing (unreachable issuer) is likewise infra.
+	idp := newTestIDP(t)
+	defer idp.close()
+	p2 := oidc.New(staticConfig(idp.issuer+"/nope", "c", "s", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+	if _, err := p2.ExchangeCode(context.Background(), "code", "nonce", ""); !errors.Is(err, domain.ErrOIDCUnavailable) {
+		t.Fatalf("ExchangeCode on discovery error: want errors.Is(domain.ErrOIDCUnavailable), got %v", err)
+	}
+}
+
+func TestExchangeCode_JWKSRefreshFails_IsUnavailable(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+
+	// First JWKS request serves an unrelated key so the token's kid misses; the
+	// kid-miss refresh (2nd request) then fails with 500. The resulting error
+	// must be tagged domain.ErrOIDCUnavailable (infra), so the callback → 500.
+	otherKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	idp.oldKey = otherKey
+	idp.oldKid = "unrelated-kid"
+	idp.rotateAfterFirstJWKS = true
+	idp.failJWKSAfterFirst = true
+
+	idp.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+		idp.writeTokenResponse(w, nil) // signed with idp.key / idp.kid
+	}
+
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+	if _, err := p.ExchangeCode(context.Background(), "auth-code", "test-nonce", ""); !errors.Is(err, domain.ErrOIDCUnavailable) {
+		t.Fatalf("ExchangeCode with failing JWKS refresh: want errors.Is(domain.ErrOIDCUnavailable), got %v", err)
+	}
+}
+
+func TestExchangeCode_TokenEndpoint5xx_IsUnavailable(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+	// Token endpoint returns 503 (IdP overloaded/down) — infra, not bad creds.
+	idp.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+	if _, err := p.ExchangeCode(context.Background(), "code", "test-nonce", ""); !errors.Is(err, domain.ErrOIDCUnavailable) {
+		t.Fatalf("token endpoint 503: want errors.Is(domain.ErrOIDCUnavailable), got %v", err)
+	}
+}
+
+func TestExchangeCode_TokenEndpoint4xx_IsNotUnavailable(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+	// Token endpoint returns 400 (invalid_grant) — a genuine credential failure
+	// that must stay a 401, i.e. NOT tagged ErrOIDCUnavailable.
+	idp.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+	_, err := p.ExchangeCode(context.Background(), "code", "test-nonce", "")
+	if err == nil {
+		t.Fatal("token endpoint 400: expected error")
+	}
+	if errors.Is(err, domain.ErrOIDCUnavailable) {
+		t.Fatalf("token endpoint 400 is a credential failure, must NOT be tagged unavailable: %v", err)
+	}
 }

@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@authplane/sdk": "0.2.0"
+    "@authplane/sdk": "0.3.0"
   },
   "devDependencies": {
     "@types/node": "22.10.0",

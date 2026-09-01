@@ -199,3 +199,36 @@ func TestWarnIfCORSDisabled(t *testing.T) {
 		})
 	}
 }
+
+func TestProbeSecretRefs_OIDC_RefSet_Nil(t *testing.T) {
+	t.Setenv("CONNECTOR_OIDC_SECRET", "oidcsecret")
+	cfg := &config.Config{OIDC: config.OIDCConfig{ClientSecretRef: "CONNECTOR_OIDC_SECRET"}}
+	if err := probeSecretRefs(cfg); err != nil {
+		t.Fatalf("expected nil when the OIDC ref env var is set, got: %v", err)
+	}
+}
+
+func TestProbeSecretRefs_OIDC_NoRef_Skipped(t *testing.T) {
+	cfg := &config.Config{OIDC: config.OIDCConfig{}} // no ClientSecretRef
+	if err := probeSecretRefs(cfg); err != nil {
+		t.Fatalf("expected nil when no OIDC ref is configured, got: %v", err)
+	}
+}
+
+func TestProbeSecretRefs_OIDC_MissingRef_Error(t *testing.T) {
+	cfg := &config.Config{OIDC: config.OIDCConfig{ClientSecretRef: "CONNECTOR_OIDC_MISSING"}}
+	err := probeSecretRefs(cfg)
+	if err == nil {
+		t.Fatal("expected error for missing OIDC env var, got nil")
+	}
+	if !strings.Contains(err.Error(), "CONNECTOR_OIDC_MISSING") {
+		t.Errorf("error should name the missing var, got: %v", err)
+	}
+}
+
+func TestProbeSecretRefs_OIDC_InvalidName_Error(t *testing.T) {
+	cfg := &config.Config{OIDC: config.OIDCConfig{ClientSecretRef: "NOT_ALLOWED_PREFIX_SECRET"}}
+	if err := probeSecretRefs(cfg); err == nil {
+		t.Fatal("expected error for a ref that is not an allowed env var name, got nil")
+	}
+}

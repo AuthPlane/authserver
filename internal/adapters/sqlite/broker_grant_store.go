@@ -40,7 +40,7 @@ func (s *BrokerGrantStore) Get(ctx context.Context, userID, brokerProviderID str
 	defer span.End()
 	start := time.Now()
 
-	row := s.db.QueryRowContext(ctx,
+	row := dbOrTx(ctx, s.db).QueryRowContext(ctx,
 		`SELECT `+brokerGrantColumns+`
 		   FROM broker_grants
 		  WHERE user_id = ? AND broker_provider_id = ?
@@ -69,7 +69,7 @@ func (s *BrokerGrantStore) GetByID(ctx context.Context, id string) (*resource.Br
 	defer span.End()
 	start := time.Now()
 
-	row := s.db.QueryRowContext(ctx,
+	row := dbOrTx(ctx, s.db).QueryRowContext(ctx,
 		`SELECT `+brokerGrantColumns+`
 		   FROM broker_grants
 		  WHERE id = ?`,
@@ -98,7 +98,7 @@ func (s *BrokerGrantStore) Create(ctx context.Context, g *resource.BrokerGrant) 
 
 	scopes := marshalBrokerGrantScopes(g.ScopesGranted)
 	g.Version = 1
-	_, err := s.db.ExecContext(ctx,
+	_, err := dbOrTx(ctx, s.db).ExecContext(ctx,
 		`INSERT INTO broker_grants (`+brokerGrantColumns+`)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		g.ID, g.UserID, g.BrokerProviderID,
@@ -140,7 +140,7 @@ func (s *BrokerGrantStore) Upsert(ctx context.Context, g *resource.BrokerGrant) 
 	// optimistic-lock counter keeps moving — readers downstream can
 	// still detect a concurrent rotation. revoked_at is cleared so a
 	// previously-soft-deleted row resurrects with the new credential.
-	row := s.db.QueryRowContext(ctx,
+	row := dbOrTx(ctx, s.db).QueryRowContext(ctx,
 		`INSERT INTO broker_grants (`+brokerGrantColumns+`)
 		 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
 		 ON CONFLICT(user_id, broker_provider_id) DO UPDATE SET
@@ -176,7 +176,7 @@ func (s *BrokerGrantStore) UpdateWithVersion(ctx context.Context, g *resource.Br
 	start := time.Now()
 
 	scopes := marshalBrokerGrantScopes(g.ScopesGranted)
-	res, err := s.db.ExecContext(ctx,
+	res, err := dbOrTx(ctx, s.db).ExecContext(ctx,
 		`UPDATE broker_grants
 		    SET credential_data = ?, scopes_granted = ?, enc_backend = ?,
 		        version = version + 1, updated_at = ?
@@ -208,7 +208,7 @@ func (s *BrokerGrantStore) Revoke(ctx context.Context, id string) error {
 	start := time.Now()
 
 	now := formatTime(time.Now().UTC())
-	_, err := s.db.ExecContext(ctx,
+	_, err := dbOrTx(ctx, s.db).ExecContext(ctx,
 		`UPDATE broker_grants
 		    SET revoked_at = ?, updated_at = ?
 		  WHERE id = ?`,
@@ -230,7 +230,7 @@ func (s *BrokerGrantStore) ListForUser(ctx context.Context, userID string) ([]*r
 	defer span.End()
 	start := time.Now()
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := dbOrTx(ctx, s.db).QueryContext(ctx,
 		`SELECT `+brokerGrantColumns+`
 		   FROM broker_grants
 		  WHERE user_id = ?

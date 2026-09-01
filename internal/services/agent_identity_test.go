@@ -13,12 +13,14 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/domain/token"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/services"
 	"github.com/authplane/authserver/testdata"
 )
@@ -47,31 +49,31 @@ func newAITestSetup(t *testing.T) *aiTestSetup {
 		t.Fatalf("keyfile: %v", err)
 	}
 
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
 	aiSvc := services.NewAgentIdentityService(stores.Client, obs)
 
 	ccSvc := services.NewClientCredentialsService(
 		stores.Client, stores.MachineToken, jwksSvc,
-		aiIssuer, time.Hour, obs, auditSvc,
+		staticIssuerForTest(aiIssuer), static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{TokenExpiry: time.Hour}), obs, auditSvc,
 		nil,
 	)
 	ccSvc.WithAgentIdentity(aiSvc)
 
 	registry := services.NewResourceRegistry(stores.Resource, stores.BrokerProvider, obs)
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, aiIssuer, obs)
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest(aiIssuer), obs)
 	bpReg := brokerproto.NewRegistry()
 	enc := &teTestEncryptor{}
 	brokerIssuer := services.NewBrokerIssuer(stores.BrokerGrant, enc, stores.Issuance, bpReg, obs, auditSvc)
 	teSvc := services.NewTokenExchangeService(
 		stores.Client, stores.MachineToken, jwksSvc, jwksSvc,
-		stores.Revocation, aiIssuer,
-		services.TokenExchangeConfig{
+		stores.Revocation, staticIssuerForTest(aiIssuer),
+		static.NewTokenExchangeConfigProvider(output.TokenExchangeConfig{
 			AllowSelfExchange: true,
 			MaxChainDepth:     10, // high limit — agent_identity truncation is separate at 8
 			TokenExpiry:       time.Hour,
-		},
+		}),
 		registry, stores.ConsentGrant, mintIssuer, brokerIssuer,
 		obs, auditSvc,
 	)

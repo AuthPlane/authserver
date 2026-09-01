@@ -24,16 +24,16 @@ import (
 	"github.com/authplane/authserver/internal/ports/output"
 )
 
-// stubSecretResolver returns a fixed PEM string for any allowed env var
-// name. The adapter validates the env-var name shape against the
-// connector domain regex before calling Resolve, so tests must use
-// CONNECTOR_* or AUTHPLANE_VAULT_* names.
+// stubSecretResolver returns a fixed PEM string for any reference. The
+// adapter treats the reference as opaque and no longer validates its shape,
+// so tests may use any string; allowlist enforcement now lives in the env
+// resolver (see cmd/authserver).
 type stubSecretResolver struct {
 	pem string
 	err error
 }
 
-func (s *stubSecretResolver) Resolve(string) (string, error) {
+func (s *stubSecretResolver) Resolve(_ context.Context, _ output.SecretSource) (string, error) {
 	if s.err != nil {
 		return "", s.err
 	}
@@ -107,7 +107,7 @@ func (fu *fakeUpstream) configBytes(t *testing.T, alg string, ttlSeconds int) []
 	cfg := configData{
 		TokenURL:        fu.tokenURL,
 		SAEmail:         "sa@svc.example.iam",
-		SAKeyEnv:        "CONNECTOR_TEST_SA_KEY",
+		SAKeyRef:        "CONNECTOR_TEST_SA_KEY",
 		Algorithm:       alg,
 		TokenTTLSeconds: ttlSeconds,
 	}

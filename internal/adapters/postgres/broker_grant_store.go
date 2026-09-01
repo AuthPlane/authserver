@@ -39,7 +39,7 @@ func (s *BrokerGrantStore) Get(ctx context.Context, userID, brokerProviderID str
 	defer span.End()
 	start := time.Now()
 
-	row := s.pool.QueryRow(ctx,
+	row := dbOrTx(ctx, s.pool).QueryRow(ctx,
 		`SELECT `+brokerGrantColumns+`
 		   FROM broker_grants
 		  WHERE user_id = $1 AND broker_provider_id = $2
@@ -67,7 +67,7 @@ func (s *BrokerGrantStore) GetByID(ctx context.Context, id string) (*resource.Br
 	defer span.End()
 	start := time.Now()
 
-	row := s.pool.QueryRow(ctx,
+	row := dbOrTx(ctx, s.pool).QueryRow(ctx,
 		`SELECT `+brokerGrantColumns+`
 		   FROM broker_grants
 		  WHERE id = $1`,
@@ -95,7 +95,7 @@ func (s *BrokerGrantStore) Create(ctx context.Context, g *resource.BrokerGrant) 
 	start := time.Now()
 
 	g.Version = 1
-	_, err := s.pool.Exec(ctx,
+	_, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`INSERT INTO broker_grants (`+brokerGrantColumns+`)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		g.ID, g.UserID, g.BrokerProviderID,
@@ -135,7 +135,7 @@ func (s *BrokerGrantStore) Upsert(ctx context.Context, g *resource.BrokerGrant) 
 	// optimistic-lock counter keeps moving — readers downstream can
 	// still detect a concurrent rotation. revoked_at is cleared so a
 	// previously-soft-deleted row resurrects with the new credential.
-	row := s.pool.QueryRow(ctx,
+	row := dbOrTx(ctx, s.pool).QueryRow(ctx,
 		`INSERT INTO broker_grants (`+brokerGrantColumns+`)
 		 VALUES ($1, $2, $3, $4, $5, $6, 1, $7, NOW(), NULL)
 		 ON CONFLICT (user_id, broker_provider_id) DO UPDATE SET
@@ -170,7 +170,7 @@ func (s *BrokerGrantStore) UpdateWithVersion(ctx context.Context, g *resource.Br
 	defer span.End()
 	start := time.Now()
 
-	tag, err := s.pool.Exec(ctx,
+	tag, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`UPDATE broker_grants
 		    SET credential_data = $1, scopes_granted = $2, enc_backend = $3,
 		        version = version + 1, updated_at = NOW()
@@ -196,7 +196,7 @@ func (s *BrokerGrantStore) Revoke(ctx context.Context, id string) error {
 	defer span.End()
 	start := time.Now()
 
-	_, err := s.pool.Exec(ctx,
+	_, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`UPDATE broker_grants
 		    SET revoked_at = NOW(), updated_at = NOW()
 		  WHERE id = $1`,
@@ -218,7 +218,7 @@ func (s *BrokerGrantStore) ListForUser(ctx context.Context, userID string) ([]*r
 	defer span.End()
 	start := time.Now()
 
-	rows, err := s.pool.Query(ctx,
+	rows, err := dbOrTx(ctx, s.pool).Query(ctx,
 		`SELECT `+brokerGrantColumns+`
 		   FROM broker_grants
 		  WHERE user_id = $1

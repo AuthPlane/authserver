@@ -19,16 +19,16 @@ import (
 
 // RevocationService implements input.RevocationPort (RFC 7009).
 type RevocationService struct {
-	tokens        output.TokenStore
-	clients       output.ClientStore
-	machineTokens output.MachineTokenStore // optional: for machine token revocation
-	jwks          JWKSBuildProvider        // optional: for JWT parsing during machine token revocation
-	revocation    output.RevocationStore   // optional, for JTI blacklisting (introspection support)
-	audit         AuditRecorder
-	issuer        string
-	logger        *slog.Logger
-	tracer        trace.Tracer
-	metrics       *observability.Metrics
+	tokens         output.TokenStore
+	clients        output.ClientStore
+	machineTokens  output.MachineTokenStore // optional: for machine token revocation
+	jwks           JWKSBuildProvider        // optional: for JWT parsing during machine token revocation
+	revocation     output.RevocationStore   // optional, for JTI blacklisting (introspection support)
+	audit          AuditRecorder
+	issuerProvider output.IssuerProvider
+	logger         *slog.Logger
+	tracer         trace.Tracer
+	metrics        *observability.Metrics
 }
 
 var _ input.RevocationPort = (*RevocationService)(nil)
@@ -39,22 +39,25 @@ func NewRevocationService(
 	clients output.ClientStore,
 	machineTokens output.MachineTokenStore,
 	jwks JWKSBuildProvider,
-	issuer string,
+	issuerProvider output.IssuerProvider,
 	obs *observability.Provider,
 	auditor AuditRecorder,
 	revocation output.RevocationStore,
 ) *RevocationService {
+	if issuerProvider == nil {
+		panic("services.NewRevocationService: issuerProvider is required")
+	}
 	return &RevocationService{
-		tokens:        tokens,
-		clients:       clients,
-		machineTokens: machineTokens,
-		jwks:          jwks,
-		revocation:    revocation,
-		audit:         auditor,
-		issuer:        issuer,
-		logger:        obs.Logger,
-		tracer:        obs.Tracer,
-		metrics:       obs.Metrics,
+		tokens:         tokens,
+		clients:        clients,
+		machineTokens:  machineTokens,
+		jwks:           jwks,
+		revocation:     revocation,
+		audit:          auditor,
+		issuerProvider: issuerProvider,
+		logger:         obs.Logger,
+		tracer:         obs.Tracer,
+		metrics:        obs.Metrics,
 	}
 }
 
@@ -74,7 +77,30 @@ func (s *RevocationService) RevokeToken(ctx context.Context, req input.RevokeReq
 		return domain.ErrInvalidClient
 	}
 
-	if !c.IsPublic() {
+	// A suspended or revoked client keeps no standing to revoke. How that
+	// refusal is expressed depends on whether the caller proved anything:
+	// status is only disclosed to someone who already knows the secret.
+	//
+	// Public clients stay welcome here — unlike introspection, RFC 7009
+	// revocation is advertised with "none" among its auth methods and a public
+	// client revoking its own token is the intended flow.
+	if c.IsPublic() {
+		// A public client_id is public by construction: it travels in browser
+		// redirects and in the authorize URL. Answering invalid_client for a
+		// suspended one and 200 for an active one would turn this endpoint into
+		// an anonymous client-status oracle. An inactive public client instead
+		// gets the ordinary RFC 7009 200 and revokes nothing.
+		if !c.IsActive() {
+			s.logger.WarnContext(ctx, "revocation attempt by inactive public client",
+				"client_id", req.ClientID,
+			)
+			return nil
+		}
+	} else {
+		// Not cost-equalized, for the reasons spelled out on
+		// IntrospectionService.authenticateCaller: the padding costs a bcrypt
+		// derivation on a path that needs no credential, and this endpoint has
+		// no per-caller bound to contain it.
 		if req.ClientSecret == "" {
 			span.RecordError(domain.ErrInvalidClient)
 			span.SetStatus(codes.Error, "missing client_secret")
@@ -83,6 +109,13 @@ func (s *RevocationService) RevokeToken(ctx context.Context, req input.RevokeReq
 		if bcryptErr := crypto.CompareClientSecret(c.SecretHash, req.ClientSecret); bcryptErr != nil {
 			span.RecordError(domain.ErrInvalidClient)
 			span.SetStatus(codes.Error, "invalid client_secret")
+			return domain.ErrInvalidClient
+		}
+		// Only now, with the secret proven, may the status be revealed: the
+		// caller has demonstrated it is the client, so it learns nothing new.
+		if !c.IsActive() {
+			span.RecordError(domain.ErrInvalidClient)
+			span.SetStatus(codes.Error, "client not active")
 			return domain.ErrInvalidClient
 		}
 	}
@@ -111,7 +144,7 @@ func (s *RevocationService) RevokeToken(ctx context.Context, req input.RevokeReq
 	}
 
 	// 4. Revoke the entire family.
-	if err := s.tokens.RevokeFamily(ctx, rt.FamilyID); err != nil {
+	if _, err := s.tokens.RevokeFamily(ctx, rt.FamilyID); err != nil {
 		s.logger.ErrorContext(ctx, "failed to revoke family", "family_id", rt.FamilyID, "error", err)
 		return nil // still return 200 per RFC 7009
 	}
@@ -156,7 +189,14 @@ func (s *RevocationService) tryRevokeMachineToken(ctx context.Context, _ trace.S
 		return
 	}
 
-	claims, err := crypto.VerifyAccessTokenWithIssuer(req.Token, jwks, s.issuer)
+	issuer, err := s.issuerProvider.Issuer(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "revocation: failed to resolve issuer for machine token check",
+			"error", err,
+		)
+		return
+	}
+	claims, err := crypto.VerifyAccessTokenWithIssuer(req.Token, jwks, issuer)
 	if err != nil {
 		s.logger.DebugContext(ctx, "revocation: token is not a valid JWT from this AS")
 		return

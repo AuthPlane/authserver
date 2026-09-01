@@ -7,7 +7,6 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
-	"strings"
 )
 
 // WriteOAuthError writes an RFC 6749 / RFC 9457 hybrid error response.
@@ -100,28 +99,6 @@ func RenderTemplate(ctx context.Context, w http.ResponseWriter, status int, tmpl
 	if _, err := buf.WriteTo(w); err != nil {
 		slog.ErrorContext(ctx, "failed to write response", "error", err)
 	}
-}
-
-// SafeRedirect validates that a redirect target is a safe relative path.
-// Returns the path if valid, or fallback if the path is empty/unsafe.
-// Rejects absolute URLs, protocol-relative URLs, and paths with authority.
-func SafeRedirect(path, fallback string) string {
-	if path == "" {
-		return fallback
-	}
-	// Reject absolute URLs (http://, https://, etc.)
-	if strings.Contains(path, "://") {
-		return fallback
-	}
-	// Must start with /
-	if path[0] != '/' {
-		return fallback
-	}
-	// Reject protocol-relative URLs (//evil.com) and backslash variants
-	if len(path) > 1 && (path[1] == '/' || path[1] == '\\') {
-		return fallback
-	}
-	return path
 }
 
 // WriteJSON writes a JSON response.

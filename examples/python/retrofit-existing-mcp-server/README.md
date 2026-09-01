@@ -99,8 +99,8 @@ code, same `make verify`, just longer first build (~1 min).
 | | |
 |---|---|
 | **Time to run** | About a minute first-run (venv + AS pull); ~20 s warm |
-| **MCP framework** | `fastmcp >= 3.0, < 4` (matches both `pyproject.toml` files) |
-| **SDK** | `authplane-fastmcp` 0.2.0 (in `after/` only) |
+| **MCP framework** | `before/`: `fastmcp >= 3.0, < 4` · `after/`: `fastmcp >= 3.2, < 4` — the 3.2 floor comes from `authplane-fastmcp` 0.3.0 (each matches its own `pyproject.toml`) |
+| **SDK** | `authplane-fastmcp` 0.3.0 (in `after/` only) |
 
 ## Troubleshooting
 

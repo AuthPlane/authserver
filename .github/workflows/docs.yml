@@ -23,7 +23,16 @@ on:
       - 'tools/docssmoke/**'
       - 'tools/docsgen/**'
       - 'docs/**'
+      # Every Markdown root docslinks walks, plus the checker itself.
+      # Left off this list, a root's links are checked by nothing.
+      - 'tools/docslinks/**'
       - 'AGENTS.md'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'SECURITY.md'
+      - 'CODE_OF_CONDUCT.md'
+      - 'CHANGELOG.md'
+      - 'llms.txt'
       - 'Makefile'
       - '.github/workflows/docs.yml'
 

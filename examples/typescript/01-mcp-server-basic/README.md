@@ -1,7 +1,7 @@
 # Tier 01 — Basic MCP server (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 53 lines · SDK: ts-sdk 0.2.0**
+**Auth-specific code: 5 lines · Total example: 53 lines · SDK: ts-sdk 0.3.0**
 <!-- loccount:end -->
 
 A minimal MCP server protected by Authplane-issued JWTs. Everything you need
@@ -40,7 +40,7 @@ see Troubleshooting below.
 | | |
 |---|---|
 | **Time to run** | About a minute first-run (`npm install` + AS pull); ~5 s warm |
-| **SDK** | `@authplane/sdk` + `@authplane/mcp` 0.2.0 (npm) |
+| **SDK** | `@authplane/sdk` + `@authplane/mcp` 0.3.0 (npm) |
 | **MCP framework** | Express + the official MCP TS SDK (`@modelcontextprotocol/sdk`) |
 
 ## Run it

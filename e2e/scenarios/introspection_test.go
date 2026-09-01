@@ -23,7 +23,7 @@ func TestIntrospection_ActiveToken(t *testing.T) {
 
 	tokens := client.FullFlow("intro@example.com", "pass123", "tools/echo", false)
 
-	ir := h.IntrospectToken(tokens.AccessToken, clientID)
+	ir := h.IntrospectAsResourceServer(tokens.AccessToken, rs.URI)
 	if !ir.Active {
 		t.Fatal("expected active=true for valid token")
 	}
@@ -52,14 +52,21 @@ func TestIntrospection_RevokedToken_Inactive(t *testing.T) {
 
 	tokens := client.FullFlow("intro-rev@example.com", "pass123", "tools/echo", false)
 
+	// One credential pair on both sides of the revocation. Asserting only the
+	// "after" would pass on an unauthorized resource server just as readily as
+	// on the revocation this test exists to prove.
+	rsClientID, rsSecret := h.ResourceServerClient(rs.URI)
+	if ir := h.IntrospectToken(tokens.AccessToken, rsClientID, rsSecret); !ir.Active {
+		t.Fatal("precondition: expected active=true before revocation")
+	}
+
 	// Revoke the refresh token (cascades to access token via JTI blacklist).
 	status := h.RevokeToken(tokens.RefreshToken, clientID)
 	if status != http.StatusOK {
 		t.Fatalf("revoke: expected 200, got %d", status)
 	}
 
-	ir := h.IntrospectToken(tokens.AccessToken, clientID)
-	if ir.Active {
+	if ir := h.IntrospectToken(tokens.AccessToken, rsClientID, rsSecret); ir.Active {
 		t.Fatal("expected active=false for revoked token")
 	}
 }

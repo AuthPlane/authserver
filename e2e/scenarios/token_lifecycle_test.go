@@ -153,9 +153,11 @@ func TestRevocation_RefreshToken_Cascades_To_AccessToken(t *testing.T) {
 
 	tokens := client.FullFlow("revoke-at@example.com", "pass123", "tools/echo", false)
 
-	// Access token should be active before revocation.
-	ir := h.IntrospectToken(tokens.AccessToken, clientID)
-	if !ir.Active {
+	// One credential pair on both sides of the revocation — see the note in
+	// user_disable_test.go: a fresh caller per call would let the "after"
+	// assertion pass on a broken binding instead of on the revocation.
+	rsClientID, rsSecret := h.ResourceServerClient(rs.URI)
+	if ir := h.IntrospectToken(tokens.AccessToken, rsClientID, rsSecret); !ir.Active {
 		t.Fatal("access token should be active before revocation")
 	}
 
@@ -167,8 +169,7 @@ func TestRevocation_RefreshToken_Cascades_To_AccessToken(t *testing.T) {
 	}
 
 	// Access token should now be inactive (JTI blacklisted via family revocation).
-	ir = h.IntrospectToken(tokens.AccessToken, clientID)
-	if ir.Active {
+	if ir := h.IntrospectToken(tokens.AccessToken, rsClientID, rsSecret); ir.Active {
 		t.Fatal("access token should be inactive after family revocation")
 	}
 }

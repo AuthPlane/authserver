@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sync"
 	"syscall"
 	"time"
 
@@ -19,57 +18,90 @@ import (
 
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
+	"github.com/authplane/authserver/internal/ssrf"
 )
 
 var _ output.IDPJWKSCache = (*Cache)(nil)
 
-// cacheEntry holds a cached JWKS and its expiry.
-type cacheEntry struct {
+// Entry is a cached JWKS together with the instant it goes stale. It is the
+// value type the injected cache stores; callers construct that cache as
+// cache.NewMemory[*idpjwks.Entry](). Its fields are internal — the cache only
+// stores and returns whole entries.
+type Entry struct {
 	keys      *jose.JSONWebKeySet
 	expiresAt time.Time
 }
 
-// Cache is an in-memory JWKS cache with SSRF-protected HTTP fetching.
+// Cache fronts an injected output.Cache with SSRF-protected JWKS fetching.
+//
+// Freshness and resilience are owned here, not by the injected cache (which is
+// a plain keyed store that never auto-expires): an entry is served while fresh
+// (within TTL); on a fetch failure the last entry is served as a bounded
+// stale-while-revalidate fallback while it is no more than MaxStale past expiry,
+// so a transient IdP outage does not break token validation.
 type Cache struct {
-	mu      sync.RWMutex
-	entries map[string]*cacheEntry // keyed by issuer
-
+	cache    output.Cache[*Entry]
 	idpStore output.IDPStore // resolve issuer → jwks_uri
 	client   *http.Client
 	ttl      time.Duration
+	maxStale time.Duration
+	now      func() time.Time
 	logger   *slog.Logger
 	tracer   trace.Tracer
 }
 
 // CacheConfig holds configuration for the JWKS cache.
 type CacheConfig struct {
-	TTL          time.Duration // Cache TTL (default: 1 hour)
+	TTL          time.Duration // freshness window (default: 1h)
+	MaxStale     time.Duration // how long past expiry a stale entry may be served on fetch failure (default: 24h)
 	FetchTimeout time.Duration // HTTP fetch timeout (default: 10s)
 }
 
-// New creates a JWKS cache with SSRF protections.
-func New(idpStore output.IDPStore, cfg CacheConfig, obs *observability.Provider) *Cache {
+// New creates a JWKS cache with SSRF protections. cache is required (e.g.
+// cache.NewMemory[*Entry]() for the in-memory default, or a partition-aware
+// implementation); freshness and bounded stale-while-revalidate are applied by
+// this type regardless of the injected store.
+func New(idpStore output.IDPStore, cache output.Cache[*Entry], cfg CacheConfig, obs *observability.Provider, opts ...Option) *Cache {
 	if cfg.TTL == 0 {
 		cfg.TTL = 1 * time.Hour
+	}
+	if cfg.MaxStale == 0 {
+		cfg.MaxStale = 24 * time.Hour
 	}
 	if cfg.FetchTimeout == 0 {
 		cfg.FetchTimeout = 10 * time.Second
 	}
 
-	return &Cache{
-		entries:  make(map[string]*cacheEntry),
+	c := &Cache{
+		cache:    cache,
 		idpStore: idpStore,
 		client:   ssrfSafeClient(cfg.FetchTimeout),
 		ttl:      cfg.TTL,
+		maxStale: cfg.MaxStale,
+		now:      time.Now,
 		logger:   obs.Logger.With("component", "idp-jwks-cache"),
 		tracer:   obs.Tracer,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
-// WithHTTPClient replaces the default SSRF-protected HTTP client.
-// This is useful for testing where JWKS endpoints run on localhost.
-func (c *Cache) WithHTTPClient(client *http.Client) {
-	c.client = client
+// Option configures a Cache at construction.
+type Option func(*Cache)
+
+// WithHTTPClient replaces the SSRF-protected HTTP client that New builds.
+//
+// TEST ONLY. The replacement client has NO SSRF protection: it will happily
+// fetch a JWKS from loopback, RFC 1918 space, or CGNAT. Production wiring must
+// never use it — enforced by scripts/ssrflint rule R1, which fails the build on
+// any call outside a _test.go file, a testdata directory, or a file that
+// requires the //go:build e2e tag. R1 matches calls, not every mention of the
+// symbol, so it is a guard against wiring this up by accident rather than a
+// boundary anything hostile would respect.
+func WithHTTPClient(client *http.Client) Option {
+	return func(c *Cache) { c.client = client }
 }
 
 // GetKeys returns the JWKS for an IdP issuer, fetching and caching as needed.
@@ -77,12 +109,10 @@ func (c *Cache) GetKeys(ctx context.Context, issuer string) (*jose.JSONWebKeySet
 	ctx, span := c.tracer.Start(ctx, "IDPJWKSCache.GetKeys")
 	defer span.End()
 
-	// Check cache first.
-	c.mu.RLock()
-	entry, ok := c.entries[issuer]
-	c.mu.RUnlock()
-
-	if ok && time.Now().Before(entry.expiresAt) {
+	// Fast path: serve the entry while it is fresh.
+	entry, _ := c.cache.Load(ctx, issuer)
+	now := c.now()
+	if entry != nil && now.Before(entry.expiresAt) {
 		return entry.keys, nil
 	}
 
@@ -99,8 +129,10 @@ func (c *Cache) GetKeys(ctx context.Context, issuer string) (*jose.JSONWebKeySet
 	// Fetch JWKS from the IdP.
 	keys, err := c.fetchJWKS(ctx, jwksURI)
 	if err != nil {
-		// Stale-while-revalidate: serve expired cache entry on fetch failure.
-		if ok && entry != nil {
+		// Bounded stale-while-revalidate: on fetch failure serve the last known
+		// entry while it is within MaxStale of its expiry, so a transient IdP
+		// outage doesn't break token validation.
+		if entry != nil && now.Before(entry.expiresAt.Add(c.maxStale)) {
 			c.logger.WarnContext(ctx, "JWKS fetch failed, serving stale cache",
 				"issuer", issuer, "error", err,
 				"stale_since", entry.expiresAt.Format("2006-01-02T15:04:05Z"),
@@ -113,24 +145,14 @@ func (c *Cache) GetKeys(ctx context.Context, issuer string) (*jose.JSONWebKeySet
 	}
 
 	// Cache the result.
-	c.mu.Lock()
-	c.entries[issuer] = &cacheEntry{
-		keys:      keys,
-		expiresAt: time.Now().Add(c.ttl),
-	}
-	c.mu.Unlock()
-
+	_ = c.cache.Store(ctx, issuer, &Entry{keys: keys, expiresAt: now.Add(c.ttl)})
 	c.logger.InfoContext(ctx, "cached IdP JWKS", "issuer", issuer)
 	return keys, nil
 }
 
 // InvalidateCache forces re-fetch on next GetKeys call for the given issuer.
 func (c *Cache) InvalidateCache(ctx context.Context, issuer string) error {
-	c.mu.Lock()
-	delete(c.entries, issuer)
-	c.mu.Unlock()
-	c.logger.InfoContext(ctx, "invalidated JWKS cache", "issuer", issuer)
-	return nil
+	return c.cache.Invalidate(ctx, issuer)
 }
 
 // fetchJWKS fetches a JWKS from the given URI with SSRF protections.
@@ -164,24 +186,49 @@ func (c *Cache) fetchJWKS(ctx context.Context, jwksURI string) (*jose.JSONWebKey
 	return &jwks, nil
 }
 
-// ssrfSafeClient creates an HTTP client that refuses connections to private/loopback IPs.
-// It validates IPs both at DNS resolution time and after TCP connection to prevent
-// DNS rebinding attacks.
-func ssrfSafeClient(timeout time.Duration) *http.Client {
-	dialer := &net.Dialer{
+// ssrfSafeDialer returns a dialer whose Control hook re-checks the concrete
+// resolved IP immediately before connect(2).
+//
+// This is what closes the DNS-rebinding window: ssrfSafeClient's DialContext
+// validates the addresses the resolver returned, but then dials the *hostname*,
+// which Go's resolver, inside net.Dialer, resolves a second time. An attacker
+// controlling the authoritative DNS can answer differently on that second
+// lookup. The hook sees the address that will actually be connected to.
+//
+// Deleting the hook reopens the window — TestSSRFSafeDialer_RefusesLiveLoopbackListener
+// is there to make that a runtime test failure rather than a silent regression.
+func ssrfSafeDialer(timeout time.Duration) *net.Dialer {
+	return &net.Dialer{
 		Timeout: timeout,
-		Control: func(network, address string, conn syscall.RawConn) error {
+		Control: func(network, address string, _ syscall.RawConn) error {
 			host, _, err := net.SplitHostPort(address)
 			if err != nil {
 				return fmt.Errorf("invalid address %q: %w", address, err)
 			}
 			ip := net.ParseIP(host)
-			if ip != nil && isPrivateIP(ip) {
+			if ip == nil {
+				return fmt.Errorf("SSRF protection: refusing connection to unparseable host %q", host)
+			}
+			if ssrf.IsPrivateIP(ip) {
 				return fmt.Errorf("SSRF protection: refusing connection to private IP %s (post-connect check)", ip)
 			}
 			return nil
 		},
 	}
+}
+
+// ssrfSafeClient creates an HTTP client that refuses connections to private/loopback IPs.
+// It validates IPs both at DNS resolution time and after TCP connection to prevent
+// DNS rebinding attacks.
+func ssrfSafeClient(timeout time.Duration) *http.Client {
+	// dialer must be built by ssrfSafeDialer, never by a bare &net.Dialer{}.
+	// Its Control hook is the DNS-rebinding guard described on that function's
+	// doc comment above. No test on this branch can tell the two apart: the
+	// pre-resolution sweep just below already validates every address an
+	// IP-literal host would ever present to the hook, so a substitution here
+	// fails silently — the suite stays green and the rebinding window quietly
+	// reopens.
+	dialer := ssrfSafeDialer(timeout)
 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -196,7 +243,7 @@ func ssrfSafeClient(timeout time.Duration) *http.Client {
 			}
 
 			for _, ipAddr := range ips {
-				if isPrivateIP(ipAddr.IP) {
+				if ssrf.IsPrivateIP(ipAddr.IP) {
 					return nil, fmt.Errorf("SSRF protection: refusing connection to private IP %s for host %s", ipAddr.IP, host)
 				}
 			}
@@ -213,9 +260,4 @@ func ssrfSafeClient(timeout time.Duration) *http.Client {
 			return http.ErrUseLastResponse // no redirects
 		},
 	}
-}
-
-// isPrivateIP returns true if the IP is loopback, link-local, or private (RFC 1918, RFC 4193).
-func isPrivateIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }

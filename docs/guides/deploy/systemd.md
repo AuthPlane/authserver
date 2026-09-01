@@ -24,10 +24,13 @@ The simplest production path: one `authserver` binary, one systemd unit, one rev
 ### 1. Install the binary
 
 ```bash
-# Verified against the GitHub Releases asset naming
-curl -fsSL https://github.com/authplane/authserver/releases/latest/download/authserver-linux-amd64 \
-  -o /usr/local/bin/authserver
-chmod +x /usr/local/bin/authserver
+# Release assets are versioned tarballs: authserver_<version>_<os>_<arch>.tar.gz
+# Latest version: https://github.com/authplane/authserver/releases/latest
+# Verify the download before installing: see verifying-releases.md
+VERSION=0.1.2
+curl -fsSL "https://github.com/authplane/authserver/releases/download/v${VERSION}/authserver_${VERSION}_linux_amd64.tar.gz" \
+  | tar -xz -C /tmp authserver
+install -m 0755 /tmp/authserver /usr/local/bin/authserver
 authserver version  # see docs/reference/cli.md#cli-version
 ```
 
@@ -174,6 +177,13 @@ server {
 }
 ```
 
+> **Note on rate limiting behind a proxy.** authserver reads the client address from the
+> connection and never from `X-Forwarded-For`, so behind this proxy every request presents
+> the proxy's address. Per-address request-rate limiting therefore applies to your proxy as
+> a whole rather than per client — size `rate_limit.requests_per_second` accordingly. The
+> account lockout is keyed on the submitted identity as well as the address, so it keeps
+> working per account regardless.
+
 The admin port (`:9001`) stays on loopback — access the Admin UI via `ssh -L 9001:127.0.0.1:9001` then visit `http://localhost:9001/admin/ui/`.
 
 ### 7. Firewall
@@ -241,14 +251,17 @@ sudo -u authserver authserver migrate --config /etc/authserver/config.yaml
 
 Migrations are idempotent — repeated runs no-op when the schema is current.
 
+**Migrations that build an index lock the table they index.** Each migration runs inside one transaction, so a `CREATE INDEX` in it takes a `SHARE` lock on its table for the whole build: reads go through, but every INSERT/UPDATE on that table — from every instance, not only the one migrating — waits until the build commits. Requests wait rather than fail, bounded by the client's timeout. Migration `003` builds a unique index on `token_families`, and that table is never purged: it holds one row per authorization-code exchange since install. On a long-lived deployment expect code exchanges and revocations to stall for the seconds the build takes; refresh-token rotation, introspection and JWKS are unaffected. Run `authserver migrate` as the pre-flight step above, in a window, rather than letting the first upgraded instance do it under traffic.
+
 ### Upgrade procedure
 
 ```bash
 systemctl stop authserver
 cp /usr/local/bin/authserver /usr/local/bin/authserver.bak
-curl -fsSL https://github.com/authplane/authserver/releases/latest/download/authserver-linux-amd64 \
-  -o /usr/local/bin/authserver
-chmod +x /usr/local/bin/authserver
+VERSION=0.1.2  # https://github.com/authplane/authserver/releases/latest
+curl -fsSL "https://github.com/authplane/authserver/releases/download/v${VERSION}/authserver_${VERSION}_linux_amd64.tar.gz" \
+  | tar -xz -C /tmp authserver
+install -m 0755 /tmp/authserver /usr/local/bin/authserver
 systemctl start authserver
 ```
 

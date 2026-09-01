@@ -17,6 +17,13 @@ import (
 	"github.com/authplane/authserver/testdata"
 )
 
+// noopKeyCacheInvalidator satisfies the listener's cache-invalidation seam.
+// These tests exercise NOTIFY delivery + reload, not cache state, so a no-op
+// is sufficient (the decorator's invalidation is unit-tested separately).
+type noopKeyCacheInvalidator struct{}
+
+func (noopKeyCacheInvalidator) InvalidateCache(context.Context) error { return nil }
+
 // testDBDSN extracts a connection string for the test database from a pool.
 // LISTEN/NOTIFY in PostgreSQL is database-scoped, so the listener must connect
 // to the same database where the trigger fires.
@@ -50,7 +57,7 @@ func TestKeyStoreListener_ReceivesNotification(t *testing.T) {
 	// LISTEN/NOTIFY is database-scoped — use the test DB's DSN, not the container base.
 	dsn := testDBDSN(t, db.Pool)
 
-	listener := pgadapter.NewKeyStoreListener(dsn, store, reloadFn, obs)
+	listener := pgadapter.NewKeyStoreListener(dsn, noopKeyCacheInvalidator{}, reloadFn, obs)
 
 	// Start listener in background.
 	listenerDone := make(chan error, 1)
@@ -115,7 +122,7 @@ func TestKeyStoreListener_MultipleNotifications(t *testing.T) {
 	defer cancel()
 
 	dsn := testDBDSN(t, db.Pool)
-	listener := pgadapter.NewKeyStoreListener(dsn, store, reloadFn, obs)
+	listener := pgadapter.NewKeyStoreListener(dsn, noopKeyCacheInvalidator{}, reloadFn, obs)
 
 	go func() {
 		_ = listener.Run(ctx)
@@ -178,7 +185,7 @@ func TestKeyStoreListener_NotifyTriggersReload_Within500ms(t *testing.T) {
 	defer cancel()
 
 	dsn := testDBDSN(t, db.Pool)
-	listener := pgadapter.NewKeyStoreListener(dsn, store, reloadFn, obs)
+	listener := pgadapter.NewKeyStoreListener(dsn, noopKeyCacheInvalidator{}, reloadFn, obs)
 
 	go func() {
 		_ = listener.Run(ctx)
@@ -206,7 +213,7 @@ func TestKeyStoreListener_NotifyTriggersReload_Within500ms(t *testing.T) {
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
-	listener2 := pgadapter.NewKeyStoreListener(dsn, store, reloadTimingFn, obs)
+	listener2 := pgadapter.NewKeyStoreListener(dsn, noopKeyCacheInvalidator{}, reloadTimingFn, obs)
 	go func() {
 		_ = listener2.Run(ctx2)
 	}()

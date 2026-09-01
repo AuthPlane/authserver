@@ -28,15 +28,19 @@ var _ output.TokenStore = (*TokenStore)(nil)
 
 // --- Token Families ---
 
-const familyColumns = `id, client_id, user_id, scope, resource, status, created_at, revoked_at`
+const familyColumns = `id, client_id, user_id, scope, resource, status, created_at, revoked_at, auth_session_id`
 
 func scanFamily(row interface{ Scan(...any) error }) (*token.Family, error) {
 	var f token.Family
+	var authSessionID *string
 	if err := row.Scan(
 		&f.ID, &f.ClientID, &f.UserID, &f.Scope, &f.Resource,
-		&f.Status, &f.CreatedAt, &f.RevokedAt,
+		&f.Status, &f.CreatedAt, &f.RevokedAt, &authSessionID,
 	); err != nil {
 		return nil, err
+	}
+	if authSessionID != nil {
+		f.AuthSessionID = *authSessionID
 	}
 	f.CreatedAt = toUTC(f.CreatedAt)
 	if f.RevokedAt != nil {
@@ -51,11 +55,16 @@ func (s *TokenStore) CreateFamily(ctx context.Context, f *token.Family) error {
 	ctx, span := s.tracer.Start(ctx, "Postgres.TokenCreateFamily")
 	defer span.End()
 
+	var authSessionID *string
+	if f.AuthSessionID != "" {
+		authSessionID = &f.AuthSessionID
+	}
+
 	start := time.Now()
 	_, err := dbOrTx(ctx, s.pool).Exec(ctx,
-		`INSERT INTO token_families (`+familyColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		`INSERT INTO token_families (`+familyColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 		f.ID, f.ClientID, f.UserID, f.Scope, f.Resource,
-		f.Status, toUTC(f.CreatedAt), f.RevokedAt,
+		f.Status, toUTC(f.CreatedAt), f.RevokedAt, authSessionID,
 	)
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("token_create_family"))
 
@@ -90,9 +99,32 @@ func (s *TokenStore) GetFamily(ctx context.Context, id string) (*token.Family, e
 	return f, nil
 }
 
+// GetFamilyByAuthSessionID implements output.TokenStore.
+func (s *TokenStore) GetFamilyByAuthSessionID(ctx context.Context, authSessionID string) (*token.Family, error) {
+	ctx, span := s.tracer.Start(ctx, "Postgres.TokenGetFamilyByAuthSessionID")
+	defer span.End()
+
+	start := time.Now()
+	row := dbOrTx(ctx, s.pool).QueryRow(ctx,
+		`SELECT `+familyColumns+` FROM token_families WHERE auth_session_id = $1`, authSessionID,
+	)
+	f, err := scanFamily(row)
+	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("token_get_family_by_auth_session"))
+
+	if isNoRows(err) {
+		return nil, domain.ErrInvalidGrant
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("get token family by auth session: %w", err)
+	}
+	return f, nil
+}
+
 // RevokeFamily atomically revokes a family and all its refresh tokens.
-// Idempotent — already-revoked family is a no-op.
-func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) error {
+// Idempotent — an already-revoked family is a no-op, reported as revoked=false.
+func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) (bool, error) {
 	ctx, span := s.tracer.Start(ctx, "Postgres.TokenRevokeFamily")
 	defer span.End()
 
@@ -101,21 +133,24 @@ func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) error {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("begin tx: %w", err)
+		return false, fmt.Errorf("begin tx: %w", err)
 	}
 	if !joined {
 		defer func() { _ = tx.Rollback(ctx) }()
 	}
 
-	// Mark family as revoked (only if active).
-	if _, err := tx.Exec(ctx,
+	// Mark family as revoked (only if active). The row count is the answer
+	// to "did this call revoke it": 0 means it already was.
+	tag, err := tx.Exec(ctx,
 		`UPDATE token_families SET status = 'revoked', revoked_at = NOW() WHERE id = $1 AND status = 'active'`,
 		familyID,
-	); err != nil {
+	)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("revoke family: %w", err)
+		return false, fmt.Errorf("revoke family: %w", err)
 	}
+	revoked := tag.RowsAffected() > 0
 
 	// Consume all unconsumed refresh tokens in the family.
 	if _, err := tx.Exec(ctx,
@@ -124,18 +159,18 @@ func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) error {
 	); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("consume family tokens: %w", err)
+		return false, fmt.Errorf("consume family tokens: %w", err)
 	}
 
 	if !joined {
 		if err := tx.Commit(ctx); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
-			return fmt.Errorf("commit: %w", err)
+			return false, fmt.Errorf("commit: %w", err)
 		}
 	}
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("token_revoke_family"))
-	return nil
+	return revoked, nil
 }
 
 // --- Refresh Tokens ---

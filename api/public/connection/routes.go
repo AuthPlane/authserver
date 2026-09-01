@@ -8,6 +8,7 @@ import (
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // ConnectionMeta is re-exported from internal/ports/input so handlers
@@ -33,6 +34,7 @@ type ConnectProvider interface {
 // Deps holds the dependencies for the public connection handlers.
 type Deps struct {
 	Connect ConnectProvider
+	URLs    output.URLBuilder
 }
 
 // RegisterRoutes wires the user-facing /connect + /connections routes.
@@ -54,6 +56,7 @@ func RegisterRoutes(mux *http.ServeMux, deps Deps, sessMW *shared.SessionMiddlew
 		connect: deps.Connect,
 		session: sessMW,
 		obs:     obs,
+		urls:    deps.URLs,
 	}
 	mux.Handle("GET /connect/{provider}", sessMW.Wrap(http.HandlerFunc(vh.handleConnect)))
 	mux.Handle("GET /connect/{provider}/callback", sessMW.Wrap(http.HandlerFunc(vh.handleCallback)))

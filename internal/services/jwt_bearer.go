@@ -32,19 +32,18 @@ var _ input.JWTBearerPort = (*JWTBearerService)(nil)
 // JWTBearerService implements the jwt-bearer grant type (RFC 7523) for
 // MCP Enterprise-Managed Authorization (XAA).
 type JWTBearerService struct {
-	idpStore      output.IDPStore
-	idpJWKS       output.IDPJWKSCache
-	jtiStore      output.AssertionJTIStore
-	clients       output.ClientStore
-	machineTokens output.MachineTokenStore
-	jwks          JWKSSigningKeyProvider
-	audit         AuditRecorder
-	issuer        string
-	tokenTTL      time.Duration
-	maxAge        time.Duration
-	logger        *slog.Logger
-	tracer        trace.Tracer
-	metrics       *observability.Metrics
+	idpStore       output.IDPStore
+	idpJWKS        output.IDPJWKSCache
+	jtiStore       output.AssertionJTIStore
+	clients        output.ClientStore
+	machineTokens  output.MachineTokenStore
+	jwks           JWKSSigningKeyProvider
+	audit          AuditRecorder
+	issuerProvider output.IssuerProvider
+	xaaConfig      output.XAAConfigProvider
+	logger         *slog.Logger
+	tracer         trace.Tracer
+	metrics        *observability.Metrics
 
 	// Resource validation.
 	resources ResourceLister
@@ -59,7 +58,7 @@ type JWTBearerService struct {
 
 	// DPoP support (RFC 9449) — optional.
 	dpopStore  output.DPoPNonceStore
-	dpopConfig *DPoPConfig
+	dpopConfig output.DPoPConfigProvider
 
 	// Agent identity — optional.
 	agentIdentity *AgentIdentityService
@@ -67,7 +66,6 @@ type JWTBearerService struct {
 	// Policy + subject mapping — optional.
 	policyService  *XAAPolicyService
 	mappingService *SubjectMappingService
-	subjectMode    string // "auto_map" or "strict"
 }
 
 // NewJWTBearerService creates a new JWT bearer grant service.
@@ -78,35 +76,39 @@ func NewJWTBearerService(
 	clients output.ClientStore,
 	machineTokens output.MachineTokenStore,
 	jwks JWKSSigningKeyProvider,
-	issuer string,
-	tokenTTL time.Duration,
-	maxAge time.Duration,
+	issuerProvider output.IssuerProvider,
+	xaaConfig output.XAAConfigProvider,
 	obs *observability.Provider,
 	auditRec AuditRecorder,
 	resources ResourceLister,
 ) *JWTBearerService {
+	if issuerProvider == nil {
+		panic("services.NewJWTBearerService: issuerProvider is required")
+	}
+	if xaaConfig == nil {
+		panic("NewJWTBearerService: xaaConfig must not be nil")
+	}
 	return &JWTBearerService{
-		idpStore:      idpStore,
-		idpJWKS:       idpJWKS,
-		jtiStore:      jtiStore,
-		clients:       clients,
-		machineTokens: machineTokens,
-		jwks:          jwks,
-		audit:         auditRec,
-		issuer:        issuer,
-		tokenTTL:      tokenTTL,
-		maxAge:        maxAge,
-		logger:        obs.Logger.With("component", "jwt_bearer"),
-		tracer:        obs.Tracer,
-		metrics:       obs.Metrics,
-		resources:     resources,
+		idpStore:       idpStore,
+		idpJWKS:        idpJWKS,
+		jtiStore:       jtiStore,
+		clients:        clients,
+		machineTokens:  machineTokens,
+		jwks:           jwks,
+		audit:          auditRec,
+		issuerProvider: issuerProvider,
+		xaaConfig:      xaaConfig,
+		logger:         obs.Logger.With("component", "jwt_bearer"),
+		tracer:         obs.Tracer,
+		metrics:        obs.Metrics,
+		resources:      resources,
 	}
 }
 
 // WithDPoP enables DPoP proof-of-possession support.
-func (s *JWTBearerService) WithDPoP(store output.DPoPNonceStore, cfg DPoPConfig) {
+func (s *JWTBearerService) WithDPoP(store output.DPoPNonceStore, cfg output.DPoPConfigProvider) {
 	s.dpopStore = store
-	s.dpopConfig = &cfg
+	s.dpopConfig = cfg
 }
 
 // WithIssuanceAudit enables the per-token issuance audit row write.
@@ -125,10 +127,9 @@ func (s *JWTBearerService) WithAgentIdentity(ai *AgentIdentityService) {
 }
 
 // WithPolicy enables policy evaluation and subject mapping.
-func (s *JWTBearerService) WithPolicy(policySvc *XAAPolicyService, mappingSvc *SubjectMappingService, subjectMode string) {
+func (s *JWTBearerService) WithPolicy(policySvc *XAAPolicyService, mappingSvc *SubjectMappingService) {
 	s.policyService = policySvc
 	s.mappingService = mappingSvc
-	s.subjectMode = subjectMode
 }
 
 // GrantJWTBearer validates an ID-JAG assertion and issues an access token.
@@ -141,6 +142,13 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		attribute.String("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
 	)
 	start := time.Now()
+
+	xaaCfg, err := s.xaaConfig.Config(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("resolve xaa config: %w", err)
+	}
 
 	// 1. Authenticate client.
 	c, err := s.authenticateClient(ctx, span, req.ClientID, req.ClientSecret)
@@ -206,7 +214,11 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 	}
 
 	// 7. Validate the ID-JAG assertion.
-	assertion, err := crypto.ValidateIDJAG(req.Assertion, keys, s.issuer, s.maxAge)
+	issuer, err := s.issuerProvider.Issuer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve issuer: %w", err)
+	}
+	assertion, err := crypto.ValidateIDJAG(req.Assertion, keys, issuer, xaaCfg.MaxAssertionAge)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "assertion validation failed")
@@ -214,7 +226,54 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		return nil, err
 	}
 
-	// 8. Consume JTI for replay prevention (single-use).
+	// 8. Verify client_id in assertion matches authenticated client.
+	if assertion.ClientID != req.ClientID {
+		span.RecordError(domain.ErrAssertionClientMismatch)
+		span.SetStatus(codes.Error, "client_id mismatch")
+		s.recordDenied(ctx, req.ClientID, "client_mismatch")
+		return nil, domain.ErrAssertionClientMismatch
+	}
+
+	// 9. Reconcile the resource parameter (RFC 8707).
+	// When both assertion and request specify a resource, they must agree.
+	if req.Resource != "" && assertion.Resource != "" && req.Resource != assertion.Resource {
+		resourceErr := fmt.Errorf("%w: requested resource does not match assertion resource", domain.ErrInvalidScope)
+		span.RecordError(resourceErr)
+		span.SetStatus(codes.Error, "resource mismatch")
+		s.recordDenied(ctx, req.ClientID, "invalid_resource")
+		return nil, resourceErr
+	}
+	resource := req.Resource
+	if resource == "" {
+		resource = assertion.Resource
+	}
+	// Strict mode (xaa.require_resource=true): refuse rather than fall
+	// through to the issuer-audienced token below, which no resource server
+	// accepts. Either origin satisfies it. Above the jti gate on purpose —
+	// see step 10 — so the correction the message asks for works on a resend.
+	if xaaCfg.RequireResource && resource == "" {
+		requiredErr := fmt.Errorf("%w: resource is required (xaa.require_resource=true)", domain.ErrInvalidTarget)
+		span.RecordError(requiredErr)
+		span.SetStatus(codes.Error, "resource required")
+		// Debug, not Warn: client-controlled volume, and no other denial
+		// here logs. The durable record is the audit row.
+		s.logger.DebugContext(ctx, "jwt_bearer: exchange refused, no resource named",
+			"client_id", req.ClientID,
+			"config_key", "xaa.require_resource",
+		)
+		s.recordDenied(ctx, req.ClientID, "resource_required")
+		return nil, requiredErr
+	}
+
+	// 10. Consume JTI for replay prevention (single-use).
+	//
+	// The boundary is what a refusal would leak. Above: checks comparing
+	// values the caller already holds, which reveal nothing, so they may
+	// leave the assertion usable for a corrected resend. Below: checks
+	// reading server state — scope ceiling, resource catalog, policies,
+	// subject mappings — which must spend it, or a captured assertion could
+	// be resent until they are enumerated. That asymmetry is deliberate and
+	// two tests pin it. ConsumeJTI stays the atomic point for replay.
 	jtiExpiry := time.Unix(assertion.Expiry, 0).Add(time.Minute) // buffer past expiry
 	if jtiErr := s.jtiStore.ConsumeJTI(ctx, assertion.JTI, jtiExpiry); jtiErr != nil {
 		span.RecordError(jtiErr)
@@ -223,15 +282,7 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		return nil, domain.ErrAssertionReplay
 	}
 
-	// 9. Verify client_id in assertion matches authenticated client.
-	if assertion.ClientID != req.ClientID {
-		span.RecordError(domain.ErrAssertionClientMismatch)
-		span.SetStatus(codes.Error, "client_id mismatch")
-		s.recordDenied(ctx, req.ClientID, "client_mismatch")
-		return nil, domain.ErrAssertionClientMismatch
-	}
-
-	// 10. Determine effective scopes.
+	// 11. Determine effective scopes.
 	//
 	// Two upper bounds compose to produce the ceiling for this grant:
 	//   client.Scope     — operator-set: what this AS client is registered for
@@ -268,19 +319,7 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		effectiveScopes = requestedScopes
 	}
 
-	// 11. Validate resource parameter (RFC 8707).
-	// When both assertion and request specify a resource, they must agree.
-	if req.Resource != "" && assertion.Resource != "" && req.Resource != assertion.Resource {
-		resourceErr := fmt.Errorf("%w: requested resource does not match assertion resource", domain.ErrInvalidScope)
-		span.RecordError(resourceErr)
-		span.SetStatus(codes.Error, "resource mismatch")
-		s.recordDenied(ctx, req.ClientID, "invalid_resource")
-		return nil, resourceErr
-	}
-	resource := req.Resource
-	if resource == "" {
-		resource = assertion.Resource
-	}
+	// 12. Verify the resource is registered.
 	if resource != "" && !s.isKnownResource(ctx, resource) {
 		unknownErr := fmt.Errorf("%w: unknown resource %q", domain.ErrInvalidScope, resource)
 		span.RecordError(unknownErr)
@@ -289,7 +328,7 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		return nil, unknownErr
 	}
 
-	// 12. Policy check — evaluate XAA policies if configured.
+	// 13. Policy check — evaluate XAA policies if configured.
 	if s.policyService != nil {
 		decision, policyErr := s.policyService.EvaluatePolicy(ctx, idp.ID, assertion, c, effectiveScopes, resource)
 		if policyErr != nil {
@@ -298,11 +337,15 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 			s.recordDenied(ctx, req.ClientID, "policy_denied")
 			return nil, policyErr
 		}
-		// Use the policy-narrowed scopes.
+		// Adopt the policy's decision. Usually a narrowing, but not always:
+		// when the set entering evaluation is empty — a client with no
+		// registered scope, an assertion and a request that both omit it —
+		// the policy's own maximum becomes the effective set. So a client
+		// whose ceiling is empty can still mint a scoped token here.
 		effectiveScopes = decision.EffectiveScope
 	}
 
-	// 13. Validate DPoP proof if present (RFC 9449).
+	// 14. Validate DPoP proof if present (RFC 9449).
 	var dpopJKT string
 	if req.DPoPProof != "" {
 		jkt, dpopErr := s.validateDPoP(ctx, span, req.DPoPProof, req.HTTPMethod, req.HTTPURL, "")
@@ -313,9 +356,9 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		dpopJKT = jkt
 	}
 
-	// 14. Sign JWT access token.
+	// 15. Sign JWT access token.
 	now := time.Now().UTC()
-	expiry := now.Add(s.tokenTTL)
+	expiry := now.Add(xaaCfg.TokenExpiry)
 	jti := crypto.GenerateRandomString(16)
 
 	sk, err := s.jwks.GetSigningKey(ctx)
@@ -328,7 +371,7 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 	// Subject: resolve via subject mapping or fallback to iss:sub.
 	var sub string
 	if s.mappingService != nil {
-		resolvedSub, mapErr := s.mappingService.ResolveSubject(ctx, idp.ID, assertion.Issuer, assertion.Subject, s.subjectMode)
+		resolvedSub, mapErr := s.mappingService.ResolveSubject(ctx, idp.ID, assertion.Issuer, assertion.Subject, xaaCfg.SubjectMode)
 		if mapErr != nil {
 			span.RecordError(mapErr)
 			span.SetStatus(codes.Error, "subject mapping failed")
@@ -342,11 +385,11 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 
 	aud := []string{resource}
 	if resource == "" {
-		aud = []string{s.issuer}
+		aud = []string{issuer}
 	}
 
 	claims := crypto.AccessTokenClaims{
-		Issuer:    s.issuer,
+		Issuer:    issuer,
 		Subject:   sub,
 		Audience:  aud,
 		ClientID:  req.ClientID,
@@ -388,7 +431,7 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		return nil, fmt.Errorf("sign access token: %w", err)
 	}
 
-	// 14b. Persist issuance audit row. Mirrors MintIssuer.Issue so
+	// 15b. Persist issuance audit row. Mirrors MintIssuer.Issue so
 	// the admin /admin/issuances list reflects every grant type uniformly.
 	// Resource resolution failure is non-fatal; insert failure aborts the
 	// request so the admin UI guarantee (row visible within ~1s) is
@@ -484,7 +527,7 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 	return &input.JWTBearerResponse{
 		AccessToken: accessToken,
 		TokenType:   tokenType,
-		ExpiresIn:   int(s.tokenTTL.Seconds()),
+		ExpiresIn:   int(xaaCfg.TokenExpiry.Seconds()),
 		Scope:       effectiveScopes.String(),
 	}, nil
 }
@@ -559,14 +602,29 @@ func (s *JWTBearerService) validateDPoP(ctx context.Context, span trace.Span, pr
 		return "", nil
 	}
 
-	result, err := crypto.ValidateProof(proof, method, reqURL, "", accessTokenHash, s.dpopConfig.ProofLifetime)
+	dpopCfg, err := s.dpopConfig.Config(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("resolve dpop config: %w", err)
+	}
+
+	// When the resolved config reports DPoP disabled, ignore the proof and
+	// issue a bearer token (no sender-constraining). The default build only
+	// wires this provider when DPoP is enabled, so this is byte-identical
+	// there; a substitute provider may toggle it per request.
+	if !dpopCfg.Enabled {
+		return "", nil
+	}
+
+	result, err := crypto.ValidateProof(proof, method, reqURL, "", accessTokenHash, dpopCfg.ProofLifetime)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "DPoP proof validation failed")
 		return "", err
 	}
 
-	if s.dpopConfig.RequireNonce {
+	if dpopCfg.RequireNonce {
 		if result.Nonce == "" {
 			span.RecordError(domain.ErrDPoPNonceRequired)
 			span.SetStatus(codes.Error, "DPoP nonce required but missing")
@@ -579,7 +637,7 @@ func (s *JWTBearerService) validateDPoP(ctx context.Context, span trace.Span, pr
 		}
 	}
 
-	jtiExpiry := time.Now().Add(s.dpopConfig.ProofLifetime * 2)
+	jtiExpiry := time.Now().Add(dpopCfg.ProofLifetime * 2)
 	if err := s.dpopStore.ConsumeJTI(ctx, result.JTI, jtiExpiry); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "DPoP JTI replay")
@@ -590,11 +648,16 @@ func (s *JWTBearerService) validateDPoP(ctx context.Context, span trace.Span, pr
 }
 
 // isKnownResource checks whether the resource URI is registered.
-func (s *JWTBearerService) isKnownResource(_ context.Context, resource string) bool {
+func (s *JWTBearerService) isKnownResource(ctx context.Context, resource string) bool {
 	if s.resources == nil {
 		return false
 	}
-	for _, r := range s.resources.List() {
+	resources, err := s.resources.List(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "resource lookup failed, treating resource as unknown", "error", err)
+		return false
+	}
+	for _, r := range resources {
 		if r.URI == resource {
 			return true
 		}

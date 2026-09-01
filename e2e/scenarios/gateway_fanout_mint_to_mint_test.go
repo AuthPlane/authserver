@@ -28,25 +28,29 @@ import (
 //     token-exchange, subject_token=<GW token>, resource=rest-api,
 //     scope="AA BB".
 //  4. The issued token follows the Option β claim shape
-//: aud=rest-api URI, sub=user, scope="AA BB",
-//     client_id=mcp-gw (the source slug — NOT the agent),
-//     act.sub=mcp-gw, act.act.sub=<agent client_id>.
-//  5. Audit row carries chain_kind=fronted and via_link=mcp-gw->rest-api
-//     (ASCII arrow, NOT unicode arrow).
-//  6. Negative — same exchange WITHOUT the link -> 400 invalid_scope.
-//     ADR-002 (hybrid subject-scope ceiling, commit c1f66e2) makes the
-//     direct path fail-closed when the subject token's scope namespace
-//     (source-resource scopes "A B") does not cover the requested target
-//     scopes ("AA BB"). The ceiling fires BEFORE the consent gate because
-//     even with a consent_grants row the exchange would still be invalid
-//     until an operator declares a fronting link to translate namespaces.
-//     This is the merge-gate contract — see CHANGELOG entry "token-
-//     exchange: hybrid subject-scope ceiling tightens no-link error to
-//     invalid_scope" for migration notes.
-//  7. Negative — link present but the GW token is missing the source-side
-//     scope a target-side request maps onto -> 400 invalid_scope (no
+//
+// : aud=rest-api URI, sub=user, scope="AA BB",
+//
+//	   client_id=mcp-gw (the source slug — NOT the agent),
+//	   act.sub=mcp-gw, act.act.sub=<agent client_id>.
+//	5. Audit row carries chain_kind=fronted and via_link=mcp-gw->rest-api
+//	   (ASCII arrow, NOT unicode arrow).
+//	6. Negative — same exchange WITHOUT the link -> 400 invalid_scope.
+//	   ADR-002 (hybrid subject-scope ceiling, commit c1f66e2) makes the
+//	   direct path fail-closed when the subject token's scope namespace
+//	   (source-resource scopes "A B") does not cover the requested target
+//	   scopes ("AA BB"). The ceiling fires BEFORE the consent gate because
+//	   even with a consent_grants row the exchange would still be invalid
+//	   until an operator declares a fronting link to translate namespaces.
+//	   This is the merge-gate contract — see CHANGELOG entry "token-
+//	   exchange: hybrid subject-scope ceiling tightens no-link error to
+//	   invalid_scope" for migration notes.
+//	7. Negative — link present but the GW token is missing the source-side
+//	   scope a target-side request maps onto -> 400 invalid_scope (no
+//
 // consent_required fallback on the fronted path; Task B
-//     pinned this).
+//
+//	pinned this).
 func TestGatewayFanout_MintToMint(t *testing.T) {
 	const (
 		gwSlug  = "mcp-gw"

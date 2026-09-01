@@ -39,15 +39,40 @@ func scanAuditEvent(row interface{ Scan(...any) error }) (*audit.Event, error) {
 }
 
 // Record implements output.AuditStore.
+//
+// created_at comes from the database, not the caller. Replicas do not share a
+// clock: a pod running slow would stamp a row behind a cursor that has already
+// read past it, and a watermark-driven reader would skip that row forever.
+// clock_timestamp() (not NOW(), which is the transaction's start time) puts
+// every row on the one clock the writers agree on, at the moment it is written.
+//
+// A caller that sets e.CreatedAt is overriding this deliberately — backfill,
+// import, a test placing an event at a chosen time — and its value is stored as
+// given. Every production path leaves it zero (see audit.NewEvent).
+//
+// This leaves the commit-order hazard, which no timestamp can remove: a row
+// inserted inside a long transaction becomes visible after rows with later
+// stamps have already been read. Readers must lag by more than the longest
+// transaction.
+//
+// The stored value is written back to e so the caller reports what was stored.
 func (s *AuditStore) Record(ctx context.Context, e *audit.Event) error {
 	ctx, span := s.tracer.Start(ctx, "Postgres.AuditRecord")
 	defer span.End()
 
+	var createdAt *time.Time // nil ⇒ the database stamps it
+	if !e.CreatedAt.IsZero() {
+		t := toUTC(e.CreatedAt)
+		createdAt = &t
+	}
+
 	start := time.Now()
-	_, err := dbOrTx(ctx, s.pool).Exec(ctx,
-		`INSERT INTO audit_events (`+auditColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		e.ID, e.Action, e.ActorID, e.ClientID, e.IP, e.Detail, e.TraceID, toUTC(e.CreatedAt),
-	)
+	err := dbOrTx(ctx, s.pool).QueryRow(ctx,
+		`INSERT INTO audit_events (id, action, actor_id, client_id, ip, detail, trace_id, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, COALESCE($8::timestamptz, clock_timestamp()))
+		 RETURNING created_at`,
+		e.ID, e.Action, e.ActorID, e.ClientID, e.IP, e.Detail, e.TraceID, createdAt,
+	).Scan(&e.CreatedAt)
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("audit_record"))
 
 	if err != nil {
@@ -55,6 +80,7 @@ func (s *AuditStore) Record(ctx context.Context, e *audit.Event) error {
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("insert audit event: %w", err)
 	}
+	e.CreatedAt = toUTC(e.CreatedAt)
 	return nil
 }
 

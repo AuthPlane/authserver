@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,19 +14,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/spf13/cobra"
 
 	apiadmin "github.com/authplane/authserver/api/admin"
 	apipublic "github.com/authplane/authserver/api/public"
-	"github.com/authplane/authserver/api/public/wellknown"
+	"github.com/authplane/authserver/api/shared"
 	brokerprotoapikey "github.com/authplane/authserver/internal/adapters/brokerproto/apikey"
 	brokerprotooauth "github.com/authplane/authserver/internal/adapters/brokerproto/oauth"
 	brokerprotoserviceaccount "github.com/authplane/authserver/internal/adapters/brokerproto/serviceaccount"
+	"github.com/authplane/authserver/internal/adapters/cache"
 	"github.com/authplane/authserver/internal/adapters/cimd"
 	"github.com/authplane/authserver/internal/adapters/encryption"
 	"github.com/authplane/authserver/internal/adapters/idpjwks"
 	adapteroidc "github.com/authplane/authserver/internal/adapters/oidc"
 	adaptersigning "github.com/authplane/authserver/internal/adapters/signing"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/adapters/storage"
 	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/config"
@@ -107,6 +111,35 @@ func runServe() error {
 		obs.Logger.Info("data encryptor initialized", "driver", dataEncryptor.DriverName())
 	}
 
+	// Config-secret seam: a composite backend implements both the write port
+	// (SecretEncoder) and the read port (SecretResolver). With a data encryptor
+	// configured, inline secrets encrypt into the enc_secret_* columns; otherwise
+	// the seam runs env-only (the *_ref path), identical to before.
+	var fieldEnc output.FieldEncryptor
+	if dataEncryptor != nil {
+		fieldEnc = static.NewDataEncryptorFieldEncryptor(dataEncryptor)
+	}
+	// brokerConfigSecrets is the strict (encrypt-or-ref) backend: a raw value with
+	// no encryptor is rejected, and an encrypted column read with no decryptor fails
+	// closed, so broker secrets are never stored as plaintext. The inline-allowed
+	// decision is a property of the wired backend, not of caller input, so it cannot
+	// be flipped per call. The inline-tolerant OIDC backend is wired separately in
+	// the OIDC block below (it needs no encryptor — the OSS inline-plaintext path).
+	brokerConfigSecrets := static.NewConfigSecretBackend(fieldEnc)
+
+	// Boot probe: verify that every secret configured via a *_ref env var has
+	// the named var set. Missing vars are fatal here — identical fail-fast UX to
+	// the former eager os.Getenv in validate.go. Column-only secrets are skipped.
+	if probeErr := probeSecretRefs(cfg); probeErr != nil {
+		return fmt.Errorf("secret ref probe failed — set the missing env var(s) before starting: %w", probeErr)
+	}
+
+	// Deprecated config keys still work but are translated at load time; warn so
+	// the operator migrates before the shim is removed in a future release.
+	for _, migration := range cfg.DeprecatedKeysUsed() {
+		obs.Logger.Warn("deprecated config key in use — update your configuration", "migration", migration)
+	}
+
 	// Client-secret hashing: HMAC-SHA256 when a pepper is configured, otherwise
 	// bcrypt. Set once before any client authentication happens.
 	crypto.SetClientSecretPepper(cfg.ClientSecretPepper)
@@ -124,10 +157,14 @@ func runServe() error {
 
 	// front the user store with a small TTL cache. Transparent —
 	// callers see output.UserStore. The hot path is SessionMiddleware's
-	// stale-session GetByID lookup on every authenticated request. The
+	// GetByID lookup on every authenticated request. The
 	// cache invalidates on Update/Delete so admin-driven changes propagate
 	// inside this process without waiting for the TTL.
-	ds = storage.WithUserCache(ds, 60*time.Second, 1024)
+	//
+	// The cache is always on (WithUserCache requires a non-nil cache); the
+	// fixed 60s/1024 bound is intentional. A zero TTL here would expire every
+	// entry immediately (a DB query per request), so keep it positive.
+	ds = storage.WithUserCache(ds, cache.NewMemoryTTLBounded[*storage.Entry](60*time.Second, 1024))
 
 	// 4. Setup key store via factory (no driver-specific logic here)
 	keyResult, err := adaptersigning.Open(context.Background(), cfg, ds, dataEncryptor, obs)
@@ -138,55 +175,91 @@ func runServe() error {
 		defer func() { _ = keyResult.Closer.Close() }()
 	}
 
-	jwksSvc := services.NewJWKSService(keyResult.Store, cfg.Signing.Algorithm, obs.WithComponent("jwks"))
+	jwksSvc := services.NewJWKSService(keyResult.Store, cache.NewMemory[*jose.JSONWebKeySet](), cfg.Signing.Algorithm, obs.WithComponent("jwks"))
 
 	// 5. Setup audit service
 	auditSvc := services.NewAuditService(ds.Audit(), obs.WithComponent("audit"))
 
 	// 6. Setup DCR mode (shared between DCR and CIMD services)
-	dcrMode := services.DCRMode{
-		Mode:              cfg.DCR.Mode,
-		ApprovedRedirects: cfg.DCR.ApprovedRedirects,
-	}
+	dcrModeProvider := static.NewDCRModeProvider(cfg.DCR.Mode, cfg.DCR.ApprovedRedirects)
 
 	// compute the runtime-enabled grant set once and feed it to
 	// every client-registration seam (CIMD, DCR, admin) so a client whose
 	// grant /oauth/token can't serve never lands as status=active.
 	enabledGrants := config.EnabledGrantTypes(cfg)
+	// One provider shared by every client-registration seam (CIMD, DCR, admin),
+	// resolved per request inside each service.
+	grantsProvider := static.NewEnabledGrantsProvider(enabledGrants)
+
+	// CIMD config provider — shared by the CIMD service and the discovery
+	// document (client_id_metadata_document_supported). Built unconditionally so
+	// discovery can resolve CIMD.Enabled even when the CIMD service is off.
+	cimdConfigProvider := static.NewCIMDConfigProvider(output.CIMDConfig{
+		Enabled:      cfg.CIMD.Enabled,
+		RequireHTTPS: cfg.CIMD.RequireHTTPS,
+		CacheTTL:     cfg.CIMD.CacheTTL,
+		FetchTimeout: cfg.CIMD.FetchTimeout,
+	})
 
 	// 6a. Setup CIMD service (if enabled)
 	// CIMD receives DCR mode to enforce admin_only/approved_redirects.
 	var cimdSvc *services.CIMDService
 	if cfg.CIMD.Enabled {
-		cimdFetcher := cimd.New(cfg.CIMD.RequireHTTPS, cfg.CIMD.CacheTTL, cfg.CIMD.FetchTimeout, obs.WithComponent("cimd"))
+		// The fetcher holds no policy knobs; the CIMDConfigProvider is the single
+		// source of truth for RequireHTTPS/CacheTTL/FetchTimeout (and Enabled),
+		// resolved per request inside the service.
+		cimdFetcher := cimd.New(obs.WithComponent("cimd"))
 		cimdSvc = services.NewCIMDService(
-			ds.Client(), cimdFetcher, dcrMode, obs.WithComponent("cimd-svc"),
-			services.WithCIMDEnabledGrants(enabledGrants),
+			ds.Client(), cimdFetcher, dcrModeProvider,
+			cimdConfigProvider,
+			obs.WithComponent("cimd-svc"),
+			services.WithCIMDEnabledGrants(grantsProvider),
 		)
 		obs.Logger.Info("CIMD support enabled", "dcr_mode", cfg.DCR.Mode)
 	}
 
 	// 6b. Setup DCR service.
 	dcrSvc := services.NewDCRService(
-		ds.Client(), dcrMode, obs.WithComponent("dcr"), auditSvc,
-		services.WithDCREnabledGrants(enabledGrants),
+		ds.Client(), dcrModeProvider, obs.WithComponent("dcr"), auditSvc,
+		services.WithDCREnabledGrants(grantsProvider),
 	)
 
 	// 7. Setup user auth service
 	authSvc := services.NewUserAuthService(ds.User(), obs.WithComponent("auth"), auditSvc)
 
 	// 7b. Setup OIDC federation (if enabled)
+	// OIDC config provider — built unconditionally so the admin system report can
+	// resolve OIDC enablement per request; the adapter/facade/route mounting below
+	// stay gated on cfg.OIDC.Enabled.
+	oidcConfig := static.NewOIDCConfigProvider(output.OIDCConfig{
+		Enabled:            cfg.OIDC.Enabled,
+		Issuer:             cfg.OIDC.Issuer,
+		ClientID:           cfg.OIDC.ClientID,
+		RedirectURI:        cfg.OIDC.RedirectURI,
+		Scopes:             cfg.OIDC.Scopes,
+		IncludeGroupsScope: cfg.OIDC.IncludeGroupsScope,
+		ConnectorID:        cfg.OIDC.ConnectorID,
+		ClientSecret:       []byte(cfg.OIDC.ClientSecret),
+		ClientSecretRef:    cfg.OIDC.ClientSecretRef,
+	})
+
 	var oidcFacade *services.OIDCFacade
 	if cfg.OIDC.Enabled {
-		oidcProvider, oidcErr := adapteroidc.New(
-			context.Background(),
-			cfg.OIDC.Issuer, cfg.OIDC.ClientID, cfg.OIDC.ClientSecret,
-			cfg.OIDC.Scopes,
-			cfg.OIDC.IncludeGroupsScope, cfg.OIDC.ConnectorID,
-			obs.WithComponent("oidc"),
-		)
-		if oidcErr != nil {
-			return fmt.Errorf("setup OIDC provider: %w", oidcErr)
+		// The OIDC client secret stays in its config form: whichever of the inline
+		// client_secret or the *_ref env-var name is set flows straight into the
+		// DTO, and the resolver resolves it JIT at use time. The two are mutually
+		// exclusive — config validation rejects setting both — so exactly one is
+		// populated and no precedence applies here. The inline-tolerant
+		// oidcConfigSecrets backend carries the inline value as plaintext at rest
+		// (the default — no encryptor); a substitute backend swaps in an
+		// encrypted store.
+		oidcConfigSecrets := static.NewConfigSecretBackendInline(cfg.LegacyOIDCSecretRef())
+		oidcProvider := adapteroidc.New(oidcConfig, oidcConfigSecrets, obs.WithComponent("oidc"))
+		// Validate the upstream OIDC configuration at startup (discovery check)
+		// so a misconfigured issuer fails fast here rather than as a 500 on the
+		// first login. It also warms the discovery cache.
+		if validateErr := oidcProvider.Validate(context.Background()); validateErr != nil {
+			return fmt.Errorf("setup OIDC provider: %w", validateErr)
 		}
 		oidcFacade = services.NewOIDCFacade(oidcProvider, ds.User(), obs.WithComponent("oidc-facade"), auditSvc)
 		obs.Logger.Info("OIDC federation enabled", "issuer", cfg.OIDC.Issuer, "display_name", cfg.OIDC.DisplayName)
@@ -209,6 +282,7 @@ func runServe() error {
 	seedBrokerProviderAdminSvc := services.NewBrokerProviderAdminService(
 		ds.BrokerProvider(),
 		obs.WithComponent("broker-provider-admin-seed"), auditSvc,
+		brokerConfigSecrets,
 	)
 
 	// Order matters: providers first so resource broker_provider_slug
@@ -292,13 +366,13 @@ func runServe() error {
 			return http.ErrUseLastResponse
 		},
 	}
-	if regErr := bpRegistry.Register(brokerprotooauth.New(bpHTTPClient, envSecretResolver{})); regErr != nil {
+	if regErr := bpRegistry.Register(brokerprotooauth.New(bpHTTPClient, brokerConfigSecrets)); regErr != nil {
 		return fmt.Errorf("register brokerproto/oauth adapter: %w", regErr)
 	}
-	if regErr := bpRegistry.Register(brokerprotoapikey.New(envSecretResolver{})); regErr != nil {
+	if regErr := bpRegistry.Register(brokerprotoapikey.New(brokerConfigSecrets)); regErr != nil {
 		return fmt.Errorf("register brokerproto/apikey adapter: %w", regErr)
 	}
-	if regErr := bpRegistry.Register(brokerprotoserviceaccount.New(bpHTTPClient, envSecretResolver{})); regErr != nil {
+	if regErr := bpRegistry.Register(brokerprotoserviceaccount.New(bpHTTPClient, brokerConfigSecrets)); regErr != nil {
 		return fmt.Errorf("register brokerproto/serviceaccount adapter: %w", regErr)
 	}
 
@@ -308,9 +382,21 @@ func runServe() error {
 		obs.WithComponent("broker-issuer"), auditSvc,
 	)
 
+	// OAuth config provider — shared by the authorize service (RequireScope),
+	// the introspection endpoint gate, and the discovery document
+	// (introspection_endpoint). IntrospectionEnabled is true because OSS always
+	// registers the introspection service (mirrors the prior deps.Introspect !=
+	// nil discovery condition).
+	oauthConfigProvider := static.NewOAuthConfigProvider(output.OAuthConfig{
+		RequireScope:         cfg.OAuth.RequireScope,
+		IntrospectionEnabled: true,
+	})
+
 	authzSvc := services.NewAuthorizeService(
 		ds.Client(), ds.Session(), ds.ConsentGrant(),
-		cimdSvc, resourceRegistry, cfg.OAuth.RequireScope, obs.WithComponent("authorize"),
+		cimdSvc, resourceRegistry,
+		oauthConfigProvider,
+		obs.WithComponent("authorize"),
 	)
 	if !cfg.OAuth.RequireScope {
 		obs.Logger.Warn(
@@ -335,16 +421,22 @@ func runServe() error {
 	// ExchangeCode and RefreshToken.  will also register MintIssuer
 	// into internal/issuer.Registry alongside BrokerIssuer for the
 	// TokenExchangeService dispatch path.
-	tokenCfg := services.TokenConfig{
+	// 10.5. issuerProvider is the indirection that lets the AS issuer URL
+	// vary per request (e.g. behind a reverse-proxy mount that rewrites
+	// the host header). The static adapter returns cfg.Server.Issuer for
+	// every call, so behavior is byte-identical to the previous release.
+	issuerProvider := static.NewIssuerProvider(cfg.Server.Issuer)
+
+	tokenConfigProvider := static.NewTokenConfigProvider(output.TokenConfig{
 		AccessTokenExpiry:  cfg.DCR.DefaultTokenExpiry,
 		RefreshTokenExpiry: cfg.DCR.DefaultRefreshExpiry,
-	}
+	})
 	mintIssuer := services.NewMintIssuer(
-		jwksSvc, ds.Issuance(), cfg.Server.Issuer, obs.WithComponent("mint-issuer"),
+		jwksSvc, ds.Issuance(), issuerProvider, obs.WithComponent("mint-issuer"),
 	)
 	tokenSvc := services.NewTokenService(
 		ds.Session(), ds.Token(), ds.Client(), ds.User(),
-		jwksSvc, mintIssuer, cfg.Server.Issuer, tokenCfg,
+		jwksSvc, mintIssuer, tokenConfigProvider,
 		obs.WithComponent("token"), auditSvc,
 		ds.Revocation(), resourceLister,
 	)
@@ -367,20 +459,27 @@ func runServe() error {
 	)
 
 	// 11. Setup revocation service
-	revokeSvc := services.NewRevocationService(ds.Token(), ds.Client(), ds.MachineToken(), jwksSvc, cfg.Server.Issuer, obs.WithComponent("revoke"), auditSvc, ds.Revocation())
+	revokeSvc := services.NewRevocationService(ds.Token(), ds.Client(), ds.MachineToken(), jwksSvc, issuerProvider, obs.WithComponent("revoke"), auditSvc, ds.Revocation())
 
 	// 11b. Setup introspection service (RFC 7662)
 	introspectSvc := services.NewIntrospectionService(
 		jwksSvc, ds.Revocation(), ds.MachineToken(), ds.Client(), ds.User(),
-		cfg.Server.Issuer, obs.WithComponent("introspect"), auditSvc,
+		issuerProvider, obs.WithComponent("introspect"), auditSvc,
 	)
+	// Lets a resource server introspect a token minted for it. Without this
+	// the ownership check admits only the token's issuing client.
+	introspectSvc.WithResourceRegistry(resourceRegistry)
 
 	// 11c. Setup client credentials service (if enabled)
+	ccConfigProvider := static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{
+		Enabled:     cfg.ClientCredentials.Enabled,
+		TokenExpiry: cfg.ClientCredentials.TokenExpiry,
+	})
 	var clientCredsSvc *services.ClientCredentialsService
 	if cfg.ClientCredentials.Enabled {
 		clientCredsSvc = services.NewClientCredentialsService(
 			ds.Client(), ds.MachineToken(), jwksSvc,
-			cfg.Server.Issuer, cfg.ClientCredentials.TokenExpiry,
+			issuerProvider, ccConfigProvider,
 			obs.WithComponent("client-credentials"), auditSvc,
 			resourceLister,
 		)
@@ -395,16 +494,18 @@ func runServe() error {
 	// 11d. Setup token exchange service (if enabled).  makes the
 	// registry + consent-grant store + Mint/Broker issuers mandatory
 	// constructor parameters; the legacy setters are gone.
+	txConfigProvider := static.NewTokenExchangeConfigProvider(output.TokenExchangeConfig{
+		Enabled:           cfg.TokenExchange.Enabled,
+		AllowSelfExchange: cfg.TokenExchange.AllowSelfExchange,
+		MaxChainDepth:     cfg.TokenExchange.MaxChainDepth,
+		TokenExpiry:       cfg.TokenExchange.TokenExpiry,
+	})
 	var tokenExchangeSvc *services.TokenExchangeService
 	if cfg.TokenExchange.Enabled {
 		tokenExchangeSvc = services.NewTokenExchangeService(
 			ds.Client(), ds.MachineToken(), jwksSvc, jwksSvc,
-			ds.Revocation(), cfg.Server.Issuer,
-			services.TokenExchangeConfig{
-				AllowSelfExchange: cfg.TokenExchange.AllowSelfExchange,
-				MaxChainDepth:     cfg.TokenExchange.MaxChainDepth,
-				TokenExpiry:       cfg.TokenExchange.TokenExpiry,
-			},
+			ds.Revocation(), issuerProvider,
+			txConfigProvider,
 			resourceRegistry, ds.ConsentGrant(), mintIssuer, brokerIssuer,
 			obs.WithComponent("token-exchange"), auditSvc,
 		)
@@ -429,25 +530,38 @@ func runServe() error {
 	}
 	// (jwt-bearer agent identity is wired after service creation in 11i)
 
-	// 11f. Enable JWKS agent listing (if configured).
+	// 11f. Wire JWKS agent listing via per-request AgentsConfigProvider.
+	// The provider gates listing on every request; the client store is always
+	// injected so it is available when the flag is enabled at runtime. The same
+	// provider drives the discovery document's authplane_agent_identity_supported
+	// (AgentIdentityEnabled=true preserves the previously hardcoded value).
+	agentsConfigProvider := static.NewAgentsConfigProvider(output.AgentsConfig{
+		EnableJWKSListing:    cfg.Agents.EnableJWKSListing,
+		AgentIdentityEnabled: true,
+	})
+	jwksSvc.WithAgentsConfig(agentsConfigProvider)
+	jwksSvc.WithAgentListing(ds.Client())
 	if cfg.Agents.EnableJWKSListing {
-		jwksSvc.WithAgentListing(ds.Client())
 		obs.Logger.Info("JWKS agent listing enabled")
 	}
 
 	// 11g. Enable DPoP proof-of-possession (RFC 9449) on token services.
+	// Built unconditionally so the discovery document can resolve
+	// dpop_signing_alg_values_supported from DPoP.Enabled; only wired into the
+	// token services when DPoP is actually enabled.
+	dpopProvider := static.NewDPoPConfigProvider(output.DPoPConfig{
+		Enabled:       cfg.DPoP.Enabled,
+		ProofLifetime: cfg.DPoP.ProofLifetime,
+		RequireNonce:  cfg.DPoP.RequireNonce,
+		NonceTTL:      cfg.DPoP.NonceTTL,
+	})
 	if cfg.DPoP.Enabled {
-		dpopCfg := services.DPoPConfig{
-			ProofLifetime: cfg.DPoP.ProofLifetime,
-			RequireNonce:  cfg.DPoP.RequireNonce,
-			NonceTTL:      cfg.DPoP.NonceTTL,
-		}
-		tokenSvc.WithDPoP(ds.DPoPNonce(), dpopCfg)
+		tokenSvc.WithDPoP(ds.DPoPNonce(), dpopProvider)
 		if clientCredsSvc != nil {
-			clientCredsSvc.WithDPoP(ds.DPoPNonce(), dpopCfg)
+			clientCredsSvc.WithDPoP(ds.DPoPNonce(), dpopProvider)
 		}
 		if tokenExchangeSvc != nil {
-			tokenExchangeSvc.WithDPoP(ds.DPoPNonce(), dpopCfg)
+			tokenExchangeSvc.WithDPoP(ds.DPoPNonce(), dpopProvider)
 		}
 		obs.Logger.Info("DPoP enabled",
 			"proof_lifetime", cfg.DPoP.ProofLifetime.String(),
@@ -465,10 +579,16 @@ func runServe() error {
 		if cacheCfg.TTL == 0 {
 			cacheCfg.TTL = 1 * time.Hour
 		}
-		xaaJWKSCache = idpjwks.New(ds.IDP(), cacheCfg, obs.WithComponent("idp-jwks"))
+
+		xaaJWKSCache = idpjwks.New(
+			ds.IDP(),
+			cache.NewMemory[*idpjwks.Entry](),
+			cacheCfg,
+			obs.WithComponent("idp-jwks"),
+		)
 		xaaIDPSvc = services.NewXAAIDPService(
 			ds.IDP(), xaaJWKSCache, idpjwks.DiscoverJWKSUri,
-			cfg.Server.Issuer, obs.WithComponent("xaa-idp"), auditSvc,
+			issuerProvider, obs.WithComponent("xaa-idp"), auditSvc,
 		)
 		obs.Logger.Info("XAA (Enterprise-Managed Authorization) enabled")
 	}
@@ -484,24 +604,34 @@ func runServe() error {
 		if maxAge == 0 {
 			maxAge = 5 * time.Minute
 		}
+		subjectMode := cfg.XAA.SubjectMode
+		if subjectMode == "" {
+			subjectMode = "auto_map"
+		}
 		jwtBearerSvc = services.NewJWTBearerService(
 			ds.IDP(), xaaJWKSCache, ds.AssertionJTI(),
 			ds.Client(), ds.MachineToken(), jwksSvc,
-			cfg.Server.Issuer, tokenExpiry, maxAge,
+			issuerProvider,
+			static.NewXAAConfigProvider(output.XAAConfig{
+				Enabled:         cfg.XAA.Enabled,
+				MaxAssertionAge: maxAge,
+				SubjectMode:     subjectMode,
+				JWKSCacheTTL:    cfg.XAA.JWKSCacheTTL,
+				RequireResource: cfg.XAA.RequireResource,
+				TokenExpiry:     tokenExpiry,
+			}),
 			obs.WithComponent("jwt-bearer"), auditSvc,
 			resourceLister,
 		)
 		// emit per-token issuance audit rows for the admin
 		// /admin/issuances list.
 		jwtBearerSvc.WithIssuanceAudit(ds.Issuance(), resourceRegistry)
-		// Enable DPoP on jwt-bearer if DPoP is configured.
+		// Enable DPoP on jwt-bearer if DPoP is configured. Gate on cfg.DPoP.Enabled
+		// (not dpopProvider != nil): dpopProvider is now always non-nil because the
+		// discovery document needs it to resolve DPoP.Enabled, so the old
+		// nil-means-disabled idiom no longer holds — match the other token services.
 		if cfg.DPoP.Enabled {
-			dpopCfg := services.DPoPConfig{
-				ProofLifetime: cfg.DPoP.ProofLifetime,
-				RequireNonce:  cfg.DPoP.RequireNonce,
-				NonceTTL:      cfg.DPoP.NonceTTL,
-			}
-			jwtBearerSvc.WithDPoP(ds.DPoPNonce(), dpopCfg)
+			jwtBearerSvc.WithDPoP(ds.DPoPNonce(), dpopProvider)
 		}
 		// Enable agent identity on jwt-bearer.
 		jwtBearerSvc.WithAgentIdentity(agentIdentitySvc)
@@ -527,12 +657,8 @@ func runServe() error {
 
 		// Wire policy + subject mapping into JWT Bearer service.
 		if jwtBearerSvc != nil {
-			subjectMode := cfg.XAA.SubjectMode
-			if subjectMode == "" {
-				subjectMode = "auto_map"
-			}
-			jwtBearerSvc.WithPolicy(xaaPolicySvc, subjectMappingSvc, subjectMode)
-			obs.Logger.Info("XAA policy engine enabled", "subject_mode", subjectMode)
+			jwtBearerSvc.WithPolicy(xaaPolicySvc, subjectMappingSvc)
+			obs.Logger.Info("XAA policy engine enabled")
 		}
 	}
 
@@ -543,7 +669,13 @@ func runServe() error {
 		services.WithMachineTokenStore(ds.MachineToken()),
 		services.WithRevocationStore(ds.Revocation()),
 		services.WithTransactionManager(ds.Transaction()),
-		services.WithEnabledGrants(enabledGrants),
+		services.WithEnabledGrants(grantsProvider),
+		// Wire the audit-feed lookback bound from cfg.Admin. An alternative
+		// provider may resolve it per request.
+		services.WithAuditQueryConfig(static.NewAuditQueryConfigProvider(output.AuditQueryConfig{
+			DefaultLookback: cfg.Admin.AuditDefaultLookback,
+			MaxLookback:     cfg.Admin.AuditMaxLookback,
+		})),
 	)
 
 	// 12b. Setup ConnectService — the user-facing /connect/{provider} flow
@@ -555,40 +687,62 @@ func runServe() error {
 		connectSvc = services.NewConnectService(
 			resourceRegistry, ds.Resource(), ds.BrokerProvider(), ds.BrokerGrant(), ds.ConnectPendingState(),
 			bpRegistry, dataEncryptor,
-			[]byte(cfg.Connect.StateSecret),
-			cfg.Server.Issuer,
-			cfg.Connect.RedirectBaseURL,
-			cfg.Connect.AllowedReturnURLs,
+			static.NewConnectStateConfigProvider([]byte(cfg.Connect.StateSecret)),
+			issuerProvider,
+			static.NewConnectConfigProvider(output.ConnectConfig{
+				AllowedReturnURLs: cfg.Connect.AllowedReturnURLs,
+				RedirectBaseURL:   cfg.Connect.RedirectBaseURL,
+			}),
 			obs.WithComponent("connect"), auditSvc,
 		)
+		if cfg.Connect.RedirectBaseURL == "" {
+			obs.Logger.Warn("connect.redirect_base_url is empty — falling back to issuer for upstream callback URLs")
+		}
 		obs.Logger.Info("upstream-connection support enabled")
 	}
 
+	if !cfg.OIDC.ShowLocalLogin && (!cfg.OIDC.Enabled || cfg.OIDC.DisplayName == "") {
+		obs.Logger.Warn("oidc.show_local_login=false with no IdP button (oidc.enabled=false or oidc.display_name empty): " +
+			"the login page offers no sign-in control; set oidc.display_name with oidc.enabled=true, " +
+			"or recover with the authserver admin CLI, which works directly against the datastore, or the admin API if it is enabled")
+	}
+
 	// 13. Create HTTP server
+	loginDisplay := static.NewLoginDisplayProvider(cfg.OIDC)
+	urlBuilder := static.NewURLBuilder()
+
+	// AS metadata discovery document assembler. Resolves every advertised
+	// capability per request from the static providers above; api/ may not
+	// import services/adapters, so it is built here and injected as a port.
+	asMetadataSvc := services.NewASMetadataService(
+		issuerProvider,
+		grantsProvider,
+		cimdConfigProvider,
+		dpopProvider,
+		oauthConfigProvider,
+		agentsConfigProvider,
+		resourceLister,
+		obs.WithComponent("as-metadata"),
+	)
+
 	deps := apipublic.Deps{
-		JWKS:       jwksSvc,
-		DCR:        dcrSvc,
-		Auth:       authSvc,
-		Authorize:  authzSvc,
-		Consent:    consentSvc,
-		Token:      tokenSvc,
-		Revoke:     revokeSvc,
-		Introspect: introspectSvc,
-		Health:     ds,
-		OIDC:       oidcFacade,
-		OIDCConfig: cfg.OIDC,
-		ResourceServers: func() []wellknown.ResourceEntry {
-			infos := resourceLister.List()
-			entries := make([]wellknown.ResourceEntry, len(infos))
-			for i, info := range infos {
-				entries[i] = wellknown.ResourceEntry{URI: info.URI, Scopes: info.Scopes}
-			}
-			return entries
-		},
-		SessionCfg:       cfg.Session,
-		RateLimitCfg:     cfg.RateLimit,
-		HasCIMD:          cimdSvc != nil,
-		HasAgentIdentity: true, // Agent identity always enabled (Authplane extension)
+		JWKS:          jwksSvc,
+		ASMetadata:    asMetadataSvc,
+		DCR:           dcrSvc,
+		Auth:          authSvc,
+		Authorize:     authzSvc,
+		Consent:       consentSvc,
+		Token:         tokenSvc,
+		Revoke:        revokeSvc,
+		Introspect:    introspectSvc,
+		OAuthConfig:   oauthConfigProvider,
+		Health:        ds,
+		OIDC:          oidcFacade,
+		LoginDisplay:  loginDisplay,
+		URLs:          urlBuilder,
+		SessionCookie: apipublic.SessionCookie{Name: cfg.Session.CookieName, Secure: cfg.Session.Secure},
+		RateLimitCfg:  cfg.RateLimit,
+		Audit:         auditSvc,
 	}
 	// Avoid typed-nil → interface assignment (Go nil interface gotcha).
 	if clientCredsSvc != nil {
@@ -602,20 +756,82 @@ func runServe() error {
 	}
 	if connectSvc != nil {
 		deps.Connect = connectSvc
-		deps.ConnectConsentBaseURL = cfg.Connect.RedirectBaseURL
 	}
-	// AS-side re-consent base for bound-B / bound-C consent_required errors
-	//. cfg.Server.Issuer is the canonical AS URL; the /authorize
-	// route lives at <issuer>/authorize.
-	deps.AuthorizeBaseURL = cfg.Server.Issuer
+	// IssuerProvider drives both consent_url flavors in OAuth
+	// consent_required errors: the broker upstream re-connect URL
+	// (/connect/<provider>, bound-D / bound-E) and the AS-side re-consent
+	// URL (/authorize?resource=…, bound-B / bound-C token-exchange flows).
+	// Reuses the same static issuer adapter the token/introspection/revoke
+	// services use, so the consent URLs share the issuer host.
+	//
+	// The AS-side flavor is byte-identical to before (it already derived
+	// from the issuer). The broker re-connect flavor previously used
+	// cfg.Connect.RedirectBaseURL: collapsing it onto the issuer is a no-op
+	// for every shipped config (redirect_base_url equals — or defaults to —
+	// server.issuer), but changes the consent_url host for an operator who
+	// sets the two differently. RedirectBaseURL still feeds the broker
+	// callback redirect_uri separately (see ConnectService wiring above).
+	deps.IssuerProvider = issuerProvider
+	// CORS allowed-origins provider (required by NewServer). The OSS default
+	// returns the boot cfg.Server.AllowedOrigins list on every call, so origin
+	// policy is byte-identical to the pre-seam server; an alternative provider
+	// may resolve the allowlist per request.
+	deps.CORSConfigProvider = static.NewCORSConfigProvider(cfg.Server.AllowedOrigins)
 	if cfg.DPoP.Enabled {
 		deps.DPoPNonce = ds.DPoPNonce()
 		deps.DPoPCfg = cfg.DPoP
 	}
-	// SessionMiddleware will look up userID in ds.User() to reject
-	// cookies whose user has been deleted. The user-store cache (applied at
-	// startup, see storage.WithUserCache below) keeps that lookup cheap.
+	// SessionMiddleware will look up userID in ds.User() to reject cookies
+	// naming a user who has been deleted OR disabled — /authorize and /consent
+	// have no user check of their own, so this is what makes a disable take
+	// effect on the front channel. The user-store cache applied above
+	// (storage.WithUserCache) keeps that lookup cheap.
 	deps.Users = ds.User()
+
+	// Resolve the effective session secret once, here, so the StateCodec and
+	// the SessionSecretProvider below are derived from the same bytes. When the
+	// operator left it unset (localhost-only path per cfg validation), fall back
+	// to a random ephemeral secret (sessions will not survive a restart).
+	sessionSecret := []byte(cfg.Session.Secret)
+	if len(sessionSecret) == 0 {
+		sessionSecret = make([]byte, 32)
+		if _, err := rand.Read(sessionSecret); err != nil {
+			panic("crypto/rand: " + err.Error())
+		}
+		obs.Logger.Warn("session.secret not configured - using random ephemeral secret (sessions will not survive restarts)")
+	}
+
+	// Construct the default OIDC state codec UNCONDITIONALLY. The OIDC
+	// flow provider may be non-nil even when cfg.OIDC.Enabled is false
+	// (typed-nil interface gotcha at the OIDC: assignment), and the
+	// nil-guard in RegisterOIDCRoutes panics regardless of upstream
+	// config. The codec key is derived from the session secret with
+	// purpose "oidc-state" (matching the prior in-place derivation in
+	// RegisterOIDCRoutes).
+	stateConfig := static.NewStateCodecConfigProvider(shared.DeriveKey(sessionSecret, "oidc-state"))
+	deps.StateCodec = static.NewStateCodec(stateConfig)
+
+	// Wire the default OIDC state-cookie TTL provider from cfg.OAuth.StateMaxAge.
+	// This governs both the state cookie's Max-Age attribute and the callback
+	// freshness window; an alternative provider may resolve it per request.
+	deps.OIDCStateConfigProvider = static.NewOIDCStateConfigProvider(output.OIDCStateConfig{
+		MaxAge: cfg.OAuth.StateMaxAge,
+	})
+
+	// Wire the default session-cookie secret provider from the same resolved
+	// secret. An alternative provider can be substituted here (per deployment).
+	deps.SessionSecretProvider = static.NewSessionSecretProvider(sessionSecret)
+
+	// Wire the default session-cookie policy provider from cfg.Session. The OSS
+	// default returns the boot policy on every call (byte-identical to the
+	// pre-seam server); an alternative provider may resolve policy per request.
+	deps.SessionConfigProvider = static.NewSessionConfigProvider(output.SessionConfig{
+		MaxAge:     cfg.Session.MaxAge,
+		Secure:     cfg.Session.Secure,
+		SameSite:   shared.ParseSameSite(cfg.Session.SameSite),
+		FailClosed: cfg.Session.FailClosed,
+	})
+
 	srv := apipublic.NewServer(context.Background(), cfg.Server, deps, obs.WithComponent("http"))
 
 	// 14. Start admin server (if enabled)
@@ -629,21 +845,16 @@ func runServe() error {
 			KeyStoreDriver:   cfg.Signing.KeyStore,
 			EncryptionDriver: cfg.DataEncryption.Driver,
 			SigningAlgorithm: cfg.Signing.Algorithm,
-			Issuer:           cfg.Server.Issuer,
+			RateLimitEnabled: cfg.RateLimit.Enabled,
 			Audit:            auditSvc,
 
-			ClientCredentialsEnabled: cfg.ClientCredentials.Enabled,
-			DPoPEnabled:              cfg.DPoP.Enabled,
-			DPoPNonceTTL:             cfg.DPoP.NonceTTL.String(),
-			DPoPRequireNonce:         cfg.DPoP.RequireNonce,
-			TokenExchangeEnabled:     cfg.TokenExchange.Enabled,
-			TokenExchangeMaxChain:    cfg.TokenExchange.MaxChainDepth,
-			AgentsEnabled:            true,
-			AgentsJWKSListing:        cfg.Agents.EnableJWKSListing,
-			OIDCEnabled:              cfg.OIDC.Enabled,
-			DCRMode:                  cfg.DCR.Mode,
-			RateLimitEnabled:         cfg.RateLimit.Enabled,
-			XAAEnabled:               cfg.XAA.Enabled,
+			Issuer:            issuerProvider,
+			DPoP:              dpopProvider,
+			DCRMode:           dcrModeProvider,
+			Agents:            agentsConfigProvider,
+			ClientCredentials: ccConfigProvider,
+			TokenExchange:     txConfigProvider,
+			OIDC:              oidcConfig,
 		}
 
 		keysDeps := &apiadmin.KeysDeps{
@@ -655,8 +866,19 @@ func runServe() error {
 		if persistedMode, err := ds.RuntimeSettings().Get(context.Background(), "dcr_mode"); err != nil {
 			obs.Logger.Warn("failed to load persisted DCR mode", "error", err)
 		} else if persistedMode != "" {
-			dcrSvc.SetMode(persistedMode)
-			obs.Logger.Info("restored persisted DCR mode", "mode", persistedMode)
+			// Defense in depth: the admin endpoint validates writes, but never
+			// restore an unrecognized persisted value unchecked — an invalid mode
+			// would skew enforcement (DCR rejects all, CIMD would otherwise open).
+			switch persistedMode {
+			case "open", "approved_redirects", "admin_only":
+				if err := dcrSvc.SetMode(context.Background(), persistedMode); err != nil {
+					obs.Logger.Error("failed to set persisted DCR mode", "error", err)
+				} else {
+					obs.Logger.Info("restored persisted DCR mode", "mode", persistedMode)
+				}
+			default:
+				obs.Logger.Error("ignoring invalid persisted DCR mode", "mode", persistedMode)
+			}
 		}
 
 		dcrDeps := &apiadmin.DCRDeps{
@@ -671,6 +893,7 @@ func runServe() error {
 				IDP:            xaaIDPSvc,
 				Policy:         xaaPolicySvc,
 				SubjectMapping: subjectMappingSvc,
+				Config:         static.NewXAAConfigProvider(output.XAAConfig{Enabled: cfg.XAA.Enabled}),
 			}
 		}
 
@@ -695,6 +918,7 @@ func runServe() error {
 		brokerProviderAdminSvc := services.NewBrokerProviderAdminService(
 			ds.BrokerProvider(),
 			obs.WithComponent("broker-provider-admin"), auditSvc,
+			brokerConfigSecrets,
 		)
 		brokerProviderAdminDeps := &apiadmin.BrokerProviderAdminDeps{BrokerProviders: brokerProviderAdminSvc}
 
@@ -714,7 +938,8 @@ func runServe() error {
 		)
 		issuanceAdminDeps := &apiadmin.IssuanceAdminDeps{Issuances: issuanceAdminSvc}
 
-		adminSrv = apiadmin.NewServer(context.Background(), cfg.Admin, adminSvc, obs.WithComponent("admin-http"), apiadmin.OptionalDeps{
+		var aerr error
+		adminSrv, aerr = apiadmin.NewServer(context.Background(), cfg.Admin, adminSvc, obs.WithComponent("admin-http"), apiadmin.OptionalDeps{
 			System:          systemDeps,
 			Keys:            keysDeps,
 			DCR:             dcrDeps,
@@ -725,6 +950,9 @@ func runServe() error {
 			Issuances:       issuanceAdminDeps,
 			Fronting:        frontingAdminDeps,
 		})
+		if aerr != nil {
+			return fmt.Errorf("admin server: %w", aerr)
+		}
 	}
 
 	// 15. Run with graceful shutdown
@@ -869,19 +1097,6 @@ func resourceConfigUnifiedToDomain(r config.ResourceConfigUnified, slugToID map[
 	}, nil
 }
 
-// envSecretResolver implements the SecretResolver surface of all three
-// brokerproto adapters (oauth, apikey, service_account) by looking up the
-// named environment variable. Each adapter validates the env-var name
-// against brokerproto.ValidEnvVarName before calling Resolve, so this
-// implementation does not re-validate. Returns the empty string when the
-// variable is unset; the adapter treats that as a missing-secret error.
-type envSecretResolver struct{}
-
-// Resolve looks up envVarName in the process environment.
-func (envSecretResolver) Resolve(envVarName string) (string, error) {
-	return os.Getenv(envVarName), nil
-}
-
 // warnIfCORSDisabled emits a one-line startup warning when CORS is disabled but
 // browser-facing OAuth endpoints are served (which is always — /oauth/authorize,
 // /oauth/token, /oauth/introspect, and /oauth/revoke are unconditional). The
@@ -902,4 +1117,41 @@ func warnIfCORSDisabled(logger *slog.Logger, allowedOrigins []string) {
 			"For local dev set AUTHPLANE_SERVER_ALLOWED_ORIGINS=*; " +
 			"for production set an explicit origin allowlist.",
 	)
+}
+
+// probeSecretRefs verifies that the OIDC client secret configured by an env-var
+// reference (oidc.client_secret_ref) has that env var set and non-empty, so a
+// missing one fails fast at boot rather than at first login — restoring the
+// boot-time check validate.go performed eagerly before OIDC secret resolution
+// moved to the token exchange. It does NOT decrypt.
+//
+// Broker-provider *_ref secrets are intentionally NOT probed: they resolve
+// lazily at vend (as they always have), and runtime admin-created providers
+// can't be probed at boot, so a boot probe there would be an inconsistent,
+// config-only guarantee.
+func probeSecretRefs(cfg *config.Config) error {
+	ref := cfg.OIDC.ClientSecretRef
+	if ref == "" {
+		return nil
+	}
+	// A ref carried over from the deprecated client_secret_env key predates the
+	// naming rule (v0.1.x documented OIDC_CLIENT_SECRET and the like), so it is
+	// probed for presence but exempt from the shape check. The boot-time
+	// deprecation warning tells the operator to rename it.
+	if legacy := cfg.LegacyOIDCSecretRef(); legacy == ref {
+		if os.Getenv(ref) == "" {
+			return fmt.Errorf("oidc.client_secret_env: env var %s is not set or empty", ref)
+		}
+		return nil
+	}
+	if !brokerproto.ValidEnvVarName(ref) {
+		return fmt.Errorf(
+			"oidc.client_secret_ref: %q is not an allowed secret env-var name (must use the CONNECTOR_* or AUTHPLANE_VAULT_* prefix required for every *_ref secret)",
+			ref,
+		)
+	}
+	if os.Getenv(ref) == "" {
+		return fmt.Errorf("oidc.client_secret_ref: env var %s is not set or empty", ref)
+	}
+	return nil
 }

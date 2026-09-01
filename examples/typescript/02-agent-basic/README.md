@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 56 lines · SDK: ts-sdk 0.2.0**
+**Auth-specific code: 5 lines · Total example: 56 lines · SDK: ts-sdk 0.3.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP
@@ -38,7 +38,7 @@ that needs to talk to the other resource.
 |---|---|
 | **Time to run** | ~2 minutes (after tier 01 is already up) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, Node.js 22+ (only if you run outside Docker), tier 01 running |
-| **SDK** | `@authplane/sdk` 0.2.0 (npm) |
+| **SDK** | `@authplane/sdk` 0.3.0 (npm) |
 | **Runtime** | Node.js 22 + `tsx`, plain `fetch` against the MCP streamable-http transport |
 
 ## Run it in 3 commands

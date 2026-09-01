@@ -1,6 +1,6 @@
 package wellknown
 
-// healthResponse is the JSON body for GET /health and GET /ready.
+// healthResponse is the JSON body for GET /livez, GET /health and GET /ready.
 type healthResponse struct {
 	Status string `json:"status"`
 	Time   string `json:"time"`
@@ -22,7 +22,7 @@ type asMetadata struct {
 	IntrospectionEndpointAuthMethods  []string `json:"introspection_endpoint_auth_methods_supported,omitempty"`
 	RevocationEndpointAuthMethods     []string `json:"revocation_endpoint_auth_methods_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
-	ScopesSupported                   []string `json:"scopes_supported"`
+	ScopesSupported                   []string `json:"scopes_supported,omitempty"`
 	ResourceIndicatorsSupported       bool     `json:"resource_indicators_supported"`
 	ClientIDMetadataDocumentSupported bool     `json:"client_id_metadata_document_supported,omitempty"`
 	DPoPSigningAlgValuesSupported     []string `json:"dpop_signing_alg_values_supported,omitempty"`

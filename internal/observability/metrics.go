@@ -22,14 +22,34 @@ import (
 // Metrics holds all pre-registered application metric instruments.
 type Metrics struct {
 	// Counters
-	TokensIssued      metric.Int64Counter
-	TokensRefreshed   metric.Int64Counter
-	TokensRevoked     metric.Int64Counter
-	AuthDenied        metric.Int64Counter
-	ClientsRegistered metric.Int64Counter
-	ConsentDecisions  metric.Int64Counter
-	LoginAttempts     metric.Int64Counter
-	RefreshTokenReuse metric.Int64Counter
+	TokensIssued    metric.Int64Counter
+	TokensRefreshed metric.Int64Counter
+	TokensRevoked   metric.Int64Counter
+	AuthDenied      metric.Int64Counter
+	// AuditEventsDropped counts audit events that could not be persisted.
+	// Any non-zero rate means the audit log is no longer a complete record of
+	// what the server did — alert on it.
+	AuditEventsDropped metric.Int64Counter
+	ClientsRegistered  metric.Int64Counter
+	ConsentDecisions   metric.Int64Counter
+	LoginAttempts      metric.Int64Counter
+	RefreshTokenReuse  metric.Int64Counter
+	// AuthCodeReuse counts authorization-code replays. verifier="valid" means
+	// the replayer proved PKCE AND presented the original client_id, so
+	// revocation was attempted; "invalid" covers every other case — a wrong
+	// verifier, a mismatched client_id, or both — where the replay could not
+	// have been redeemed and nothing was revoked. The label is on the CAUSE,
+	// not the outcome — revocation can fail on its own, and that is what
+	// TokensRevoked / RevocationFailures report.
+	AuthCodeReuse metric.Int64Counter
+	// RevocationFailures counts token revocations where one half failed.
+	// path: the detection that failed — "reuse" (refresh-token reuse) or
+	// "code_reuse" (authorization-code reuse). half="family": nothing
+	// revoked, the family is still live (page). half="jti": access-token
+	// JTIs not denylisted — bounded by exp (warn). Each half reports only
+	// itself: one detection can emit both, so half="jti" says nothing about
+	// whether the family was revoked.
+	RevocationFailures metric.Int64Counter
 
 	// Histograms
 	TokenIssuanceDuration metric.Float64Histogram
@@ -122,6 +142,11 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	); err != nil {
 		return nil, err
 	}
+	if m.AuditEventsDropped, err = meter.Int64Counter("authserver_audit_events_dropped_total",
+		metric.WithDescription("Audit events that could not be persisted (best-effort path)"),
+	); err != nil {
+		return nil, err
+	}
 	if m.ClientsRegistered, err = meter.Int64Counter("authserver_clients_registered_total",
 		metric.WithDescription("Total clients registered"),
 	); err != nil {
@@ -139,6 +164,16 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 	if m.RefreshTokenReuse, err = meter.Int64Counter("authserver_refresh_token_reuse_total",
 		metric.WithDescription("Total refresh token reuse detections"),
+	); err != nil {
+		return nil, err
+	}
+	if m.AuthCodeReuse, err = meter.Int64Counter("authserver_auth_code_reuse_total",
+		metric.WithDescription("Authorization code replay detections (verifier=valid: PKCE and client_id both proved, revocation attempted; verifier=invalid: not redeemable, nothing revoked)"),
+	); err != nil {
+		return nil, err
+	}
+	if m.RevocationFailures, err = meter.Int64Counter("authserver_revocation_failures_total",
+		metric.WithDescription("Token revocations where a half failed (path: code path; half=family: nothing revoked, family still live; half=jti: access-token JTIs not denylisted)"),
 	); err != nil {
 		return nil, err
 	}

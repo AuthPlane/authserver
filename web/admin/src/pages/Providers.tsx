@@ -33,17 +33,20 @@ const PROTOCOL_OPTIONS: Protocol[] = ["oauth", "api_key", "service_account"];
 const PROTOCOL_SAMPLES: Record<Protocol, unknown> = {
   oauth: {
     client_id: "your-oauth-client-id",
-    client_secret_env: "PROVIDER_GITHUB_CLIENT_SECRET",
+    client_secret_ref: "CONNECTOR_GITHUB_CLIENT_SECRET",
     authorize_url: "https://github.com/login/oauth/authorize",
     token_url: "https://github.com/login/oauth/access_token",
-    response_format: "form_url_encoded",
+    response_format: "standard",
   },
   api_key: {
-    api_key_env: "PROVIDER_LINEAR_API_KEY",
-    base_url: "https://api.linear.app/graphql",
+    header_name: "Authorization",
+    header_prefix: "Bearer",
+    issuance_instructions_url: "https://linear.app/settings/api",
   },
   service_account: {
-    credentials_env: "PROVIDER_GCP_SA_JSON",
+    token_url: "https://oauth2.googleapis.com/token",
+    sa_email: "svc@your-project.iam.gserviceaccount.com",
+    sa_key_ref: "CONNECTOR_GCP_SA_KEY",
     scopes: ["https://www.googleapis.com/auth/cloud-platform"],
   },
 };
@@ -388,7 +391,7 @@ export default function Providers() {
           <div style={{ marginTop: 20 }}>
             <InfoBox color={C.blue}>
               Secrets are NOT stored in <Mono>config_data</Mono>. Reference an environment variable (e.g.{" "}
-              <Mono>client_secret_env</Mono>) and set the value at the deployment level.
+              <Mono>client_secret_ref</Mono>) and set the value at the deployment level.
             </InfoBox>
           </div>
 

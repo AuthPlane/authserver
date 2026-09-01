@@ -88,7 +88,7 @@ func newAdminTestServerWithAudit(t *testing.T) *auditingAdminEnv {
 		services.WithRevocationStore(stores.Revocation),
 	)
 
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  testAPIKey,

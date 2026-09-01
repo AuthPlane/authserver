@@ -26,13 +26,18 @@ const (
 // configuration to the authorize URL. Reserved OAuth keys are dropped at
 // build time as defense-in-depth (see scope_mapping.go callers).
 type configData struct {
-	ClientID        string            `json:"client_id"`
-	ClientSecretEnv string            `json:"client_secret_env"`
-	AuthorizeURL    string            `json:"authorize_url"`
-	TokenURL        string            `json:"token_url"`
-	RevokeURL       string            `json:"revoke_url,omitempty"`
-	ResponseFormat  string            `json:"response_format,omitempty"`
-	ExtraAuthParams map[string]string `json:"extra_auth_params,omitempty"`
+	ClientID        string `json:"client_id"`
+	ClientSecretRef string `json:"client_secret_ref"`
+	// ClientSecretEnvLegacy carries the pre-v0.1.2 spelling of ClientSecretRef.
+	// Rows written by v0.1.x are still in operators' databases and no migration
+	// rewrites config_data, so the read path folds the old key forward (see
+	// parseConfigData). Never written back: Encode emits client_secret_ref only.
+	ClientSecretEnvLegacy string            `json:"client_secret_env,omitempty"`
+	AuthorizeURL          string            `json:"authorize_url"`
+	TokenURL              string            `json:"token_url"`
+	RevokeURL             string            `json:"revoke_url,omitempty"`
+	ResponseFormat        string            `json:"response_format,omitempty"`
+	ExtraAuthParams       map[string]string `json:"extra_auth_params,omitempty"`
 }
 
 // parseConfigData unmarshals the raw bytes from broker_providers.config_data
@@ -47,6 +52,12 @@ func parseConfigData(raw []byte) (configData, error) {
 	var cfg configData
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return configData{}, fmt.Errorf("oauth config_data: %w", err)
+	}
+	// Fold the pre-v0.1.2 key forward so providers created by v0.1.x keep
+	// vending after an upgrade instead of failing at first use with an empty
+	// client_secret_ref. The current key wins if a row somehow carries both.
+	if cfg.ClientSecretRef == "" && cfg.ClientSecretEnvLegacy != "" {
+		cfg.ClientSecretRef = cfg.ClientSecretEnvLegacy
 	}
 	if cfg.ClientID == "" {
 		return configData{}, fmt.Errorf("oauth config_data: client_id is required")

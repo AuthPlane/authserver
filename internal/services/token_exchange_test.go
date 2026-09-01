@@ -13,6 +13,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
@@ -51,7 +52,11 @@ func (teTestEncryptor) Decrypt(_ context.Context, ciphertext []byte, _ string) (
 }
 func (teTestEncryptor) DriverName() string { return "te-test" }
 
-func newTETestSetup(t *testing.T, cfg services.TokenExchangeConfig) *teTestSetup {
+func newTETestSetup(t *testing.T, cfg output.TokenExchangeConfig) *teTestSetup {
+	return newTETestSetupWithProvider(t, static.NewTokenExchangeConfigProvider(cfg))
+}
+
+func newTETestSetupWithProvider(t *testing.T, teConfig output.TokenExchangeConfigProvider) *teTestSetup {
 	t.Helper()
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
@@ -62,14 +67,14 @@ func newTETestSetup(t *testing.T, cfg services.TokenExchangeConfig) *teTestSetup
 		t.Fatalf("keyfile: %v", err)
 	}
 
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
 	// : registry-or-bust. Wire a live ResourceRegistry, MintIssuer,
 	// and BrokerIssuer over the same test stores so non-dispatch tests
 	// (which call req.Resource == "") still construct cleanly.
 	registry := services.NewResourceRegistry(stores.Resource, stores.BrokerProvider, obs)
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, teIssuer, obs)
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest(teIssuer), obs)
 	bpReg := brokerproto.NewRegistry()
 	enc := &teTestEncryptor{}
 	brokerIssuer := services.NewBrokerIssuer(stores.BrokerGrant, enc, stores.Issuance, bpReg, obs, auditSvc)
@@ -80,8 +85,8 @@ func newTETestSetup(t *testing.T, cfg services.TokenExchangeConfig) *teTestSetup
 		jwksSvc,
 		jwksSvc,
 		stores.Revocation,
-		teIssuer,
-		cfg,
+		staticIssuerForTest(teIssuer),
+		teConfig,
 		registry,
 		stores.ConsentGrant,
 		mintIssuer,
@@ -205,11 +210,40 @@ func parseClaims(t *testing.T, accessToken string) map[string]any {
 	return claims
 }
 
+// failingTEConfigProvider always errors, to assert token-exchange issuance
+// fails closed on a config-resolution error rather than proceeding.
+type failingTEConfigProvider struct{ err error }
+
+func (p failingTEConfigProvider) Config(context.Context) (output.TokenExchangeConfig, error) {
+	return output.TokenExchangeConfig{}, p.err
+}
+
+func TestTokenExchange_ConfigError_FailsClosed(t *testing.T) {
+	wantErr := errors.New("token exchange config unavailable")
+	setup := newTETestSetupWithProvider(t, failingTEConfigProvider{err: wantErr})
+
+	subClient, subSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+	subjectToken := setup.mintSubjectToken(t, defaultSubjectClaims(subClient.ID))
+
+	resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+		SubjectToken:     subjectToken,
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         subClient.ID,
+		ClientSecret:     subSecret,
+	})
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected error wrapping %v on config failure, got %v", wantErr, err)
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response on config failure, got %+v", resp)
+	}
+}
+
 // -------------------------------------------------------------------
 // Test 1: Impersonation — no actor token, no act claim in output
 // -------------------------------------------------------------------
 func TestTokenExchange_Impersonation_NoActClaim(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -249,7 +283,7 @@ func TestTokenExchange_Impersonation_NoActClaim(t *testing.T) {
 // Test 2: Delegation — actor token present, builds act claim
 // -------------------------------------------------------------------
 func TestTokenExchange_Delegation_BuildsActClaim(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -296,7 +330,7 @@ func TestTokenExchange_Delegation_BuildsActClaim(t *testing.T) {
 // Test 3: Multi-hop — chain nests existing act claim
 // -------------------------------------------------------------------
 func TestTokenExchange_MultiHop_ChainNested(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -352,7 +386,7 @@ func TestTokenExchange_MultiHop_ChainNested(t *testing.T) {
 // Test 4: Scope narrowing — subset allowed
 // -------------------------------------------------------------------
 func TestTokenExchange_ScopeNarrowing_SubsetAllowed(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -382,7 +416,7 @@ func TestTokenExchange_ScopeNarrowing_SubsetAllowed(t *testing.T) {
 // Test 5: Scope escalation — rejected
 // -------------------------------------------------------------------
 func TestTokenExchange_ScopeEscalation_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -409,7 +443,7 @@ func TestTokenExchange_ScopeEscalation_Rejected(t *testing.T) {
 // Test 6: Expired subject token — rejected
 // -------------------------------------------------------------------
 func TestTokenExchange_ExpiredSubjectToken_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -437,7 +471,7 @@ func TestTokenExchange_ExpiredSubjectToken_Rejected(t *testing.T) {
 // Test 7: Foreign AS issuer — rejected
 // -------------------------------------------------------------------
 func TestTokenExchange_ForeignASIssuer_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -463,7 +497,7 @@ func TestTokenExchange_ForeignASIssuer_Rejected(t *testing.T) {
 // Test 8: Self-exchange — allowed when configured
 // -------------------------------------------------------------------
 func TestTokenExchange_SelfExchange_Allowed(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -496,7 +530,7 @@ func TestTokenExchange_SelfExchange_Allowed(t *testing.T) {
 // Test 9: Cross-client may_act — allowed
 // -------------------------------------------------------------------
 func TestTokenExchange_CrossClient_MayAct_Allowed(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: false, // self-exchange disabled
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -529,7 +563,7 @@ func TestTokenExchange_CrossClient_MayAct_Allowed(t *testing.T) {
 // Test 10: Cross-client not authorized — rejected
 // -------------------------------------------------------------------
 func TestTokenExchange_CrossClient_NotAuthorized_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: false,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -559,7 +593,7 @@ func TestTokenExchange_CrossClient_NotAuthorized_Rejected(t *testing.T) {
 // Test 12: Chain depth limit — enforced
 // -------------------------------------------------------------------
 func TestTokenExchange_ChainDepthLimit_Enforced(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     2, // Depth limit = 2
 		TokenExpiry:       15 * time.Minute,
@@ -598,7 +632,7 @@ func TestTokenExchange_ChainDepthLimit_Enforced(t *testing.T) {
 // Prevents laundering delegation chain via self-exchange omitting actor_token.
 // -------------------------------------------------------------------
 func TestTokenExchange_ChainDepthLimit_EnforcedWithoutActorToken(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     1,
 		TokenExpiry:       15 * time.Minute,
@@ -628,7 +662,7 @@ func TestTokenExchange_ChainDepthLimit_EnforcedWithoutActorToken(t *testing.T) {
 // Test 12c: Self-exchange with delegated subject preserves act claim
 // -------------------------------------------------------------------
 func TestTokenExchange_SelfExchangeWithDelegatedSubject_PreservesActClaim(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -664,7 +698,7 @@ func TestTokenExchange_SelfExchangeWithDelegatedSubject_PreservesActClaim(t *tes
 // Test 13: DPoP-bound subject token — propagates cnf
 // -------------------------------------------------------------------
 func TestTokenExchange_DPoPBoundSubject_PropagatesCNF(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -709,7 +743,7 @@ var _ = json.RawMessage{}
 // -------------------------------------------------------------------
 
 // newTETestSetupWithResources creates a token exchange test setup with resource-aware scope validation.
-func newTETestSetupWithResources(t *testing.T, cfg services.TokenExchangeConfig, resources []services.ResourceInfo) *teTestSetup {
+func newTETestSetupWithResources(t *testing.T, cfg output.TokenExchangeConfig, resources []services.ResourceInfo) *teTestSetup {
 	t.Helper()
 	setup := newTETestSetup(t, cfg)
 	// Enable resource-aware scope validation using the configured resources and the scope store.
@@ -730,7 +764,7 @@ func TestTokenExchange_NoResource_SubsetCheckStillWorks(t *testing.T) {
 	resources := []services.ResourceInfo{
 		{URI: "https://api.target.com", Scopes: []string{"admin"}},
 	}
-	setup := newTETestSetupWithResources(t, services.TokenExchangeConfig{
+	setup := newTETestSetupWithResources(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -774,7 +808,7 @@ func TestTokenExchange_NoResource_SubsetCheckStillWorks(t *testing.T) {
 }
 
 func TestTokenExchange_SubjectTokenIssuerValidation(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -803,7 +837,7 @@ func TestTokenExchange_SubjectTokenIssuerValidation(t *testing.T) {
 }
 
 func TestTokenExchange_ResourceScopedSubjectToken_Accepted(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -833,7 +867,7 @@ func TestTokenExchange_ResourceScopedSubjectToken_Accepted(t *testing.T) {
 }
 
 func TestTokenExchange_MissingSubjectToken(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -861,7 +895,7 @@ func TestTokenExchange_MissingSubjectToken(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_EmptyClientID_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -882,7 +916,7 @@ func TestTokenExchange_EmptyClientID_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_EmptyClientSecret_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -903,7 +937,7 @@ func TestTokenExchange_EmptyClientSecret_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_WrongClientSecret_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -924,7 +958,7 @@ func TestTokenExchange_WrongClientSecret_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_SuspendedClient_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -952,7 +986,7 @@ func TestTokenExchange_SuspendedClient_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_PublicClient_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -993,7 +1027,7 @@ func TestTokenExchange_PublicClient_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_ClientNotFound_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1018,7 +1052,7 @@ func TestTokenExchange_ClientNotFound_Rejected(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_ClientWithoutTokenExchangeGrant_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1045,7 +1079,7 @@ func TestTokenExchange_ClientWithoutTokenExchangeGrant_Rejected(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_InvalidSubjectTokenType_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1066,7 +1100,7 @@ func TestTokenExchange_InvalidSubjectTokenType_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_EmptySubjectTokenType_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1087,7 +1121,7 @@ func TestTokenExchange_EmptySubjectTokenType_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_RefreshTokenType_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1112,7 +1146,7 @@ func TestTokenExchange_RefreshTokenType_Rejected(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_ExpiredActorToken_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1147,7 +1181,7 @@ func TestTokenExchange_ExpiredActorToken_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_MalformedActorToken_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1174,7 +1208,7 @@ func TestTokenExchange_MalformedActorToken_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_ActorTokenDifferentIssuer_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1207,7 +1241,7 @@ func TestTokenExchange_ActorTokenDifferentIssuer_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_InvalidActorTokenType_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1242,7 +1276,7 @@ func TestTokenExchange_InvalidActorTokenType_Rejected(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_RevokedMachineSubjectToken_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1282,7 +1316,7 @@ func TestTokenExchange_RevokedMachineSubjectToken_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_RevokedUserSubjectToken_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1340,7 +1374,7 @@ func TestTokenExchange_RevokedUserSubjectToken_Rejected(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_EmptyScope_InheritsSubjectTokenScope(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1367,7 +1401,7 @@ func TestTokenExchange_EmptyScope_InheritsSubjectTokenScope(t *testing.T) {
 }
 
 func TestTokenExchange_NoResource_InheritsSubjectAudience(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1405,7 +1439,7 @@ func TestTokenExchange_NoResource_InheritsSubjectAudience(t *testing.T) {
 // an empty audience. The code path exists as defense-in-depth.
 
 func TestTokenExchange_SingleScopeSubset_Accepted(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1436,7 +1470,7 @@ func TestTokenExchange_SingleScopeSubset_Accepted(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_SelfExchange_Denied(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: false, // explicitly disabled
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1458,7 +1492,7 @@ func TestTokenExchange_SelfExchange_Denied(t *testing.T) {
 }
 
 func TestTokenExchange_MayAct_WrongActorSub_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: false,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1485,7 +1519,7 @@ func TestTokenExchange_MayAct_WrongActorSub_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_MayAct_MalformedField_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: false,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1516,7 +1550,7 @@ func TestTokenExchange_MayAct_MalformedField_Rejected(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_MalformedSubjectToken_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1536,7 +1570,7 @@ func TestTokenExchange_MalformedSubjectToken_Rejected(t *testing.T) {
 }
 
 func TestTokenExchange_SubjectTokenSignedByDifferentKey_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1571,7 +1605,7 @@ func TestTokenExchange_SubjectTokenSignedByDifferentKey_Rejected(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_DPoPProof_OverridesSubjectCnf(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1610,7 +1644,7 @@ func TestTokenExchange_DPoPProof_OverridesSubjectCnf(t *testing.T) {
 // ===================================================================
 
 func TestTokenExchange_AuditEvent_RecordedOnSuccess(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1645,7 +1679,7 @@ func TestTokenExchange_AuditEvent_RecordedOnSuccess(t *testing.T) {
 }
 
 func TestTokenExchange_AuditEvent_RecordedOnDenial(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: false, // self-exchange disabled to trigger denial
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1695,7 +1729,7 @@ func (s *teTestSetup) setClientAgent(t *testing.T, clientID string, isAgent bool
 }
 
 func TestTokenExchange_StampsActorTypeAgent_ForAgentClient(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1739,7 +1773,7 @@ func TestTokenExchange_StampsActorTypeAgent_ForAgentClient(t *testing.T) {
 }
 
 func TestTokenExchange_StampsActorTypeService_ForNonAgentClient(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1785,7 +1819,7 @@ func TestTokenExchange_StampsActorTypeService_ForNonAgentClient(t *testing.T) {
 // inner hop is unchanged (RFC 8693 §4.1 ¶6 — only the outermost actor is
 // authoritative).
 func TestTokenExchange_PreservesInnerHopActorType(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1848,7 +1882,7 @@ func TestTokenExchange_PreservesInnerHopActorType(t *testing.T) {
 // Also the laundering-prevention path: chain is passed through, not
 // rewritten.
 func TestTokenExchange_NoActorToken_NoNewHop(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1893,7 +1927,7 @@ func TestTokenExchange_NoActorToken_NoNewHop(t *testing.T) {
 // TestTokenExchange_DoesNotStampNonIdentityClaims pins the RFC 8693 §4.1 ¶2
 // invariant: authserver never stamps exp/nbf/aud/iat/jti inside an act hop.
 func TestTokenExchange_DoesNotStampNonIdentityClaims(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1949,7 +1983,7 @@ func TestTokenExchange_DoesNotStampNonIdentityClaims(t *testing.T) {
 // stamps those claims on its own tokens) but load-bearing once federation
 // / cross-issuer subject tokens become possible.
 func TestTokenExchange_StripsNonIdentityClaimsFromInnerHops(t *testing.T) {
-	setup := newTETestSetup(t, services.TokenExchangeConfig{
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -2008,4 +2042,3 @@ func TestTokenExchange_StripsNonIdentityClaimsFromInnerHops(t *testing.T) {
 		}
 	}
 }
-

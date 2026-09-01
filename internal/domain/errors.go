@@ -78,6 +78,15 @@ var (
 	// ErrFamilyRevoked — refresh token family revoked (theft detected).
 	ErrFamilyRevoked = newError("invalid_grant", "token family revoked due to reuse detection")
 
+	// ErrReuseRevocationFailed — refresh token reuse was detected but revoking
+	// the family failed, so the family is still live. A distinct identity so
+	// callers and tests can tell "revoked" from "detected, not revoked" via
+	// errors.Is; the SAME code and message as ErrFamilyRevoked because a
+	// domain error's message is wire text, and the presenter of a replayed
+	// token must not learn whether the family is live. Do not log this
+	// error's text as the outcome — the service emits its own ERROR lines.
+	ErrReuseRevocationFailed = newError("invalid_grant", ErrFamilyRevoked.Error())
+
 	// ErrConsentRequired — user hasn't consented.
 	ErrConsentRequired = newError("consent_required", "user consent is required")
 
@@ -99,6 +108,18 @@ var (
 	// ErrUserNotFound — unknown user.
 	ErrUserNotFound = newError(CodeNotFound, "user not found")
 
+	// ErrStoreReturnedNoUser — a UserStore answered with neither a user nor an
+	// error, breaking its own contract. Not a fact about the account: nothing
+	// is known about it, which is why this is separate from ErrUserNotFound and
+	// must not be collapsed into it. Callers that distinguish the two report a
+	// broken store to operators rather than filing it as a routine miss.
+	//
+	// Deliberately a plain error and the only sentinel here without a Code():
+	// writeTokenError maps every domain.Error to HTTP 400 (the domain.IsError
+	// arm), and a store defect is a 500. Without a code it reaches the default
+	// arm, which is the server_error it should be.
+	ErrStoreReturnedNoUser = errors.New("user store returned neither user nor error")
+
 	// ErrInvalidCredentials — wrong password.
 	ErrInvalidCredentials = newError("invalid_grant", "invalid credentials")
 
@@ -113,6 +134,14 @@ var (
 
 	// ErrOIDCAuthFailed — upstream OIDC authentication failed.
 	ErrOIDCAuthFailed = newError(CodeAccessDenied, "OIDC authentication failed")
+
+	// ErrOIDCUnavailable — the OIDC flow could not complete because the server
+	// could not reach or resolve its upstream configuration (config source
+	// down, discovery or JWKS unreachable), as opposed to a genuine
+	// authentication failure. Handlers map this to HTTP 500 (server error)
+	// while ErrOIDCAuthFailed maps to 401, so a down IdP is reported as a
+	// server problem rather than a user auth failure.
+	ErrOIDCUnavailable = newError("temporarily_unavailable", "OIDC upstream is unavailable")
 
 	// ErrRefreshTokenReused — refresh token was already consumed (concurrent or replay).
 	ErrRefreshTokenReused = newError("invalid_grant", "refresh token has already been used")

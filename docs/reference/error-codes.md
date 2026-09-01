@@ -120,7 +120,7 @@ The authorization grant (code, token, or credentials) is invalid, expired, or re
 | Auth code already used | Someone (maybe you, maybe an attacker) already exchanged this code | Each code can only be exchanged once. Request a new authorization. |
 | Wrong code_verifier | The PKCE verifier doesn't match the challenge | Ensure `code_verifier` is the original random string, and `code_challenge` was `base64url(SHA-256(code_verifier))`. Only S256 is supported. |
 | Wrong redirect_uri | The redirect_uri in the token request doesn't match the authorize request | Use the exact same redirect_uri in both requests. |
-| Refresh token reuse | A consumed refresh token was presented again | **This means potential token theft.** The entire token family is revoked. Start a new authorization flow. All refresh tokens for this user+client are invalid. |
+| Refresh token reuse | You presented a refresh token that an earlier rotation had already consumed. The server treats that as a replay: it rejects the request and revokes the whole token family. If the revocation itself fails server-side, operators are alerted ([details](../guides/operate/token-design-internals.md#refresh-token-rotation-and-reuse-detection)); the reply to you is still the reuse rejection, because the token you sent is spent either way. | **This means potential token theft.** Start a new authorization flow; do not retry the refresh token. The description is *token family revoked due to reuse detection* in both cases — whether the server-side revocation completed is reported to operators, never to the client. |
 | Session expired | The user took too long to complete login/consent | Start a new authorization request. |
 | Bad password | Login credentials are wrong | Check the password. After repeated failures, the IP may be locked out. |
 | Token exchange: bad subject_token | The subject token is expired, has a bad signature, or wrong issuer | Verify the subject token is valid, not expired, and issued by this authserver instance. |
@@ -132,7 +132,10 @@ The requested scope isn't available.
 | When you see it | What happened | How to fix |
 |---|---|---|
 | Scope not registered | The scope name isn't declared on the target resource | Add it via `PATCH /admin/resources/{id}` — include the scope in the `scopes` array as `{"name": "...", "description": "..."}`. |
-| Scope not in client's set | The client wasn't registered with this scope | Update the client's scope via admin API. |
+| Scope not in client's set | The client has registered scopes, but you asked for one outside that set | Narrow the request, or widen the client's scope via the admin API. |
+| `client_credentials`: "created through dynamic registration" | The client came from `POST /oauth/register` or CIMD, which create user-delegated clients. Machine clients are pre-registered through the admin API | Create the machine client with `POST /admin/clients` instead. Granting scopes to the dynamically registered one is not the fix. |
+| `client_credentials`: "the client has no registered scopes" | An admin-provisioned client was created without any scope | Grant scopes: `PATCH /admin/clients/{client_id}` with `{"scope": "..."}`. |
+| jwt-bearer: "the requested scope is invalid or not allowed" | Same empty client scope, but this grant fails even when the request omits `scope`: the assertion's scopes intersect the empty ceiling to nothing. Unlike `client_credentials` it does not *yet* name the cause — the description is still the generic one, and closing that gap is tracked separately | Grant the client's scopes as above; if the token is meant to carry none, the assertion has to omit `scope` too. |
 | Token exchange: scope escalation | You requested broader scopes than the subject token has | You can only narrow scopes during exchange, never broaden them. |
 
 ### `unauthorized_client` — HTTP 400
@@ -198,7 +201,7 @@ The request is authenticated but not authorized.
 |---|---|---|
 | Identity assertion denied by policy | No XAA policy allows this IdP/client/scope/resource combination | Create or update a policy via `POST /admin/xaa/policies` that permits the combination. |
 | No subject mapping found for identity | Subject mode is `strict` and no mapping exists for the IdP subject | Create a subject mapping via `POST /admin/xaa/subject-mappings`. |
-| Token exchange: not authorized | Your client isn't in the target resource's `policy.exchange.allowed_client_ids` and the subject token doesn't have a `may_act` claim for you | Add your client to `policy.exchange.allowed_client_ids` on the target resource via `PATCH /admin/resources/{id}`, or empty the list to allow any consented client. |
+| Token exchange: not authorized | Your client isn't in the target resource's `policy.exchange.allowed_client_ids` and the subject token doesn't have a `may_act` claim for you | Add your client to `policy.exchange.allowed_client_ids` on the target resource via `PATCH /admin/resources/{id}`, or empty the list to allow any client. |
 | Token exchange: chain too deep | Delegation chain exceeds `max_chain_depth` | Increase the limit or reduce delegation levels. |
 | OIDC auth failed | Upstream identity provider rejected the authentication | Check IdP config: client_id, client_secret, redirect_uri. |
 

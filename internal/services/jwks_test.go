@@ -4,11 +4,15 @@ package services_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
 	"github.com/authplane/authserver/internal/crypto"
+	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/observability"
+	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/services"
 )
 
@@ -24,7 +28,7 @@ func newJWKSService(t *testing.T, alg string) *services.JWKSService {
 	if err != nil {
 		t.Fatalf("create keyfile store: %v", err)
 	}
-	return services.NewJWKSService(store, alg, obs)
+	return services.NewJWKSService(store, nil, alg, obs)
 }
 
 func TestJWKSService_GetSigningKey_AutoGenerate(t *testing.T) {
@@ -331,6 +335,81 @@ func TestJWKSService_Reload_AtomicSwap(t *testing.T) {
 	}
 	if len(jwks.Keys) != 2 {
 		t.Fatalf("expected 2 keys after rotation, got %d", len(jwks.Keys))
+	}
+}
+
+// erroringAgentsConfig is an AgentsConfigProvider that always fails to resolve,
+// standing in for a substitute provider hitting a transient backend error.
+type erroringAgentsConfig struct{}
+
+func (erroringAgentsConfig) Config(context.Context) (output.AgentsConfig, error) {
+	return output.AgentsConfig{}, errors.New("agents config backend unavailable")
+}
+
+// stubAgentClientStore returns a single agent from ListAgents; the other methods
+// are unused by the JWKS path. If degradation did NOT happen, this agent would
+// surface in the document — so its absence proves the agents array was omitted.
+type stubAgentClientStore struct{}
+
+func (stubAgentClientStore) ListAgents(context.Context) ([]client.Client, error) {
+	return []client.Client{{ID: "agent-1", AgentDescription: "test agent", IsAgent: true}}, nil
+}
+func (stubAgentClientStore) Create(context.Context, *client.Client) error { return nil }
+func (stubAgentClientStore) GetByID(context.Context, string) (*client.Client, error) {
+	return nil, nil
+}
+func (stubAgentClientStore) GetByCIMDURL(context.Context, string) (*client.Client, error) {
+	return nil, nil
+}
+func (stubAgentClientStore) Update(context.Context, *client.Client) error { return nil }
+func (stubAgentClientStore) List(context.Context, string, string, int, int) ([]client.Client, error) {
+	return nil, nil
+}
+func (stubAgentClientStore) Count(context.Context, string) (int, error) { return 0, nil }
+func (stubAgentClientStore) Delete(context.Context, string) error       { return nil }
+
+// TestJWKSService_BuildJWKSDocument_DegradesOnAgentsConfigError verifies that a
+// failure to resolve the (optional, off-by-default) agent-listing config does
+// NOT take down /jwks.json: the core signing-key set is still served, only the
+// agents array is omitted. Agent listing is a non-critical discovery add-on;
+// coupling key distribution to its config resolution would black-hole all token
+// validation for a substitute provider that errors.
+func TestJWKSService_BuildJWKSDocument_DegradesOnAgentsConfigError(t *testing.T) {
+	svc := newJWKSService(t, "ES256")
+	ctx := context.Background()
+
+	// Wire a client store that WOULD list an agent, plus a config provider that
+	// always errors. If the endpoint failed closed, BuildJWKSDocument would
+	// return an error; if it didn't degrade, the agent would appear.
+	svc.WithAgentListing(stubAgentClientStore{})
+	svc.WithAgentsConfig(erroringAgentsConfig{})
+
+	data, err := svc.BuildJWKSDocument(ctx)
+	if err != nil {
+		t.Fatalf("BuildJWKSDocument must degrade, not fail, on agents-config error: %v", err)
+	}
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal jwks document: %v", err)
+	}
+
+	// Core key set must be present and non-empty.
+	keysRaw, ok := doc["keys"]
+	if !ok {
+		t.Fatal("jwks document missing core \"keys\" array")
+	}
+	var keys []json.RawMessage
+	if err := json.Unmarshal(keysRaw, &keys); err != nil {
+		t.Fatalf("unmarshal keys: %v", err)
+	}
+	if len(keys) == 0 {
+		t.Fatal("expected at least one signing key in degraded document")
+	}
+
+	// Agents array must be omitted (degraded), not present.
+	if _, present := doc["agents"]; present {
+		t.Error("agents array must be omitted when agents-config resolution fails")
 	}
 }
 

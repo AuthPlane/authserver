@@ -29,18 +29,22 @@ var _ output.TokenStore = (*TokenStore)(nil)
 
 // --- Token Families ---
 
-const familyColumns = `id, client_id, user_id, scope, resource, status, created_at, revoked_at`
+const familyColumns = `id, client_id, user_id, scope, resource, status, created_at, revoked_at, auth_session_id`
 
 func scanFamily(row interface{ Scan(...any) error }) (*token.Family, error) {
 	var f token.Family
 	var createdAt string
 	var revokedAt sql.NullString
+	var authSessionID sql.NullString
 
 	if err := row.Scan(
 		&f.ID, &f.ClientID, &f.UserID, &f.Scope, &f.Resource,
-		&f.Status, &createdAt, &revokedAt,
+		&f.Status, &createdAt, &revokedAt, &authSessionID,
 	); err != nil {
 		return nil, err
+	}
+	if authSessionID.Valid {
+		f.AuthSessionID = authSessionID.String
 	}
 
 	var err error
@@ -60,11 +64,17 @@ func (s *TokenStore) CreateFamily(ctx context.Context, f *token.Family) error {
 	ctx, span := s.tracer.Start(ctx, "SQLite.TokenCreateFamily")
 	defer span.End()
 
+	// NULL rather than "" when unknown, so the index holds no empty-string rows.
+	var authSessionID any
+	if f.AuthSessionID != "" {
+		authSessionID = f.AuthSessionID
+	}
+
 	start := time.Now()
 	_, err := dbOrTx(ctx, s.db).ExecContext(ctx,
-		`INSERT INTO token_families (`+familyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO token_families (`+familyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID, f.ClientID, f.UserID, f.Scope, f.Resource,
-		f.Status, formatTime(f.CreatedAt), formatNullableTime(f.RevokedAt),
+		f.Status, formatTime(f.CreatedAt), formatNullableTime(f.RevokedAt), authSessionID,
 	)
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("token_create_family"))
 
@@ -99,9 +109,32 @@ func (s *TokenStore) GetFamily(ctx context.Context, id string) (*token.Family, e
 	return f, nil
 }
 
+// GetFamilyByAuthSessionID implements output.TokenStore.
+func (s *TokenStore) GetFamilyByAuthSessionID(ctx context.Context, authSessionID string) (*token.Family, error) {
+	ctx, span := s.tracer.Start(ctx, "SQLite.TokenGetFamilyByAuthSessionID")
+	defer span.End()
+
+	start := time.Now()
+	row := dbOrTx(ctx, s.db).QueryRowContext(ctx,
+		`SELECT `+familyColumns+` FROM token_families WHERE auth_session_id = ?`, authSessionID,
+	)
+	f, err := scanFamily(row)
+	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("token_get_family_by_auth_session"))
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, domain.ErrInvalidGrant
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("get token family by auth session: %w", err)
+	}
+	return f, nil
+}
+
 // RevokeFamily atomically revokes a family and all its refresh tokens.
-// Idempotent — already-revoked family is a no-op.
-func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) error {
+// Idempotent — an already-revoked family is a no-op, reported as revoked=false.
+func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) (bool, error) {
 	ctx, span := s.tracer.Start(ctx, "SQLite.TokenRevokeFamily")
 	defer span.End()
 
@@ -110,7 +143,7 @@ func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) error {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("begin tx: %w", err)
+		return false, fmt.Errorf("begin tx: %w", err)
 	}
 	if !joined {
 		defer func() { _ = tx.Rollback() }()
@@ -118,14 +151,22 @@ func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) error {
 
 	now := formatTime(time.Now().UTC())
 
-	// Mark family as revoked (only if active).
-	if _, err := tx.ExecContext(ctx,
+	// Mark family as revoked (only if active). The row count is the answer
+	// to "did this call revoke it": 0 means it already was.
+	res, err := tx.ExecContext(ctx,
 		`UPDATE token_families SET status = 'revoked', revoked_at = ? WHERE id = ? AND status = 'active'`,
 		now, familyID,
-	); err != nil {
+	)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("revoke family: %w", err)
+		return false, fmt.Errorf("revoke family: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return false, fmt.Errorf("revoke family rows affected: %w", err)
 	}
 
 	// Consume all unconsumed refresh tokens in the family.
@@ -135,18 +176,18 @@ func (s *TokenStore) RevokeFamily(ctx context.Context, familyID string) error {
 	); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("consume family tokens: %w", err)
+		return false, fmt.Errorf("consume family tokens: %w", err)
 	}
 
 	if !joined {
 		if err := tx.Commit(); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
-			return fmt.Errorf("commit: %w", err)
+			return false, fmt.Errorf("commit: %w", err)
 		}
 	}
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("token_revoke_family"))
-	return nil
+	return n > 0, nil
 }
 
 // --- Refresh Tokens ---

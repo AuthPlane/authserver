@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
+	"slices"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -21,23 +21,17 @@ import (
 	"github.com/authplane/authserver/internal/ports/output"
 )
 
-// DCRMode holds the DCR configuration values needed by the service.
-// Defined here to avoid importing internal/config from services.
-type DCRMode struct {
-	Mode              string
-	ApprovedRedirects []string
-}
-
 // DCRService handles Dynamic Client Registration (RFC 7591).
 type DCRService struct {
-	clients       output.ClientStore
-	audit         AuditRecorder
-	dcrCfg        DCRMode
-	enabledGrants []string     // grant types the AS is configured to honor; empty = no enforcement
-	mu            sync.RWMutex // protects dcrCfg for runtime updates
-	logger        *slog.Logger
-	tracer        trace.Tracer
-	metrics       *observability.Metrics
+	clients      output.ClientStore
+	audit        AuditRecorder
+	modeProvider output.DCRModeProvider // resolves the DCR policy from ctx
+	// grantsProvider resolves the grant types the AS honors, per request.
+	// nil ⇒ no enforcement (tests). Optional, injected via WithDCREnabledGrants.
+	grantsProvider output.EnabledGrantsProvider
+	logger         *slog.Logger
+	tracer         trace.Tracer
+	metrics        *observability.Metrics
 }
 
 var _ input.DCRPort = (*DCRService)(nil)
@@ -45,29 +39,29 @@ var _ input.DCRPort = (*DCRService)(nil)
 // DCRServiceOpt configures optional DCRService dependencies.
 type DCRServiceOpt func(*DCRService)
 
-// WithDCREnabledGrants sets the grant types the running AS is configured
-// to honor. DCRService rejects RegisterClient requests carrying a grant
-// outside this set so a client whose grant the /oauth/token
-// endpoint cannot serve never lands as status=active.
-func WithDCREnabledGrants(grants []string) DCRServiceOpt {
-	return func(s *DCRService) { s.enabledGrants = grants }
+// WithDCREnabledGrants injects the per-request enabled-grants provider.
+// DCRService rejects RegisterClient requests carrying a grant outside the set
+// the provider returns so a client whose grant /oauth/token cannot serve never
+// lands as status=active.
+func WithDCREnabledGrants(p output.EnabledGrantsProvider) DCRServiceOpt {
+	return func(s *DCRService) { s.grantsProvider = p }
 }
 
 // NewDCRService creates a new DCR service.
 func NewDCRService(
 	clients output.ClientStore,
-	dcrCfg DCRMode,
+	modeProvider output.DCRModeProvider,
 	obs *observability.Provider,
 	auditor AuditRecorder,
 	opts ...DCRServiceOpt,
 ) *DCRService {
 	s := &DCRService{
-		clients: clients,
-		audit:   auditor,
-		dcrCfg:  dcrCfg,
-		logger:  obs.Logger,
-		tracer:  obs.Tracer,
-		metrics: obs.Metrics,
+		clients:      clients,
+		audit:        auditor,
+		modeProvider: modeProvider,
+		logger:       obs.Logger,
+		tracer:       obs.Tracer,
+		metrics:      obs.Metrics,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -80,14 +74,22 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 	ctx, span := s.tracer.Start(ctx, "DCRService.RegisterClient")
 	defer span.End()
 
-	currentMode := s.GetMode()
+	policy, err := s.modeProvider.Get(ctx)
+	if err != nil {
+		// Fail closed: if the policy can't be resolved we reject rather than
+		// fall back to a permissive default.
+		s.logger.ErrorContext(ctx, "dcr mode provider failed during RegisterClient", "error", err)
+		span.RecordError(err)
+		return nil, fmt.Errorf("get dcr mode: %w", err)
+	}
+
 	span.SetAttributes(
 		attribute.String("registration_source", "dcr"),
-		attribute.String("dcr_mode", currentMode),
+		attribute.String("dcr_mode", policy.Mode),
 	)
 
 	// Enforce DCR mode.
-	if err := s.enforceMode(req); err != nil {
+	if err := s.enforceMode(policy, req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -106,8 +108,16 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 	}
 	params.Defaults()
 
+	// Resolve the enabled-grant set per request (shared helper: nil provider ⇒
+	// no enforcement, provider error ⇒ fail closed).
+	enabledGrants, gErr := resolveEnabledGrants(ctx, s.grantsProvider)
+	if gErr != nil {
+		span.RecordError(gErr)
+		span.SetStatus(codes.Error, gErr.Error())
+		return nil, gErr
+	}
 	// Validate.
-	if err := client.ValidateCreateParams(params, s.enabledGrants); err != nil {
+	if err := client.ValidateCreateParams(params, enabledGrants); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidClient, err)
@@ -156,7 +166,7 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 		"client_id", c.ID,
 		"client_name", c.Name,
 		"auth_method", c.TokenEndpointAuthMethod,
-		"mode", currentMode,
+		"mode", policy.Mode,
 	)
 
 	s.metrics.ClientsRegistered.Add(ctx, 1, otelmetric.WithAttributes(
@@ -189,31 +199,38 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 }
 
 // SetMode updates the DCR mode at runtime (thread-safe).
-func (s *DCRService) SetMode(mode string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.dcrCfg.Mode = mode
+func (s *DCRService) SetMode(ctx context.Context, mode string) error {
+	return s.modeProvider.Set(ctx, output.DCRMode{Mode: mode})
 }
 
-// GetMode returns the current DCR mode (thread-safe).
-func (s *DCRService) GetMode() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.dcrCfg.Mode
+// GetMode returns the current DCR mode resolved by the configured
+// DCRModeProvider. It propagates a provider error so callers (e.g. the admin
+// DCR settings handler) can surface the failure with a 500 instead of
+// reporting an empty mode. GetMode/SetMode are the runtime read/write control
+// used by the admin DCR handler.
+func (s *DCRService) GetMode(ctx context.Context) (string, error) {
+	mode, err := s.modeProvider.Get(ctx)
+	if err != nil {
+		// The caller (admin DCR settings handler) logs and maps this to a 500;
+		// don't double-log here.
+		return "", fmt.Errorf("get dcr mode: %w", err)
+	}
+	return mode.Mode, nil
 }
 
-// enforceMode checks whether the registration request is allowed under the configured DCR mode.
-func (s *DCRService) enforceMode(req input.RegisterClientRequest) error {
-	s.mu.RLock()
-	mode := s.dcrCfg.Mode
-	s.mu.RUnlock()
-	switch mode {
+// enforceMode checks whether the registration request is allowed under the
+// DCR policy resolved for this request.
+func (s *DCRService) enforceMode(policy output.DCRMode, req input.RegisterClientRequest) error {
+	switch policy.Mode {
 	case "open":
 		return nil
 
 	case "approved_redirects":
+		// Exact string match only — no wildcards, no prefix matching, no
+		// normalization. This is a security invariant per RFC 9700 / OAuth
+		// Security BCP.
 		for _, uri := range req.RedirectURIs {
-			if !s.matchesApprovedPattern(uri) {
+			if !slices.Contains(policy.ApprovedRedirects, uri) {
 				return fmt.Errorf("%w: redirect_uri %q not in approved list", domain.ErrInvalidRedirectURI, uri)
 			}
 		}
@@ -223,18 +240,6 @@ func (s *DCRService) enforceMode(req input.RegisterClientRequest) error {
 		return domain.ErrRegistrationDisabled
 
 	default:
-		return fmt.Errorf("unknown dcr mode: %s", mode)
+		return fmt.Errorf("unknown dcr mode: %s", policy.Mode)
 	}
-}
-
-// matchesApprovedPattern checks if a redirect URI matches any of the approved URIs.
-// Exact string match only — no wildcards, no prefix matching, no normalization.
-// This is a security invariant per RFC 9700 / OAuth Security BCP.
-func (s *DCRService) matchesApprovedPattern(uri string) bool {
-	for _, approved := range s.dcrCfg.ApprovedRedirects {
-		if uri == approved {
-			return true
-		}
-	}
-	return false
 }

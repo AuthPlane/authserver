@@ -31,7 +31,7 @@ func TestScopeNarrowingOnRefresh(t *testing.T) {
 	}
 
 	// Verify narrowed token has correct scope via introspection.
-	ir := h.IntrospectToken(narrowed.AccessToken, clientID)
+	ir := h.IntrospectAsResourceServer(narrowed.AccessToken, rs.URI)
 	if !ir.Active {
 		t.Fatal("narrowed token should be active")
 	}

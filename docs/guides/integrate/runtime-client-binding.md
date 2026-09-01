@@ -25,6 +25,13 @@ The OAuth `client_id` and the Resource `slug` are distinct identities with an N:
 
 **You don't need this when:** the exchange targets a Mint Resource, or a fronting link already covers the (source → target) pair, or the dispatch doesn't hit the gate (direct user→MCP, refresh, `client_credentials`, `jwt-bearer`, authorization code).
 
+**You also need this for introspection.** A resource server calling
+`POST /oauth/introspect` about a token one of its clients presented is asking
+about somebody else's token, so Authplane checks the same binding to confirm
+the caller speaks for the Resource in the token's `aud`. Without it the
+endpoint answers `{"active": false}`. See
+[Resource Server SDK → real-time revocation](sdk-resource-server.md).
+
 ## Steps
 
 ### 1. Identify the Resource and the client(s)

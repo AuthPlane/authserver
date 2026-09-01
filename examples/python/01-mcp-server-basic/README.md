@@ -1,7 +1,7 @@
 # Tier 01 — Basic MCP server (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 31 lines · SDK: python-sdk 0.2.0**
+**Auth-specific code: 5 lines · Total example: 31 lines · SDK: python-sdk 0.3.0**
 <!-- loccount:end -->
 
 A minimal FastMCP server protected by Authplane-issued JWTs. Everything you
@@ -40,8 +40,8 @@ Troubleshooting below.
 | | |
 |---|---|
 | **Time to run** | About a minute first-run (venv install + AS pull); ~5 s warm |
-| **SDK** | `authplane-fastmcp` 0.2.0 (PyPI) — depends on `authplane-sdk` 0.2.0 |
-| **MCP framework** | `fastmcp >= 3.0, < 4` (matches `pyproject.toml`) |
+| **SDK** | `authplane-fastmcp` 0.3.0 (PyPI) — depends on `authplane-sdk` 0.3.0 |
+| **MCP framework** | `fastmcp >= 3.2, < 4` (matches `pyproject.toml`) — the 3.2 floor comes from `authplane-fastmcp` 0.3.0 |
 
 ## Run it
 

@@ -9,15 +9,42 @@ import (
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // introspectHandler handles POST /oauth/introspect.
 type introspectHandler struct {
 	introspect IntrospectionProvider
-	obs        *observability.Provider
+	// oauthConfig gates the endpoint per request from the same source that
+	// drives the discovery document's introspection_endpoint. When it resolves
+	// IntrospectionEnabled=false (or errors), an introspection request responds
+	// 404, as if the endpoint were absent. (The route stays registered as
+	// POST-only, so a non-POST probe still gets 405 rather than 404 — the gate
+	// covers the POST path that real introspection uses.) When nil, the endpoint
+	// is always served (the pre-seam behavior).
+	oauthConfig output.OAuthConfigProvider
+	obs         *observability.Provider
 }
 
 func (h *introspectHandler) handleIntrospect(w http.ResponseWriter, r *http.Request) {
+	// Runtime gate: introspection-disabled returns 404 for the request, as if the
+	// endpoint were absent.
+	if h.oauthConfig != nil {
+		cfg, err := h.oauthConfig.Config(r.Context())
+		if err != nil {
+			h.obs.Logger.WarnContext(r.Context(),
+				"resolve OAuth config failed; treating introspection as disabled",
+				"error", err,
+			)
+			http.NotFound(w, r)
+			return
+		}
+		if !cfg.IntrospectionEnabled {
+			http.NotFound(w, r)
+			return
+		}
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64KB
 	if err := r.ParseForm(); err != nil {
 		shared.WriteOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid form body")

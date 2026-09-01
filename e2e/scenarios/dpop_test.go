@@ -68,6 +68,12 @@ func (s *inMemoryProofStore) ConsumeJTI(_ context.Context, jti string, expiry ti
 
 var errInMemoryProofReplay = errors.New("dpop: jti already consumed")
 
+// staticIssuerE2E satisfies output.IssuerProvider for e2e test resource servers
+// without importing internal/adapters/static.
+type staticIssuerE2E string
+
+func (s staticIssuerE2E) Issuer(_ context.Context) (string, error) { return string(s), nil }
+
 // newDPoPResourceServer creates a test resource server with DPoP-aware JWT
 // validation, mirroring the behavior of a production resource server.
 //
@@ -83,7 +89,7 @@ func newDPoPResourceServer(t *testing.T, issuer, audience string) *httptest.Serv
 	obs := observability.NewNoop()
 	jwtMW := shared.NewResourceJWTMiddleware(
 		jwksProv,
-		issuer,
+		staticIssuerE2E(issuer),
 		audience,
 		newInMemoryProofStore(),
 		shared.DPoPJWTConfig{ProofLifetime: 60 * time.Second},

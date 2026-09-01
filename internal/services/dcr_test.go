@@ -18,6 +18,37 @@ import (
 	"github.com/authplane/authserver/testdata"
 )
 
+// staticDCRModeForTest is an integration-test-local implementation of
+// output.DCRModeProvider that returns fixed values for every call. It avoids
+// importing internal/adapters/static from integration tests, which would
+// violate Gate 0 (the one-way ratchet that forbids new internal/ imports in
+// integration tests).
+type staticDCRModeForTest struct {
+	Mode              string
+	ApprovedRedirects []string
+}
+
+func (p staticDCRModeForTest) Get(context.Context) (output.DCRMode, error) {
+	return output.DCRMode{Mode: p.Mode, ApprovedRedirects: p.ApprovedRedirects}, nil
+}
+
+func (staticDCRModeForTest) Set(context.Context, output.DCRMode) error { return nil }
+
+// failingDCRModeForTest is a provider whose Get always errors, used to exercise
+// the fail-closed path: services must reject rather than fall back to a
+// permissive default when the policy can't be resolved.
+type failingDCRModeForTest struct{}
+
+var errProviderUnavailable = errors.New("dcr mode provider unavailable")
+
+func (failingDCRModeForTest) Get(context.Context) (output.DCRMode, error) {
+	return output.DCRMode{}, errProviderUnavailable
+}
+
+func (failingDCRModeForTest) Set(context.Context, output.DCRMode) error {
+	return errProviderUnavailable
+}
+
 type dcrTestSetup struct {
 	svc      *services.DCRService
 	auditSvc *services.AuditService
@@ -36,13 +67,53 @@ func newDCRSetup(t *testing.T, mode string, approvedRedirects []string) *dcrTest
 	obs := testObs()
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
-	dcrMode := services.DCRMode{
+	dcrMode := staticDCRModeForTest{
 		Mode:              mode,
 		ApprovedRedirects: approvedRedirects,
 	}
 
 	svc := services.NewDCRService(stores.Client, dcrMode, obs.WithComponent("dcr"), auditSvc)
 	return &dcrTestSetup{svc: svc, auditSvc: auditSvc, stores: stores}
+}
+
+// --- Fail-closed: provider error rejects registration ---
+
+func TestDCR_ProviderError_RejectsRegistration(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+	auditSvc := services.NewAuditService(stores.Audit, obs)
+	svc := services.NewDCRService(stores.Client, failingDCRModeForTest{}, obs.WithComponent("dcr"), auditSvc)
+	ctx := context.Background()
+
+	_, err := svc.RegisterClient(ctx, input.RegisterClientRequest{
+		ClientName:   "Should Be Rejected",
+		RedirectURIs: []string{"https://app.example.com/callback"},
+	})
+	if err == nil {
+		t.Fatal("expected RegisterClient to fail closed when the mode provider errors, got nil")
+	}
+	if !errors.Is(err, errProviderUnavailable) {
+		t.Errorf("error should wrap the provider failure, got %v", err)
+	}
+
+	// Fail-closed must not persist a client.
+	clients, listErr := stores.Client.List(ctx, "", "", 10, 0)
+	if listErr != nil {
+		t.Fatalf("list clients: %v", listErr)
+	}
+	if len(clients) != 0 {
+		t.Errorf("no client should be persisted on provider error, got %d", len(clients))
+	}
+}
+
+func TestDCR_ProviderError_GetModePropagates(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+	svc := services.NewDCRService(stores.Client, failingDCRModeForTest{}, obs.WithComponent("dcr"), nil)
+
+	if _, err := svc.GetMode(context.Background()); err == nil {
+		t.Fatal("expected GetMode to propagate the provider error, got nil")
+	}
 }
 
 // --- DCR Mode: Open ---
@@ -329,12 +400,12 @@ func TestDCR_GrantTypeNotEnabled_Rejected(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	auditSvc := services.NewAuditService(stores.Audit, obs)
-	dcrMode := services.DCRMode{Mode: "open"}
+	dcrMode := staticDCRModeForTest{Mode: "open"}
 
 	// AS configured WITHOUT client_credentials enabled.
 	svc := services.NewDCRService(
 		stores.Client, dcrMode, obs.WithComponent("dcr"), auditSvc,
-		services.WithDCREnabledGrants([]string{"authorization_code", "refresh_token"}),
+		services.WithDCREnabledGrants(staticGrantsForTest{grants: []string{"authorization_code", "refresh_token"}}),
 	)
 
 	_, err := svc.RegisterClient(context.Background(), input.RegisterClientRequest{
@@ -361,11 +432,11 @@ func TestDCR_GrantTypeEnabled_Accepted(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	auditSvc := services.NewAuditService(stores.Audit, obs)
-	dcrMode := services.DCRMode{Mode: "open"}
+	dcrMode := staticDCRModeForTest{Mode: "open"}
 
 	svc := services.NewDCRService(
 		stores.Client, dcrMode, obs.WithComponent("dcr"), auditSvc,
-		services.WithDCREnabledGrants([]string{"authorization_code", "refresh_token", "client_credentials"}),
+		services.WithDCREnabledGrants(staticGrantsForTest{grants: []string{"authorization_code", "refresh_token", "client_credentials"}}),
 	)
 
 	resp, err := svc.RegisterClient(context.Background(), input.RegisterClientRequest{
@@ -381,3 +452,23 @@ func TestDCR_GrantTypeEnabled_Accepted(t *testing.T) {
 	}
 }
 
+// TestDCR_GrantsProviderError_RejectsRegistration verifies fail-closed: when the
+// enabled-grants provider errors, RegisterClient rejects.
+func TestDCR_GrantsProviderError_RejectsRegistration(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+	auditSvc := services.NewAuditService(stores.Audit, obs)
+	svc := services.NewDCRService(
+		stores.Client, staticDCRModeForTest{Mode: "open"}, obs.WithComponent("dcr"), auditSvc,
+		services.WithDCREnabledGrants(failingGrantsForTest{}),
+	)
+
+	_, err := svc.RegisterClient(context.Background(), input.RegisterClientRequest{
+		ClientName:   "fail closed",
+		RedirectURIs: []string{"https://app.example.com/callback"},
+		GrantTypes:   []string{"authorization_code"},
+	})
+	if !errors.Is(err, errGrantsUnavailable) {
+		t.Fatalf("expected wrapped errGrantsUnavailable, got %v", err)
+	}
+}

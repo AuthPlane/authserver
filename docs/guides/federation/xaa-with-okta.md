@@ -208,6 +208,7 @@ The browser-side `GET /health` with `Authorization: Bearer …` may report `Type
 |----------------------------------------|------------|-----|
 | `invalid_scope` | Client has empty `scope` | Patch client with allowed scope list (step 5 patch). |
 | `invalid_resource` | No resource server registered for the id-jag's `resource` claim | Register the resource (step 7) with `uri == $PUBLIC_URL`. |
+| `resource_required` | `xaa.require_resource: true` (not the default below) and the exchange named no resource at all | Add `resource=$PUBLIC_URL` to the token request, or have xaa.dev mint the id-jag with a `resource` claim. The refused id-jag is not spent; resend it with the resource added. |
 | `replay` | Same `jti` reused (you re-clicked too fast) | Re-run the flow; jti is single-use. |
 | `client_mismatch` | `client_id` claim in id-jag ≠ authenticated client | Ensure target client_id on xaa.dev equals the DCR-registered `client_id` from step 5. |
 | `untrusted_issuer` | IdP not registered, or issuer URL mismatch | Confirm step 4's `issuer` is exactly `https://idp.xaa.dev`. |
@@ -233,6 +234,8 @@ dpop: { enabled: true, proof_lifetime: 60s, nonce_ttl: 60s }
 token_exchange: { enabled: true, allow_self_exchange: true, max_chain_depth: 4, token_expiry: 1h }
 xaa: { enabled: true, token_expiry: 1h, max_assertion_age: 5m, require_resource: false, subject_mode: auto_map, jwks_cache_ttl: 1h }
 ```
+
+> **Note — `allow_self_exchange: true`.** The reference config carries this flag although nothing in this walkthrough performs a token exchange. The resource registered in step 7 populates `policy.exchange.allowed_client_ids`, so it stays gated. Any Mint resource you register with an **empty** allowlist would accept a self-exchange (same `client_id` as the subject token) with neither operator nor consent gate — only the resource's scope catalog, plus the subject-scope ceiling when the token carries a `scope` claim, bounds what is issued. Populate the allowlist on every Mint resource if that matters. Details: [Token Exchange grant → Step 3](../upstream-providers/token-exchange-grant.md#step-3-gate-the-resource-with-policyexchangeallowed_client_ids).
 
 ## See also
 

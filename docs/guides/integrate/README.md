@@ -13,7 +13,7 @@
   | --- | --- |
   | Run only the Docker examples | Docker, `curl`, `jq` |
   | Build / run SDK examples locally | Docker, `curl`, `jq`, plus the language toolchain — **Go 1.25+** (examples target `go 1.25.0`), **Node.js 22+** (TS SDKs are ESM-only), **Python 3.12+** (`authplane` requires `>=3.12`) |
-  | Build authserver from source | Go 1.26.3+ (matches `go.mod`), Node.js 22+ for the admin UI, Docker for integration tests — see [contribute/running-tests.md](../../contribute/running-tests.md) for the full matrix |
+  | Build authserver from source | Go 1.26.6+ (matches `go.mod`), Node.js 22+ for the admin UI, Docker for integration tests — see [contribute/running-tests.md](../../contribute/running-tests.md) for the full matrix |
 
   Plus the `authserver` CLI for admin operations regardless of lane.
 

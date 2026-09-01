@@ -15,6 +15,16 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
+// Claim validation in this package fails closed: a required claim that is
+// absent is a rejection, never a check that is skipped. Because the claim
+// structs use value types, an absent JSON field and a literal zero decode to
+// the same Go value, so presence and validity must be two separate checks —
+// `if c.Expiry == 0 { reject }` before any comparison against the clock, never
+// a single `c.Expiry != 0 && ...` guard, which silently turns a required claim
+// into an optional one. Guard on zero only where the spec makes the claim
+// genuinely optional (nbf), and say so in a comment. Any validator added here
+// follows the same rule — see ValidateIDJAG in assertion.go for the shape.
+
 // KeyPair holds a signing key and its metadata.
 type KeyPair struct {
 	PrivateKey crypto.Signer
@@ -103,6 +113,13 @@ func ValidateAccessTokenClaims(c AccessTokenClaims) error {
 	}
 	if c.Expiry == 0 {
 		return fmt.Errorf("exp claim is required")
+	}
+	// iat is REQUIRED for at+jwt (RFC 9068 §2.2) and VerifyAccessToken rejects
+	// its absence, so the gate must refuse it here too. Otherwise this server
+	// can sign a token it will reject on every subsequent use, and the failure
+	// surfaces far from the mint path that caused it.
+	if c.IssuedAt == 0 {
+		return fmt.Errorf("iat claim is required")
 	}
 	return nil
 }
@@ -245,7 +262,10 @@ func ecDERToRaw(der []byte, alg jose.SignatureAlgorithm) ([]byte, error) {
 }
 
 // VerifyAccessToken parses and verifies a JWT access token against the given JWKS.
-// It checks the signature, typ header, and expiry.
+// It checks the signature, the typ header, the presence of exp and iat, and the
+// expiry and not-before windows. RFC 9068 §2.2 also makes iss, sub, aud,
+// client_id and jti REQUIRED; those are gated at issuance by
+// ValidateAccessTokenClaims rather than re-checked here.
 func VerifyAccessToken(token string, jwks *jose.JSONWebKeySet) (*AccessTokenClaims, error) {
 	parsed, err := jwt.ParseSigned(token, supportedAlgorithms())
 	if err != nil {
@@ -273,14 +293,31 @@ func VerifyAccessToken(token string, jwks *jose.JSONWebKeySet) (*AccessTokenClai
 		return nil, fmt.Errorf("verify claims: %w", err)
 	}
 
-	// Check expiry (30-second clock skew tolerance)
 	now := time.Now().Unix()
 	const clockSkew int64 = 30
-	if claims.Expiry != 0 && now > claims.Expiry+clockSkew {
+
+	// Check expiry (30-second clock skew tolerance). exp is REQUIRED for
+	// at+jwt (RFC 9068 §2.2), so a missing one is rejected rather than
+	// treated as "no expiry to enforce" — see the fail-closed note above.
+	if claims.Expiry == 0 {
+		return nil, fmt.Errorf("missing exp claim")
+	}
+	if now > claims.Expiry+clockSkew {
 		return nil, fmt.Errorf("token expired")
 	}
 
-	// Check not-before (30-second clock skew tolerance)
+	// iat is REQUIRED for at+jwt (RFC 9068 §2.2) exactly as exp is, so its
+	// absence is a rejection under the same rule. Only presence is enforced
+	// here: an iat in the future is a validity question the spec leaves to the
+	// verifier, and ValidateAccessTokenClaims does not constrain it at issuance.
+	if claims.IssuedAt == 0 {
+		return nil, fmt.Errorf("missing iat claim")
+	}
+
+	// Check not-before (30-second clock skew tolerance). Unlike exp, nbf is
+	// OPTIONAL (RFC 7519 §4.1.5) and RFC 9068 does not require it, so its
+	// absence is a valid token, not a missing required claim: skipping the
+	// check when it is zero is the correct semantics, not a permissive default.
 	if claims.NotBefore != 0 && now < claims.NotBefore-clockSkew {
 		return nil, fmt.Errorf("token not yet valid")
 	}

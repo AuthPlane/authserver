@@ -155,6 +155,41 @@ def admin_tool(...):
 
 A missing scope returns `403 {"error":"insufficient_scope","scope":"<required>"}`. A missing or invalid token returns `401` with a `WWW-Authenticate: Bearer resource_metadata=...` header.
 
+## Optional — real-time revocation via introspection
+
+JWT validation alone accepts a token until it expires. If you cannot tolerate
+that window, the SDKs can call [introspection](../../concepts/glossary.md#glossary-introspection)
+on every request and reject tokens Authplane reports inactive.
+
+This is **off unless you give the SDK credentials.** In Go, supplying them
+(`WithClientCredentials` / `WithClientAuthentication`) wires RFC 7662
+introspection as the revocation checker automatically — there is no separate
+option to enable. Check your SDK's own docs for how it wires introspection;
+the requirements below apply to any caller, whichever SDK reaches the
+endpoint.
+
+Two things Authplane requires of the caller:
+
+1. **A confidential client.** Introspection does not accept public
+   (secret-less) clients — see
+   `introspection_endpoint_auth_methods_supported` in the [discovery
+   document](../../reference/http-api.md), which lists only
+   `client_secret_basic` and `client_secret_post`.
+2. **Authorization to act AS your Resource.** Your MCP server is asking about a
+   token issued to somebody else — one of your clients — so Authplane has to
+   know the two are related. That link is
+   [`policy.runtime.client_ids`](runtime-client-binding.md):
+
+   ```bash
+   # Command verified against docs/reference/cli.md#cli-admin-resource-runtime-client-add
+   authserver admin resource runtime-client add \
+     --client-id "$RS_CLIENT_ID" --slug "$RESOURCE_SLUG"
+   ```
+
+Without the binding, every introspection returns `{"active": false}`, the SDK
+reads that as "revoked", and your server rejects **every** request. See the
+troubleshooting table below.
+
 ## Verify
 
 Send a request with no token — you should get `401`:
@@ -180,6 +215,8 @@ curl -sS -i -X POST http://localhost:8080/mcp -H 'Authorization: Bearer not-a-re
 | `401 invalid_token` for a token that worked seconds ago | Clock skew between Authplane and the resource server (`exp` already past) | Configure the validator's clock-skew tolerance (default 60s); ensure NTP is healthy on both hosts |
 | `401 kid_not_found` after key rotation | JWKS cache holds stale keys | The official SDKs force-refresh JWKS on unknown `kid` automatically; if you wrote a custom verifier, mirror that behavior. |
 | `403 insufficient_scope` for a scope the agent did request | Scope not declared on the Resource, so Authplane stripped it | Add it via `authserver admin resource update --scopes 'name||description'` ([cli.md#cli-admin-resource-update](../../reference/cli.md#cli-admin-resource-update)) |
+| Every token rejected as revoked, right after adding SDK credentials | Introspection auto-wired, but the RS client is not authorized to act AS the Resource, so Authplane answers `{"active": false}` | `authserver admin resource runtime-client add --client-id <rs-client-id> --slug <slug>` ([runtime-client-binding.md](runtime-client-binding.md)) |
+| `401 invalid_client` from `/oauth/introspect` | The RS client is public (no secret), or has been suspended | Register a confidential client; check `authserver admin client list` for its status |
 | DPoP-bound token rejected with `dpop_required` even though the agent sent a proof | Proof signed with a different key than the token's `cnf.jkt`, or proof `htu`/`htm` don't match the request | Verify the agent reuses the same signer for both token request and resource call; `htu` must match the request URL byte-for-byte (RFC 9449 §4.3) |
 
 ## See also
@@ -188,5 +225,6 @@ curl -sS -i -X POST http://localhost:8080/mcp -H 'Authorization: Bearer not-a-re
 - **DPoP + per-tool scopes (tier 3):** [`examples/go/03-mcp-server-dpop-scopes/README.md`](../../../examples/go/03-mcp-server-dpop-scopes/README.md), [`examples/python/03-mcp-server-dpop-scopes/README.md`](../../../examples/python/03-mcp-server-dpop-scopes/README.md), [`examples/typescript/03-mcp-server-fastmcp-dpop/README.md`](../../../examples/typescript/03-mcp-server-fastmcp-dpop/README.md)
 - [Connect an MCP Server guide](connect-mcp-server.md)
 - [Auth Client SDK guide](sdk-auth-client.md)
+- [Runtime Client Binding guide](runtime-client-binding.md)
 - [Concepts → Tokens & claims](../../concepts/tokens-and-claims.md)
 - [Concepts → DPoP](../../concepts/dpop-and-proof-of-possession.md)

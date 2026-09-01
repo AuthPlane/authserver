@@ -10,6 +10,7 @@ import (
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // consentHandler handles GET/POST /consent.
@@ -17,6 +18,7 @@ type consentHandler struct {
 	consent ConsentProvider
 	session *shared.SessionMiddleware
 	obs     *observability.Provider
+	urls    output.URLBuilder
 }
 
 func (h *consentHandler) handleGetConsent(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +30,7 @@ func (h *consentHandler) handleGetConsent(w http.ResponseWriter, r *http.Request
 
 	_, ok := shared.UserIDFromContext(r.Context())
 	if !ok {
-		http.Redirect(w, r, "/login?redirect="+url.QueryEscape(r.URL.String()), http.StatusSeeOther)
+		shared.RedirectInternal(w, r, h.urls, "/login?redirect="+url.QueryEscape(r.URL.String()), http.StatusSeeOther, h.obs.Logger)
 		return
 	}
 
@@ -51,10 +53,17 @@ func (h *consentHandler) handleGetConsent(w http.ResponseWriter, r *http.Request
 	cookie, _ := r.Cookie(h.session.CookieName)
 	csrfToken := ""
 	if cookie != nil {
-		csrfToken = h.session.CSRFToken(cookie.Value)
+		tok, err := h.session.CSRFToken(r.Context(), cookie.Value)
+		if err != nil {
+			h.obs.Logger.ErrorContext(r.Context(), "consent: CSRF token generation failed", "error", err)
+			shared.WriteErrorPage(w, r, http.StatusInternalServerError, "Internal Error", "Could not render the consent page. Please try again.")
+			return
+		}
+		csrfToken = tok
 	}
 
 	shared.RenderTemplate(r.Context(), w, http.StatusOK, consentTmpl, consentPageData{
+		FormAction:          shared.ResolvePath(r.Context(), h.urls, "/consent", h.obs.Logger),
 		SessionID:           view.SessionID,
 		ClientName:          view.ClientName,
 		ClientID:            view.ClientID,
@@ -80,7 +89,17 @@ func (h *consentHandler) handlePostConsent(w http.ResponseWriter, r *http.Reques
 
 	// Validate CSRF.
 	cookie, _ := r.Cookie(h.session.CookieName)
-	if cookie == nil || !h.session.ValidateCSRF(cookie.Value, r.FormValue("csrf_token")) {
+	if cookie == nil {
+		shared.WriteErrorPage(w, r, http.StatusForbidden, "Invalid Request", "CSRF validation failed. Please try again.")
+		return
+	}
+	valid, csrfErr := h.session.ValidateCSRF(r.Context(), cookie.Value, r.FormValue("csrf_token"))
+	if csrfErr != nil {
+		h.obs.Logger.ErrorContext(r.Context(), "consent: CSRF validation failed to resolve secret", "error", csrfErr)
+		shared.WriteErrorPage(w, r, http.StatusInternalServerError, "Internal Error", "Could not validate the request. Please try again.")
+		return
+	}
+	if !valid {
 		shared.WriteErrorPage(w, r, http.StatusForbidden, "Invalid Request", "CSRF validation failed. Please try again.")
 		return
 	}
@@ -215,7 +234,7 @@ font-weight:600;cursor:pointer;transition:all 0.2s ease;letter-spacing:0.01em}
 {{end}}
 {{if .ResourceSlug}}<div class="resource"><span class="slug">{{.ResourceSlug}}</span><span class="sep">·</span><span>{{.Resource}}</span></div>{{else if .Resource}}<div class="resource">{{.Resource}}</div>{{end}}
 </div>
-<form method="POST" action="/consent">
+<form method="POST" action="{{.FormAction}}">
 <input type="hidden" name="session_id" value="{{.SessionID}}">
 <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 <div class="section-label">Permissions requested</div>

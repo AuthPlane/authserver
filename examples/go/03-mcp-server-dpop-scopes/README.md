@@ -1,7 +1,7 @@
 # Tier 03 — MCP server + agent with DPoP + per-tool scopes (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 15 lines · Total example: 132 lines · SDK: go-sdk v0.1.1**
+**Auth-specific code: 15 lines · Total example: 132 lines · SDK: go-sdk v0.2.0**
 <!-- loccount:end -->
 
 A paired Go MCP server and agent that demonstrate two raised guard rails on
@@ -11,11 +11,15 @@ top of tier 01 / tier 02:
    ephemeral ES256 key, asks the AS to mint a `client_credentials` access
    token bound to that key (`cnf.jkt`), and signs a fresh DPoP proof JWT for
    every outbound call. A stolen access token alone is useless without the
-   private key.
+   private key — *at the AS*, which is where `cnf.jkt` is bound at issuance.
+   This example's resource server does not enforce it: see the
+   [DPoP-bound verification note](#whats-happening).
 2. **Per-tool scope enforcement.** The MCP server declares two tools — `echo`
    requires `mcp:echo`, `add_numbers` requires `mcp:add` — and each tool
    handler calls `claims.RequireScope(...)` before doing any work. A token
    that holds one scope but not the other can call exactly one of the tools.
+   Like guard rail 1, this is wired but not observable end to end today — no
+   request reaches a tool handler, so both tools 401 regardless of scope.
 
 Everything you need for both guard rails fits inside fifteen lines spread
 across `server/main.go` and `agent/main.go`; the rest is plain MCP and HTTP
@@ -34,9 +38,9 @@ plumbing.
 
 | | |
 |---|---|
-| **Time to run** | ~2 minutes (first build is ~90s, subsequent runs are seconds) |
+| **Time to run** | ~1 minute first run (AS image pull + `go build`); seconds warm. The `make docker-run` variant adds a ~90s image build. |
 | **Prereqs** | Docker 24+, `docker compose`, `go 1.25+`, `curl`, `jq` |
-| **SDK** | `github.com/authplane/go-sdk/{mcp,core}` v0.1.1 (Go module proxy) |
+| **SDK** | `github.com/authplane/go-sdk/{mcp,core}` v0.2.0 (Go module proxy) |
 | **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.4.1` |
 | **DPoP algorithm** | ES256 (ECDSA P-256). RS256 is also supported via `authplane.NewDPoPKeyMaterial(jose.RS256)`. |
 | **Pairs with** | [Tier 02 — Basic agent (Go)](../02-agent-basic/) — same client-credentials flow, but Bearer-only. This tier upgrades it to DPoP. |
@@ -46,13 +50,23 @@ plumbing.
 ```bash
 cp .env.example .env
 make run
-make verify   # no-op today — see callout above
+make verify   # fails at the last step today — see the note below
 ```
 
-`make run` builds the MCP server image and brings up authserver + mcp-server
-via `docker-compose.yml`. `make verify` registers the Resource + client,
-authorizes the client AS the Resource, then runs the agent (`go run ./agent`)
-and asserts both tools returned their expected payloads.
+`make run` starts the AS as a published container and the demo MCP server
+natively as a plain Go binary (`make docker-run` is the all-in-containers
+variant, via `docker-compose.yml`). `make verify` registers the Resource +
+client, then runs the agent (`go run ./agent`) and asserts both tools
+returned their expected payloads.
+
+> **`make verify` does not pass end to end yet.** Everything up to and
+> including token acquisition works: the agent gets a `client_credentials`
+> access token DPoP-bound to its ephemeral key (`cnf.jkt` set by the AS). The
+> two tool calls then fail, because the MCP adapter rejects the `DPoP`
+> authorization scheme outright — see the
+> [DPoP-bound verification note](#whats-happening) below for the mechanism.
+> This example is skipped in `docs-smoke` for that reason
+> (`.docssmoke-skip`).
 
 ## Step by step
 
@@ -166,16 +180,22 @@ describe what's happening so you can reproduce the flow by hand.
    go run ./agent
    ```
 
-   The agent calls both tools. The output looks like:
+   The agent calls both tools. **Today both calls return 401** — the resource
+   server rejects the `DPoP` authorization scheme before verifying anything
+   (see the [DPoP-bound verification note](#whats-happening)). Once the
+   adapter accepts the scheme, the output looks like:
 
    ```text
    echo: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hello from tier-03 agent"}], ...}}
    add_numbers: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"5"}], ...}}
    ```
 
-   Drop the `DPoP:` header (or replace the access token with a bearer-only
-   one) and the MCP server returns 401 — proof that DPoP is wired through
-   the full pipeline.
+   Sender-constraint is demonstrable at the AS, not at this resource server:
+   omit the `DPoP:` header from the `/oauth/token` call in step 4 and the AS
+   refuses to mint a token at all. The MCP server never checks the binding —
+   a plain `Authorization: Bearer <token>` would pass its JWT validation,
+   while the compliant `Authorization: DPoP <token>` request is the one that
+   401s.
 
 ## Before / After
 
@@ -247,7 +267,8 @@ carries the public JWK so the verifier can check the thumbprint against
 `cnf.jkt`. The `Authorization` scheme is `DPoP` (not `Bearer`) per
 RFC 9449 §7.1.
 
-**On the MCP server:**
+**On the MCP server** — *this is the path the code wires up; the note below
+explains why an inbound request never gets this far today:*
 `authplanemcp.NewAdapter` discovers AS metadata and warms the JWKS
 cache; `AuthMiddleware` validates each inbound token (signature,
 audience, expiry) and injects `*verifier.VerifiedClaims` into the
@@ -257,20 +278,28 @@ calls `ClaimsFromContext` and `claims.RequireScope` so an under-scoped
 token fails on the per-tool boundary with a clear
 `ErrInsufficientScope`, which MCP surfaces as `isError: true`.
 
-> **DPoP-bound verification note.** The MCP adapter's `AuthMiddleware` uses
-> `auth.RequireBearerToken` from the MCP Go SDK, which is Bearer-only — it
-> validates the JWT but does not re-verify the DPoP proof against the
-> request URL/method. The token's `cnf.jkt` claim is still visible to every
-> handler via `ClaimsFromContext(ctx).DPoPThumbprint()`. To enforce DPoP at
-> the middleware layer (htu/htm/ath checks + replay protection), bypass
-> `AuthMiddleware` for that route and call
+> **DPoP-bound verification note — this is why `make verify` fails.** The MCP
+> adapter's `AuthMiddleware` delegates to `auth.RequireBearerToken` from the
+> MCP Go SDK, which is Bearer-*only*: it lowercases the scheme and rejects
+> anything other than `bearer` with `401 "no bearer token"` before Authplane's
+> `verifyToken` ever runs. So the agent's RFC 9449 §7.1 `Authorization: DPoP
+> <token>` request never reaches the JWT validation described above — the tool
+> calls 401. And even if the scheme check passed, `verifyToken` discards the
+> `*http.Request`, so `htu`/`htm`/`ath`/`cnf.jkt` are unreachable and the proof
+> could not be checked against the request.
+>
+> Verified against `go-sdk/mcp` v0.2.0 and `modelcontextprotocol/go-sdk`
+> v1.4.1; v1.6.0 of the MCP Go SDK carries the same scheme check, so this is
+> not fixable by a version bump. Resource-side DPoP needs adapter support: the
+> route has to bypass `AuthMiddleware` and call
 > `adapter.Resource().VerifyToken(ctx, token, resource.WithDPoP(dpopCtx))`
-> directly. The `go-sdk/mcp` and `go-sdk/http` package READMEs (on the
-> Go module proxy) cover the full recipe.
-> This example keeps the MVP shape (middleware + JWT validation +
-> sender-constrained tokens via `cnf.jkt`); the bypass route is the next
-> level of strictness when the resource server itself must reject a
-> proofless token.
+> directly, which the `go-sdk/mcp` and `go-sdk/http` package READMEs (on the
+> Go module proxy) cover.
+>
+> What this tier *does* demonstrate today is the AS half: the token is minted
+> sender-constrained, with `cnf.jkt` bound to the agent's ephemeral key and
+> visible to every handler via `ClaimsFromContext(ctx).DPoPThumbprint()`.
+> Enforcement at the resource server is the missing half.
 
 ## Next
 

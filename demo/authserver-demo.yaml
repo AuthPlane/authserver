@@ -81,6 +81,11 @@ client_credentials:
 
 token_exchange:
   enabled: true
+  # the demo registers a single client that exchanges its own token, so this
+  # must be on. mcp-demo-server-start.sh also allowlists that client on both
+  # demo resources, so the operator gate here is populated, not empty — see
+  # docs/guides/upstream-providers/token-exchange-grant.md (Step 3) for what an
+  # empty allowlist composes to instead.
   allow_self_exchange: true
   max_chain_depth: 4
   token_expiry: 1h
@@ -97,7 +102,7 @@ broker_providers:
     protocol: oauth
     config_data:
       client_id: "demo-fake-google-client-id.apps.googleusercontent.com"
-      client_secret_env: CONNECTOR_GOOGLE_SECRET
+      client_secret_ref: CONNECTOR_GOOGLE_SECRET
       authorize_url: https://accounts.google.com/o/oauth2/v2/auth
       token_url: https://oauth2.googleapis.com/token
       response_format: standard

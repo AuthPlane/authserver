@@ -47,12 +47,20 @@ oidc:
   enabled: true
   issuer: https://<your-org>.okta.com
   client_id: "0oab1c2d3eFgHiJkL4x7"
-  client_secret: "<from IdP — prefer client_secret_env>"
+  client_secret: "<from IdP — prefer client_secret_ref>"
   display_name: Okta            # button text on the login page
   redirect_uri: https://auth.example.com/oidc/callback
   scopes: [openid, email, profile]
-  show_local_login: true        # set false to hide the password form
+  show_local_login: true        # false disables password login: no form, POST /login answers 404
 ```
+
+`show_local_login: false` turns local password login off, not just the form:
+`POST /login` answers 404 for every account, including any local admin. Only the
+browser password flow is affected — the admin API still authenticates with its
+API key, and the `authserver admin` CLI works directly against the datastore, so
+neither depends on local login. If the IdP becomes unavailable and you need
+password sign-in back, set `AUTHPLANE_OIDC_SHOW_LOCAL_LOGIN=true` (or the YAML
+key) and restart authserver.
 
 Or via environment variables (verified against [`docs/reference/env-vars.md`](../../reference/env-vars.md)):
 
@@ -107,6 +115,7 @@ authserver admin user list | grep your-email@example.com
 | Redirect loop between Authplane and IdP | `oidc.redirect_uri` points to the IdP, not to Authplane | The redirect URI must be **Authplane's** callback (`/oidc/callback`), not the IdP's. |
 | "OIDC state verification failed" | Browser cookies blocked, multi-tab login race, or replayed state | One tab per login attempt; ensure the session cookie domain matches the issuer; check `session.secure: true` if issuer is HTTPS. (`api/public/oauth/oidc.go:96`) |
 | Login works but the user can't reach `/authorize` afterward | `show_local_login: false` and the user has no consent grants yet | Normal first-time path — the consent screen renders next. If it doesn't, check that the OAuth client redirect URI matches. |
+| `POST /login` returns 404 | `show_local_login: false` — local password login is disabled | Expected. Sign in through the IdP button, or set `AUTHPLANE_OIDC_SHOW_LOCAL_LOGIN=true` and restart to restore password login. |
 
 ## Limitations
 

@@ -13,8 +13,8 @@ import (
 
 // DCRAdmin is the local interface for reading/setting DCR mode at runtime.
 type DCRAdmin interface {
-	GetMode() string
-	SetMode(mode string)
+	GetMode(ctx context.Context) (string, error)
+	SetMode(ctx context.Context, mode string) error
 }
 
 // SettingsStore is the local interface for persisting runtime settings.
@@ -52,8 +52,12 @@ func (h *dcrSettingsHandler) handleGetDCRSettings(w http.ResponseWriter, r *http
 	_, span := h.obs.Tracer.Start(r.Context(), "dcrSettingsHandler.handleGetDCRSettings")
 	defer span.End()
 
-	mode := h.dcr.GetMode()
-	shared.WriteJSON(w, http.StatusOK, dcrSettingsView{Mode: mode})
+	if mode, err := h.dcr.GetMode(r.Context()); err != nil {
+		h.obs.Logger.ErrorContext(r.Context(), "failed to get DCR mode", "error", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal error")
+	} else {
+		shared.WriteJSON(w, http.StatusOK, dcrSettingsView{Mode: mode})
+	}
 }
 
 func (h *dcrSettingsHandler) handleUpdateDCRSettings(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +81,12 @@ func (h *dcrSettingsHandler) handleUpdateDCRSettings(w http.ResponseWriter, r *h
 		return
 	}
 
-	previousMode := h.dcr.GetMode()
+	previousMode, err := h.dcr.GetMode(r.Context())
+	if err != nil {
+		h.obs.Logger.ErrorContext(r.Context(), "failed to get DCR mode", "error", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 
 	// Persist to database.
 	if err := h.settings.Set(ctx, dcrModeSettingsKey, req.Mode); err != nil {
@@ -87,7 +96,11 @@ func (h *dcrSettingsHandler) handleUpdateDCRSettings(w http.ResponseWriter, r *h
 	}
 
 	// Apply at runtime.
-	h.dcr.SetMode(req.Mode)
+	if err := h.dcr.SetMode(r.Context(), req.Mode); err != nil {
+		h.obs.Logger.ErrorContext(ctx, "failed to set DCR mode", "error", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 
 	h.obs.Logger.InfoContext(ctx, "admin updated DCR mode",
 		"previous_mode", previousMode,

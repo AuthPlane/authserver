@@ -1,6 +1,7 @@
 package testdata
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,7 +38,7 @@ func RunBrokerProviderStoreTests(t *testing.T, newDeps func(*testing.T) BrokerPr
 		// Single-key adapter-shaped JSON. Compared via JSON equality so the
 		// test is portable across sqlite TEXT and postgres JSONB
 		// (the data model).
-		cfg := []byte(`{"client_id":"abc","client_secret_env":"GOOGLE_CLIENT_SECRET","authorize_url":"https://accounts.google.com/o/oauth2/v2/auth"}`)
+		cfg := []byte(`{"client_id":"abc","client_secret_ref":"GOOGLE_CLIENT_SECRET","authorize_url":"https://accounts.google.com/o/oauth2/v2/auth"}`)
 		now := time.Now().UTC().Truncate(time.Second)
 
 		p := &resource.BrokerProvider{
@@ -139,6 +140,111 @@ func RunBrokerProviderStoreTests(t *testing.T, newDeps func(*testing.T) BrokerPr
 		err := deps.Providers.Delete(ctx, p.ID)
 		if !errors.Is(err, domain.ErrBrokerProviderHasReferences) {
 			t.Fatalf("expected ErrBrokerProviderHasReferences, got %v", err)
+		}
+	})
+
+	t.Run("Create_EncSecret_Roundtrip", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+
+		now := time.Now().UTC().Truncate(time.Second)
+		secretBytes := []byte{0x01, 0x02, 0x03, 0xde, 0xad, 0xbe, 0xef}
+		p := &resource.BrokerProvider{
+			ID:               "p-enc-rt",
+			Slug:             "enc-secret-rt",
+			DisplayName:      "Enc Secret (round-trip)",
+			Protocol:         resource.ProtocolOAuth,
+			ConfigData:       []byte(`{}`),
+			EncSecretData:    secretBytes,
+			EncSecretBackend: "aes_master",
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if err := deps.Providers.Create(ctx, p); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		got, err := deps.Providers.GetByID(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if !bytes.Equal(got.EncSecretData, secretBytes) {
+			t.Errorf("EncSecretData mismatch: got %x, want %x", got.EncSecretData, secretBytes)
+		}
+		if got.EncSecretBackend != "aes_master" {
+			t.Errorf("EncSecretBackend = %q, want %q", got.EncSecretBackend, "aes_master")
+		}
+	})
+
+	t.Run("Create_EncSecret_NilIsNull", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+
+		now := time.Now().UTC().Truncate(time.Second)
+		p := &resource.BrokerProvider{
+			ID:          "p-enc-nil",
+			Slug:        "enc-secret-nil",
+			DisplayName: "Enc Secret (nil)",
+			Protocol:    resource.ProtocolOAuth,
+			ConfigData:  []byte(`{}`),
+			// EncSecretData and EncSecretBackend intentionally omitted (zero values).
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := deps.Providers.Create(ctx, p); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		got, err := deps.Providers.GetByID(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if len(got.EncSecretData) != 0 {
+			t.Errorf("EncSecretData: expected nil/empty, got %x", got.EncSecretData)
+		}
+		if got.EncSecretBackend != "" {
+			t.Errorf("EncSecretBackend = %q, want empty", got.EncSecretBackend)
+		}
+	})
+
+	t.Run("Update_EncSecret_ClearedToNull", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+
+		now := time.Now().UTC().Truncate(time.Second)
+		p := &resource.BrokerProvider{
+			ID:               "p-enc-clear",
+			Slug:             "enc-secret-clear",
+			DisplayName:      "Enc Secret (clear on update)",
+			Protocol:         resource.ProtocolOAuth,
+			ConfigData:       []byte(`{}`),
+			EncSecretData:    []byte{0x01, 0x02, 0x03},
+			EncSecretBackend: "aes_master",
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if err := deps.Providers.Create(ctx, p); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		// Rotate the secret away (column→ref) — the store must persist the cleared
+		// columns as SQL NULL via nullableBytes(nil) / sql.NullString.
+		p.EncSecretData = nil
+		p.EncSecretBackend = ""
+		p.UpdatedAt = now.Add(time.Second)
+		if err := deps.Providers.Update(ctx, p); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+
+		got, err := deps.Providers.GetByID(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if len(got.EncSecretData) != 0 {
+			t.Errorf("EncSecretData: expected NULL/empty after clear, got %x", got.EncSecretData)
+		}
+		if got.EncSecretBackend != "" {
+			t.Errorf("EncSecretBackend = %q, want empty after clear", got.EncSecretBackend)
 		}
 	})
 }

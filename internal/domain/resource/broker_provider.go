@@ -15,8 +15,15 @@ type BrokerProvider struct {
 	DisplayName string
 	Protocol    Protocol
 	ConfigData  []byte
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// EncSecretData is the encrypted config secret (e.g. client_secret / sa_key)
+	// at rest; empty when the provider resolves its secret via a *_ref env var.
+	// Never serialized into ConfigData.
+	EncSecretData []byte
+	// EncSecretBackend records the DataEncryptor driver that produced
+	// EncSecretData (empty iff EncSecretData is empty). For audit / crypto-agility.
+	EncSecretBackend string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // Protocol is the wire protocol the AS speaks to the upstream provider.

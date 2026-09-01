@@ -34,16 +34,19 @@ Three indexes are pre-built (`idx_audit_events_created_at`, `idx_audit_events_ac
 
 ## Canonical action names
 
-Full list lives in `internal/domain/audit/entity.go:9-160`. The ones you query most often:
+Full list lives in the `Action` constants in `internal/domain/audit/entity.go` (and in [`audit-events.md`](../../reference/audit-events.md)). The ones you query most often:
 
 | Action | Emitted by | When |
 |---|---|---|
-| `token.issued` | `internal/services/token.go:272` | First leg of auth-code flow lands a JWT. |
-| `token.refreshed` | `internal/services/token.go:429` | Refresh-token rotation succeeded. |
-| `token.revoked` | `internal/services/revocation.go:138` | `POST /oauth/revoke` accepted. |
+| `token.issued` | `exchangeCode` in `internal/services/token.go` | First leg of auth-code flow lands a JWT. |
+| `token.refreshed` | `refreshToken` in `internal/services/token.go` | Refresh-token rotation succeeded. |
+| `token.revoked` | `RevokeToken` in `internal/services/revocation.go` | `POST /oauth/revoke` accepted. |
 | `token.exchanged` | `internal/services/token_exchange.go:463` | RFC 8693 exchange minted a token. |
 | `token.exchange_denied` | `internal/services/token_exchange.go:639` | Exchange refused (scope, allowlist, policy). |
-| `family.revoked` | `internal/services/token.go:695` | Refresh-token reuse detected → family burnt. |
+| `auth_code.reused` | `handleCodeReuse` in `internal/services/token.go` | Authorization code replayed. Written on every replay, including the ones that revoke nothing. |
+| `family.revoked` | `revokeFamilyHalf` in `internal/services/token.go` | Refresh-token **or** authorization-code reuse detected → family burnt. The detail prefix says which. |
+| `family.revocation_failed` | `revokeFamilyHalf` in `internal/services/token.go` | Reuse detected but the family could **not** be revoked — it is still live; go to the [incident runbook](incident-runbook.md#incident-refresh-token-reuse-burst). |
+| `family.denylist_failed` | `denylistFamilyJTIs` in `internal/services/token.go` | The family's access-token JTIs could not be denylisted; they pass introspection / exchange until `exp`. Always next to a `family.revoked` or `family.revocation_failed` row for the same family. |
 | `client.registered` | DCR landing | New OAuth client created via DCR. |
 | `client.created_admin` | Admin path | New client created via the admin API / CLI. |
 | `client.suspended` / `client.revoked` | Admin path | State change on a client. |
@@ -94,14 +97,17 @@ curl -fsS "http://localhost:9001/admin/audit?client_id=$CLIENT_ID&limit=500" \
 
 Each emit site stores key=value pairs in `detail`. Examples from source:
 
-- **`token.issued`** (`internal/services/token.go:272`) → `family=<family_id>`
-- **`token.refreshed`** (`internal/services/token.go:429`) → `family=<family_id>`
-- **`family.revoked`** (`internal/services/token.go:695`) → `reuse_detection family=<family_id>`
+- **`token.issued`** (`exchangeCode` in `internal/services/token.go`) → `family=<family_id>`
+- **`token.refreshed`** (`refreshToken` in `internal/services/token.go`) → `family=<family_id>`
+- **`auth_code.reused`** (`handleCodeReuse` in `internal/services/token.go`) → `code_reuse session=<auth_session_id> verifier=valid|invalid` — `actor_id` / `client_id` name the user and client the code was issued to; the `client_id` the replayer presented is on the `token_issue.denied` row of the same request
+- **`family.revoked`** (`revokeFamilyHalf` in `internal/services/token.go`) → `reuse_detection family=<family_id>` from refresh-token reuse, `code_reuse family=<family_id>` from authorization-code reuse
+- **`family.revocation_failed`** (`reportReuseHalfFailure`, same file) → `reuse_detection family=<family_id> path=reuse half=family`, or `code_reuse family=<family_id> path=code_reuse half=family` — reuse was detected but the family could not be revoked; it is still live
+- **`family.denylist_failed`** (`reportReuseHalfFailure`, same file) → `reuse_detection family=<family_id> path=reuse half=jti`, or `code_reuse family=<family_id> path=code_reuse half=jti` — the family's access-token JTIs could not be denylisted; written next to whichever family row the detection left
 - **`token.exchanged` (mint dispatch)** (`internal/services/token_exchange.go:1115`) → `jti=… sub=… subject_client=… actor_client=… type=mint_dispatch resource=… scopes=… chain_kind=… via_link=…`
 - **`token.exchanged` (broker dispatch)** (`internal/services/token_exchange.go:1434`) → `issuance_id=… sub=… subject_client=… type=broker_dispatch resource=… provider=… scopes=…`
 - **`token.exchanged` (fronted broker)** (`internal/services/token_exchange.go:1636`) → `… type=broker_dispatch resource=… scopes=… chain_kind=fronted via_link=… target_kind=broker issuance_id=…`
-- **`token.revoked` (machine)** (`internal/services/revocation.go:193`) → `machine_token jti=<jti>`
-- **`token.revoked` (family)** (`internal/services/revocation.go:138`) → `family=<family_id>`
+- **`token.revoked` (machine)** (`tryRevokeMachineToken` in `internal/services/revocation.go`) → `machine_token jti=<jti>`
+- **`token.revoked` (family)** (`RevokeToken` in `internal/services/revocation.go`) → `family=<family_id>`
 
 The detail string is plain text — grep / `jq -r` / `awk -F= …` all work.
 
@@ -170,11 +176,13 @@ curl -fsS "http://localhost:9001/admin/audit?action=upstream.token.issued&since=
 ### "Was this token family ever reused?"
 
 ```bash
-curl -fsS "http://localhost:9001/admin/audit?action=family.revoked&limit=500" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq --arg f "$FAMILY_ID" '.events[] | select(.detail | contains($f))'
+for action in family.revoked family.revocation_failed family.denylist_failed; do
+  curl -fsS "http://localhost:9001/admin/audit?action=$action&limit=500" \
+    -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq --arg f "$FAMILY_ID" --arg a "$action" '.events[] | select(.detail | contains($f)) | {action: $a, created_at, detail}'
+done
 ```
 
-If a row comes back, the metric `authserver_refresh_token_reuse_total` (canonical: `internal/observability/metrics.go:140`) also fired — confirm with Prometheus.
+Every detection leaves exactly one **family** row: `family.revoked` means the family was revoked; `family.revocation_failed` means it was not and **is still live** — go to the [incident runbook](incident-runbook.md#incident-refresh-token-reuse-burst). A `family.denylist_failed` row next to either means the family's already-issued access tokens were not denylisted and pass introspection / exchange until `exp`; it is additive, so `family.revoked + family.revocation_failed` still counts detections. Either row implies `authserver_refresh_token_reuse_total` (canonical: `RefreshTokenReuse` in `internal/observability/metrics.go`) also fired — confirm with Prometheus. Audit rows are written best-effort — a store failure logs the full event and increments `authserver_audit_events_dropped_total` (`AuditEventsDropped` in `internal/observability/metrics.go`) — so a metric count higher than the row count points at dropped events, not at undetected reuse.
 
 ### "Reconstruct a delete-then-reconnect cycle"
 
@@ -218,7 +226,7 @@ For multi-hop delegation, follow `subject_client` → `actor_client` across cons
 | "Who suspended this client?" | `?action=client.suspended&client_id=…` |
 | "Forensic JSON dump for ticket #N" | Page through `since=…&until=…` (Step 5). |
 | "Show me every action this user took" | `?actor_id=…&limit=500` |
-| "Refresh-token reuse this month?" | `?action=family.revoked&since=…` + Prometheus `authserver_refresh_token_reuse_total`. |
+| "Refresh-token reuse this month?" | `?action=family.revoked&since=…` **plus** `?action=family.revocation_failed&since=…` — every detection writes exactly one of the two; the second set is the families that were still live. Cross-check with Prometheus `authserver_refresh_token_reuse_total`. |
 
 ## See also
 

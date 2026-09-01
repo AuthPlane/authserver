@@ -124,6 +124,47 @@ func TestCheckFile_FindsAndIgnores(t *testing.T) {
 	}
 }
 
+// TestDiscoverFiles_MarkdownRoots pins the root-level files the checker is
+// responsible for. The list is every Markdown root maintained in this repo
+// — publishing is not the criterion.
+//
+// It guards one direction only: a root removed from discoverFiles fails
+// here. A root never registered stays invisible, because this list is a
+// copy of that one — which is how SECURITY.md sat outside the checker
+// while it shipped three dead links.
+func TestDiscoverFiles_MarkdownRoots(t *testing.T) {
+	dir := t.TempDir()
+
+	roots := []string{
+		"README.md", "AGENTS.md", "CONTRIBUTING.md",
+		"SECURITY.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md",
+		"PROJECT_LAYOUT_DATA_ENCRYPTION.md", "llms.txt",
+	}
+	for _, name := range roots {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("# x\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	found, err := discoverFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]struct{}{}
+	for _, p := range found {
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[rel] = struct{}{}
+	}
+	for _, name := range roots {
+		if _, ok := got[name]; !ok {
+			t.Errorf("%s is not covered by the link checker (got %v)", name, got)
+		}
+	}
+}
+
 func TestIsDigitOnly(t *testing.T) {
 	if !isDigitOnly("42") {
 		t.Error("42 should be digit-only")

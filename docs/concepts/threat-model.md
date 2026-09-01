@@ -66,10 +66,10 @@ flowchart TB
 
 **Why it's contained**:
 - **Rotation on every use**: Each refresh gives you a new token and invalidates the old one. The attacker and the legitimate client can't both succeed.
-- **Reuse detection**: If a consumed refresh token is presented again, authserver revokes the **entire token family** — every refresh token in that chain becomes invalid. Both the attacker and the legitimate client lose access, forcing re-authentication.
+- **Reuse detection**: If a consumed refresh token is presented again, authserver revokes the **entire token family** — every refresh token in that chain becomes invalid. Both the attacker and the legitimate client lose access, forcing re-authentication. Already-issued access tokens are not reached: they live to `exp` (15 minutes by default; 1 hour for tokens exchanged from them) — see [what gets revoked when](../guides/operate/token-design-internals.md#what-gets-revoked-when).
 - **Hashed storage**: Refresh tokens are stored as SHA-256 hashes. A database breach doesn't expose raw tokens.
 
-**What to monitor**: `authplane_refresh_token_reuse_total` — any non-zero value means someone replayed a consumed token. Investigate immediately.
+**What to monitor**: the audit log for `action=family.revoked` or `action=family.revocation_failed` — every detection writes exactly one of the two (the second means the family could not be revoked and is still live), both with `reuse_detection` in the detail. Any such event means someone replayed a consumed token. Investigate immediately. If `authserver_revocation_failures_total{path="reuse",half="family"}` fires, the detection happened but the family could not be revoked — it is still live (`half="jti"` alone means the family is dead and only its already-issued access tokens outlive detection, bounded by `exp`); follow the [incident runbook](../guides/operate/incident-runbook.md#incident-refresh-token-reuse-burst).
 
 ### T3: Client impersonation
 
@@ -91,7 +91,7 @@ flowchart TB
 - **HMAC-signed cookies**: The session cookie is signed with the session secret. Forging a cookie requires the secret.
 - **`HttpOnly`**: JavaScript can't read the cookie (blocks XSS-based theft).
 - **`Secure` flag**: In production (non-localhost issuer), the cookie is only sent over HTTPS.
-- **`SameSite=Lax`**: Blocks the cookie from being sent on cross-site requests (mitigates CSRF for most cases).
+- **`SameSite=Lax`**: Keeps the session cookie off cross-site subrequests and off non-GET top-level navigations. Treat this as defense in depth, not as the CSRF control: a `SameSite=None` deployment gets nothing from it, and `POST /login` has no session cookie to protect in the first place. The form that does ride this cookie, `POST /consent`, carries a per-form CSRF token derived from it.
 
 **What to configure**: Set `session.secret` to a strong random value (32+ bytes). Set `session.secure: true` in production. These are enforced by startup validation for non-localhost issuers.
 
@@ -100,11 +100,26 @@ flowchart TB
 **Scenario**: An attacker hammers the login endpoint with password guesses.
 
 **Why it's slow**:
-- **Per-IP rate limiting**: The login endpoint has its own rate limiter, separate from the global one.
-- **Account lockout**: After `auth_fail_max` failures (default: 10) within `auth_fail_window` (default: 10 minutes), the account is locked for `auth_lockout` (default: 15 minutes).
-- **bcrypt hashing**: Each password check takes ~100ms, making brute force computationally expensive.
+- **Per-IP throughput limiting**: Every public endpoint sits behind a per-source-address
+  request-rate limiter (`rate_limit.requests_per_second`, `rate_limit.burst`).
+- **Account lockout**: After `auth_fail_max` failed logins (default: 10) within
+  `auth_fail_window` (default: 10 minutes), the submitted identity is locked for
+  `auth_lockout` (default: 15 minutes). The lockout is keyed on the identity together with
+  the source address, and it gates `POST /login` only — a locked-out account never affects
+  token issuance, discovery or JWKS, for that user or any other. A successful login clears
+  accumulated failures.
+- **bcrypt hashing**: Each password check takes ~100ms, making brute force computationally
+  expensive. The lockout is checked before hashing, so blocked attempts cost nothing.
 
-**What to monitor**: `authplane_auth_failures_total` and account lockout events in the audit log.
+**What to monitor**: `auth.locked_out` events in the audit log.
+
+**Behind a reverse proxy**: authserver reads the source address from the connection only —
+`X-Forwarded-For` is never trusted, because a header any client can set would make every
+per-address limit forgeable. Behind a proxy every request therefore presents the proxy's
+address, and the lockout key degrades to identity-only. That still bounds password guessing
+per account; what it cannot do is tell a targeted lockout attempt against one account apart
+from that account's own failures. Resolving real client addresses would need explicit
+opt-in trusted-proxy configuration, which authserver does not currently offer.
 
 ### T6: Open redirect
 
@@ -176,10 +191,10 @@ flowchart TB
 
 **Why it fails**:
 - **Authentication required**: Requires a valid subject token (proving user identity) AND client authentication (proving the server's identity).
-- **Three-bound enforcement**: `BrokerIssuer` enforces three checks on every vend:
-  1. requested ⊆ `consent_grants.scopes` — the user must have consented for this agent on this resource (bound C).
-  2. requested → upstream-mapped ⊆ `broker_grants.scopes_granted` — the user must have authorized the upstream for these scopes (bound E).
-  3. The acting client must satisfy the resource's `policy.exchange.allowed_client_ids` — empty allows any consented client.
+- **Three-bound enforcement**: three checks gate every vend, spread across `Exchange`, `dispatchBroker` and `BrokerIssuer` — not all in the issuer:
+  1. requested ⊆ `consent_grants.scopes` — the user must have consented for this agent on this resource (bound C). Enforced by `dispatchBroker`'s agent-attestation gate, which is the only place on this path that reads `consent_grants`. A fronted Mint→Broker exchange leaves dispatch before that gate, which is why the fronting link's `scope_map` stands in for it there.
+  2. requested → upstream-mapped ⊆ `broker_grants.scopes_granted` — the user must have authorized the upstream for these scopes (bound E). This is the bound `BrokerIssuer` itself owns; it holds no consent-grant dependency.
+  3. The acting client must satisfy the resource's `policy.exchange.allowed_client_ids` — empty allows any client. Enforced in dispatch before either of the above.
 - **Per-vend refresh**: Each vend refreshes the upstream token rather than caching access tokens; revocation upstream propagates within one vend.
 - **Actor token rejection**: Broker exchange rejects actor tokens — it's impersonation-only.
 - **Audit trail**: Every issuance is recorded in the `issuances` table with the user, agent, resource, scopes, and `dpop_jkt` (forensics contract — see `the data model` §2.5).
@@ -231,10 +246,10 @@ flowchart TB
 **Scenario**: An attacker registers an MCP server client and tries to exchange tokens belonging to users of a different application.
 
 **Why it fails**:
-- **Per-resource exchange policy**: Each Mint or Broker resource carries `policy.exchange.allowed_client_ids` — only clients in that list (or any consented client when the list is empty) may act for that resource.
-- **Both identities checked**: The subject token's `client_id` (which app issued it) and the requesting client's `client_id` (who's asking for the exchange) must both pass the per-resource policy.
-- **Consent** still applies: even an allowed client must have a `consent_grants` row for the (user, agent, resource) tuple covering the requested scopes.
-- **Audit trail**: Both client IDs are recorded on the `issuances` row for every exchange.
+- **Per-resource exchange policy**: Each Mint or Broker resource carries `policy.exchange.allowed_client_ids` — only clients in that list (or any client when the list is empty — user consent is a separate gate, skipped for Mint self-exchange and on fronted paths, Mint→Mint and Mint→Broker alike) may act for that resource.
+- **The acting client is gated**: the per-resource policy is matched against the requesting client's `client_id` (who's asking for the exchange). The subject token's `client_id` (the app the token was issued to) is *not* matched against the allowlist — it is the lookup key for the consent grant below, so it constrains which consent row must exist rather than who may act.
+- **Consent** still applies: even an allowed client must have a `consent_grants` row for the (user, agent, resource) tuple covering the requested scopes — except a Mint self-exchange (`allow_self_exchange: true`, same `client_id`) or a fronted exchange, which skip this gate. Fronting skips it on both target kinds: on Mint→Mint the link stands in for the consent row, and on Mint→Broker dispatch hands off to the fronted-broker path before the agent-attestation lookup, so no `consent_grants` row is consulted there either. Neither is unbounded: every requested target scope must appear in the fronting link's `scope_map` and the subject token must already cover the source side of that mapping — and a Broker vend still has to fit inside the upstream `broker_grants` ceiling. The two paths do not derive that source-side requirement the same way, and the difference is only visible on a `scope_map` where several source keys point at one target: Mint→Broker (`validateBrokerTargets`) clears the target if the subject carries **any** of them, while Mint→Mint (`requiredSourceScopesForTargets`) requires the lexicographically first one specifically. So `{"a": ["t"], "b": ["t"]}` with a `b`-only subject token reaches `t` through a Broker target and is denied `invalid_scope` through a Mint one. Single-source maps — the common shape — behave identically.
+- **Audit trail**: every exchange writes an `issuances` row carrying the acting `client_id` (on a fronted exchange, the source resource's slug), the subject user, the resource and the granted scopes. The row has a single `client_id` column — the subject token's own `client_id` is not persisted there; delegation is reconstructed from `agent_id` + `agent_chain` and the token's `act` claim.
 
 ### T18: Machine token abuse
 
@@ -257,8 +272,9 @@ These are the signals that tell you something might be wrong:
 
 | Signal | Metric / Log | What it means |
 |--------|-------------|---------------|
-| Refresh token reuse | `authplane_refresh_token_reuse_total` | Someone replayed a consumed token. Possible theft. |
-| Auth failures spike | `authplane_auth_failures_total` | Brute force attempt or credential stuffing. |
+| Refresh token reuse | Audit log: `action=family.revoked` (detail carries `reuse_detection`) | Someone replayed a consumed token. Possible theft. |
+| Auth failures spike | Audit log: `action=user.login_failed` | Brute force attempt or credential stuffing. |
+| Account lockout engaged | Audit log: `action=auth.locked_out` (detail carries `email` and `until`) | An identity crossed `auth_fail_max`. One event per lockout, not per blocked request. |
 | DPoP replay attempts | `authplane_dpop_proofs_rejected_total{reason=replay}` | Someone is replaying captured DPoP proofs. |
 | Token exchange denials | `authplane_token_exchange_denied_total` | Unauthorized exchange attempts. Check the `reason` label. |
 | Machine token denials | `authplane_client_credentials_denied_total` | Clients trying grants they're not authorized for. |
@@ -309,6 +325,11 @@ These are things authserver doesn't protect against. They're design decisions, n
 | **Single signing key per instance** | Simplicity. Multi-region deployments need shared keys. | Use Vault Transit or `postgres_key` store for HA deployments. |
 | **No client authentication for public clients** | MCP clients (Claude Code, Claude Desktop) can't keep secrets. MCP spec requires public clients. | Security relies on PKCE + refresh token rotation. This is standard OAuth 2.1 practice. |
 | **In-memory rate limiting** | Counters reset on restart and aren't shared across instances. | Use an external rate limiter (load balancer, API gateway) for multi-instance deployments. |
+| **Account lockout is per process** | Lockout counters live in memory, so each replica keeps its own. An N-replica deployment gives a password guesser roughly N× the failure budget before any lockout engages, and a restart clears the state. | Run a single replica where account lockout is a load-bearing control, or enforce it at a shared component in front. |
+| **Account lockout is evadable from many source addresses** | The lockout key is the identity *and* the source address. Exposed directly to the internet, an attacker with N addresses gets N × `auth_fail_max` guesses against one account and never trips a lockout. Behind a reverse proxy the address component is constant, so the key collapses to identity-only and the lockout does bound guessing per account — the two deployments differ here. The previous IP-only key was equally evadable, so this is a property of account lockout, not a regression. | Rely on per-address throughput limiting and bcrypt for the distributed case; treat account lockout as protection against a single noisy source, not a global guess budget. |
+| **Lockout tracking is bounded** | The lockout map is keyed partly on the submitted email address, so its key space is caller-chosen and cheap to fill — roughly four source addresses, each inside the per-address rate limit, hold it at `rate_limit.max_tracked_identities` (default 250000) indefinitely. At the bound the server evicts an entry that is *not* currently locked rather than refusing the newcomer, so a flood cannot leave an untouched account unprotected; lockouts already in force are never evicted. What a sustained flood can do is reset an account's partial failure count, which costs the attacker a full refill of the map each time. | Raise the bound alongside `auth_fail_window`, which scales the live set linearly. Two distinct warnings: "…at capacity — evicting unlocked entries" means the map is full and absorbing a flood normally; "…at capacity with every identity locked — refusing" means the control turned a newcomer away. Alert on the second. |
+| **Failed logins write audit rows the attacker sizes** | Two events on the login path persist a row carrying the submitted address, up to 254 bytes of caller-chosen text, and the key space is caller-chosen so invented addresses work. `user.login_failed` is written on **every** failed attempt, including addresses that match no account — that is deliberate, because suppressing it for unknown users is what left an enumeration sweep with no durable trail, and the constant-time login means the response cannot tell the two apart anyway. `auth.locked_out` adds one more row per ten failures. At the per-address rate limit that is roughly 8.6M rows a day per source address. The cost is not only storage: `AuditService.Record` writes synchronously on the request goroutine and then logs the event at INFO with the address in `detail`, so each probe also buys a blocking insert and a second log line on top of the WARN the denial already emits — it compounds with the bcrypt CPU in the row above. `authserver purge` does not cover `audit_events` — it purges tokens, revocations, nonces and JTIs — so the growth is permanent unless you prune the table yourself. | Size the audit store for it and schedule your own retention on `audit_events`. Do not suppress the unknown-address rows to control the volume: that is the trail an enumeration attempt leaves, and `reason=user_not_found` is what makes it separable from ordinary mistyped passwords. Per-address throughput limiting on `POST /login` is what bounds the rate. |
+| **A failed login costs a full bcrypt derivation** | Every rejected login runs one bcrypt comparison at `DefaultBcryptCost`, about 200ms of CPU, including for addresses that match no account. That uniformity is deliberate — returning early is what made the login page a user-enumeration oracle — but it means an unauthenticated request can spend server CPU. Account lockout does not bound it: the key is the submitted identity, so an attacker who never repeats an address is never a locked identity, and the lockout gate sits ahead of bcrypt precisely so *blocked* attempts stay free. Throughput limiting is the only control, and the default is not sized for a 200ms handler: `rate_limit.requests_per_second` is 100, and `ClientIP` keys on `RemoteAddr` ignoring `X-Forwarded-For`, so behind a reverse proxy every caller shares one bucket — roughly 20 seconds of bcrypt CPU per second of wall clock. | Lower `rate_limit.requests_per_second`, or put a tighter login-specific limit on `POST /login` at your gateway, sized against the cores you are willing to give the login path. Do not try to fix it by returning early for unknown addresses; that reinstates the enumeration oracle. |
 | **No mTLS termination** | authserver doesn't terminate TLS — it's designed to run behind a reverse proxy. | Put Caddy, nginx, or a load balancer in front with proper TLS configuration. |
 | **JWT revocation is not instant** | JWTs are verified locally by MCP servers. A revoked JWT remains valid until it expires or the MCP server checks introspection. | Keep token expiry short (15 minutes default). Use the introspection endpoint for real-time revocation checks. |
 

@@ -119,7 +119,7 @@ authserver admin provider create --slug github --display-name "GitHub" \
 authserver admin provider delete --id $PROV_ID
 ```
 
-`github-provider.json` carries `client_secret_env` (the **name** of the env var holding the secret) — never the secret value itself.
+`github-provider.json` carries `client_secret_ref` (the **name** of the env var holding the secret) — never the secret value itself.
 
 ---
 

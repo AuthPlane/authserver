@@ -88,7 +88,7 @@ func TestConnectionVend_ViaTokenExchange_HappyPath(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",
@@ -205,7 +205,7 @@ func TestConnectionVend_ViaTokenExchange_NotConnected(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",
@@ -222,7 +222,7 @@ func TestConnectionVend_ViaTokenExchange_NotConnected(t *testing.T) {
 
 	// Register actor MCP + per-MCP consent so dispatchBroker reaches
 	// BrokerIssuer.Issue ( bound-C requires the attestation to
-	// cover the requested upstream scope, so include "repo"). 
+	// cover the requested upstream scope, so include "repo").
 	// bind the agent's auto-generated client_id via runtime.client_ids.
 	h.AdminCreateResource(e2e.CreateResourceSpec{
 		Slug:        mcpResourceSlug,

@@ -100,7 +100,7 @@ func TestIsPrivateIP_SpecialUseRanges(t *testing.T) {
 		{"198.19.255.255", "RFC 2544 benchmark upper"},
 		{"198.51.100.1", "RFC 5737 TEST-NET-2"},
 		{"203.0.113.1", "RFC 5737 TEST-NET-3"},
-		{"224.0.0.1", "RFC 5771 multicast lower"},
+		{"224.0.0.1", "RFC 5771 multicast — inside 224.0.0.0/24, also caught by stdlib"},
 		{"239.255.255.255", "RFC 5771 multicast upper"},
 		{"240.0.0.1", "RFC 1112 reserved (Class E)"},
 		{"255.255.255.255", "RFC 919 limited broadcast"},
@@ -173,5 +173,63 @@ func TestNewSafeTransport_BlocksPrivateIPLiteral(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ssrf:") {
 		t.Errorf("error = %v, want contains ssrf: prefix", err)
+	}
+}
+
+// TestIsPrivateIP_StdlibHelperGaps pins the exact set of addresses that the
+// drifted predicate in internal/adapters/idpjwks allowed through before being
+// fixed. Each entry names why the stdlib helpers missed it.
+//
+// Derived by exhaustive comparison of both predicates over all 4,294,967,296
+// IPv4 addresses and their v4-mapped forms, plus CIDR boundaries and 20M random
+// addresses in IPv6.
+func TestIsPrivateIP_StdlibHelperGaps(t *testing.T) {
+	gaps := []struct {
+		ip     string
+		reason string
+	}{
+		{"100.64.0.1", "RFC 6598 CGNAT lower — no stdlib helper covers CGNAT"},
+		{"100.127.255.255", "RFC 6598 CGNAT upper"},
+		{"224.0.1.1", "RFC 5771 — IsLinkLocalMulticast covers only 224.0.0.0/24"},
+		{"239.255.255.255", "RFC 5771 multicast upper"},
+		{"240.0.0.1", "RFC 1112 Class E — no stdlib helper"},
+		{"255.255.255.255", "RFC 1112 /4 also covers limited broadcast"},
+		{"0.1.2.3", "RFC 1122 — IsUnspecified is exact-match on 0.0.0.0"},
+		{"0.255.255.255", "RFC 1122 0.0.0.0/8 upper"},
+		{"192.0.0.1", "RFC 6890 IETF protocol assignments"},
+		{"192.0.2.1", "RFC 5737 TEST-NET-1"},
+		{"198.18.0.1", "RFC 2544 benchmark lower"},
+		{"198.19.255.255", "RFC 2544 benchmark upper"},
+		{"198.51.100.1", "RFC 5737 TEST-NET-2"},
+		{"203.0.113.1", "RFC 5737 TEST-NET-3"},
+		{"2001:db8::1", "RFC 3849 IPv6 documentation"},
+		{"ff05::1", "RFC 4291 — IsLinkLocalMulticast covers only ff02::/16"},
+		{"ff0e::1", "RFC 4291 global-scope multicast"},
+		{"::ffff:100.64.0.1", "v4-mapped CGNAT — must normalise through To4()"},
+	}
+	if len(gaps) != 18 {
+		t.Fatalf("gap set has %d entries, want 18", len(gaps))
+	}
+	for _, c := range gaps {
+		ip := net.ParseIP(c.ip)
+		if ip == nil {
+			t.Fatalf("parse %q: nil", c.ip)
+		}
+		if !IsPrivateIP(ip) {
+			t.Errorf("regression: IsPrivateIP(%s) = false, want true (%s)", c.ip, c.reason)
+		}
+	}
+
+	// Controls the drifted predicate already handled — these must stay blocked.
+	for _, s := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "::ffff:127.0.0.1"} {
+		if !IsPrivateIP(net.ParseIP(s)) {
+			t.Errorf("control regression: IsPrivateIP(%s) = false, want true", s)
+		}
+	}
+	// And public space must stay reachable.
+	for _, s := range []string{"8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"} {
+		if IsPrivateIP(net.ParseIP(s)) {
+			t.Errorf("false positive: IsPrivateIP(%s) = true, want false", s)
+		}
 	}
 }

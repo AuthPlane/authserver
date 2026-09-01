@@ -8,10 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	apipublic "github.com/authplane/authserver/api/public"
-	"github.com/authplane/authserver/internal/config"
 )
 
 // --- Section 18: Security Hardening ---
@@ -22,8 +20,12 @@ func TestSecurityHeaders_PresentOnAllResponses(t *testing.T) {
 	obs := testObs()
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -66,11 +68,13 @@ func TestSecurityHeaders_HSTS_WhenSecure(t *testing.T) {
 	obs := testObs()
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
-		SessionCfg: config.SessionConfig{
-			Secure: true,
-		},
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		SessionCookie:         apipublic.SessionCookie{Secure: true},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -96,8 +100,12 @@ func TestCORS_AllowedOrigin_TokenEndpoint(t *testing.T) {
 	cfg := testServerCfg()
 	cfg.AllowedOrigins = []string{"https://app.example.com"}
 	srv := apipublic.NewServer(context.Background(), cfg, apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    staticCORSForTest(cfg.AllowedOrigins),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -132,8 +140,12 @@ func TestCORS_UnknownOrigin_NoHeaders(t *testing.T) {
 	cfg := testServerCfg()
 	cfg.AllowedOrigins = []string{"https://app.example.com"}
 	srv := apipublic.NewServer(context.Background(), cfg, apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    staticCORSForTest(cfg.AllowedOrigins),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -162,8 +174,12 @@ func TestCORS_NotOnLoginConsent(t *testing.T) {
 	cfg := testServerCfg()
 	cfg.AllowedOrigins = []string{"*"}
 	srv := apipublic.NewServer(context.Background(), cfg, apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    staticCORSForTest(cfg.AllowedOrigins),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -226,14 +242,13 @@ func TestCORS_VaryHeader_NonWildcard(t *testing.T) {
 	cfg := testServerCfg()
 	cfg.AllowedOrigins = []string{"https://app.example.com"}
 	srv := apipublic.NewServer(context.Background(), cfg, apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		CORSConfigProvider:    staticCORSForTest(cfg.AllowedOrigins),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -275,8 +290,12 @@ func TestCORS_PreflightAllPublicEndpoints(t *testing.T) {
 	cfg := testServerCfg()
 	cfg.AllowedOrigins = []string{browserOrigin}
 	srv := apipublic.NewServer(context.Background(), cfg, apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
+		CORSConfigProvider:    staticCORSForTest(cfg.AllowedOrigins),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -328,5 +347,88 @@ func TestCORS_PreflightAllPublicEndpoints(t *testing.T) {
 					tc.path, v, tc.method)
 			}
 		})
+	}
+}
+
+// A wired Deps.CORSConfigProvider takes precedence over cfg.AllowedOrigins and
+// is resolved per request — proving the seam, not the boot snapshot, decides.
+func TestCORS_ProviderOverridesBootConfig(t *testing.T) {
+	jwksSvc := newTestJWKSService(t)
+	obs := testObs()
+
+	// Boot config allows origin A; the provider allows only origin B. The
+	// provider must win.
+	cfg := testServerCfg()
+	cfg.AllowedOrigins = []string{"https://boot.example.com"}
+	srv := apipublic.NewServer(context.Background(), cfg, apipublic.Deps{
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		CORSConfigProvider:    staticCORSForTest{"https://provider.example.com"},
+	}, obs)
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// The boot origin must NOT be allowed now.
+	reqBoot, _ := http.NewRequest("OPTIONS", ts.URL+"/oauth/token", nil)
+	reqBoot.Header.Set("Origin", "https://boot.example.com")
+	reqBoot.Header.Set("Access-Control-Request-Method", "POST")
+	respBoot, err := http.DefaultClient.Do(reqBoot)
+	if err != nil {
+		t.Fatalf("options boot: %v", err)
+	}
+	respBoot.Body.Close()
+	if v := respBoot.Header.Get("Access-Control-Allow-Origin"); v != "" {
+		t.Errorf("boot origin should be rejected by provider, got ACAO %q", v)
+	}
+
+	// The provider origin must be allowed.
+	reqProv, _ := http.NewRequest("OPTIONS", ts.URL+"/oauth/token", nil)
+	reqProv.Header.Set("Origin", "https://provider.example.com")
+	reqProv.Header.Set("Access-Control-Request-Method", "POST")
+	respProv, err := http.DefaultClient.Do(reqProv)
+	if err != nil {
+		t.Fatalf("options provider: %v", err)
+	}
+	respProv.Body.Close()
+	if v := respProv.Header.Get("Access-Control-Allow-Origin"); v != "https://provider.example.com" {
+		t.Errorf("provider origin ACAO: got %q, want %q", v, "https://provider.example.com")
+	}
+}
+
+// A provider that fails resolution must yield no CORS headers — never a
+// fallback to the boot list — even for an origin the boot list would allow.
+func TestCORS_ProviderError_FailsClosed(t *testing.T) {
+	jwksSvc := newTestJWKSService(t)
+	obs := testObs()
+
+	cfg := testServerCfg()
+	cfg.AllowedOrigins = []string{"https://app.example.com"}
+	srv := apipublic.NewServer(context.Background(), cfg, apipublic.Deps{
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		CORSConfigProvider:    failingCORSForTest{},
+	}, obs)
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest("OPTIONS", ts.URL+"/oauth/token", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("options: %v", err)
+	}
+	resp.Body.Close()
+
+	if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "" {
+		t.Errorf("ACAO should be empty when provider fails, got %q", v)
 	}
 }

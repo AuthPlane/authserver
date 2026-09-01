@@ -25,7 +25,7 @@ func runProviderCmd(t *testing.T, args ...string) (string, error) {
 func TestProviderCmd_Create_LoadsConfigDataFromFile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "github-oauth.json")
-	cfgBody := []byte(`{"client_id":"abc","client_secret_env":"AP_GH_SECRET","authorize_url":"https://github.com/login/oauth/authorize"}`)
+	cfgBody := []byte(`{"client_id":"abc","client_secret_ref":"AP_GH_SECRET","authorize_url":"https://github.com/login/oauth/authorize"}`)
 	if err := writeFile(cfgPath, cfgBody); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}

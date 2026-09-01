@@ -15,16 +15,16 @@ import (
 	"github.com/authplane/authserver/internal/ports/output"
 )
 
-// stubSecretResolver returns a fixed plaintext secret for any allowed env
-// var name. The adapter validates the env-var name shape against the
-// connector domain regex before calling Resolve, so tests must use
-// CONNECTOR_* or AUTHPLANE_VAULT_* names.
+// stubSecretResolver returns a fixed plaintext secret for any reference. The
+// adapter treats the reference as opaque and no longer validates its shape,
+// so tests may use any string; allowlist enforcement now lives in the env
+// resolver (see cmd/authserver).
 type stubSecretResolver struct {
 	secret string
 	err    error
 }
 
-func (s *stubSecretResolver) Resolve(string) (string, error) {
+func (s *stubSecretResolver) Resolve(_ context.Context, _ output.SecretSource) (string, error) {
 	if s.err != nil {
 		return "", s.err
 	}
@@ -84,7 +84,7 @@ func (fu *fakeUpstream) configBytes(t *testing.T, extra map[string]string, respo
 	t.Helper()
 	cfg := configData{
 		ClientID:        "test-client-id",
-		ClientSecretEnv: "CONNECTOR_TEST_SECRET",
+		ClientSecretRef: "CONNECTOR_TEST_SECRET",
 		AuthorizeURL:    fu.authorizeURLRaw,
 		TokenURL:        fu.tokenURL,
 		RevokeURL:       fu.revokeURL,
@@ -554,7 +554,7 @@ func TestOAuthAdapter_Revoke_NoRevokeURL_ReturnsNil(t *testing.T) {
 	// nil error. Local revocation remains authoritative.
 	cfg := configData{
 		ClientID:        "test-client-id",
-		ClientSecretEnv: "CONNECTOR_TEST_SECRET",
+		ClientSecretRef: "CONNECTOR_TEST_SECRET",
 		AuthorizeURL:    "https://example.com/auth",
 		TokenURL:        "https://example.com/token",
 		RevokeURL:       "", // intentionally empty

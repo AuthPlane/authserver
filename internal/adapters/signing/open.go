@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/authplane/authserver/internal/adapters/cache"
 	"github.com/authplane/authserver/internal/adapters/hcvault"
 	"github.com/authplane/authserver/internal/adapters/keyfile"
 	"github.com/authplane/authserver/internal/adapters/postgres"
@@ -14,6 +15,22 @@ import (
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
 )
+
+// openOptions holds optional dependencies threaded into the chosen KeyStore.
+type openOptions struct {
+	signingKeyCache output.Cache[*output.SigningKey]
+}
+
+// Option configures Open.
+type Option func(*openOptions)
+
+// WithSigningKeyCache injects the cache for the current signing key. It is
+// threaded into the caching decorator (WrapKeyStore) for the postgres_key
+// backend; other drivers ignore it. The default is a process-global single-slot
+// cache.
+func WithSigningKeyCache(c output.Cache[*output.SigningKey]) Option {
+	return func(o *openOptions) { o.signingKeyCache = c }
+}
 
 // OpenResult holds the factory output.
 type OpenResult struct {
@@ -38,7 +55,12 @@ type OpenResult struct {
 //
 // Driver-specific details (Postgres pool, Vault client sharing) are resolved
 // internally via type assertions — callers pass generic interfaces only.
-func Open(ctx context.Context, cfg *config.Config, ds output.DataStore, encryptor output.DataEncryptor, obs *observability.Provider) (*OpenResult, error) {
+func Open(ctx context.Context, cfg *config.Config, ds output.DataStore, encryptor output.DataEncryptor, obs *observability.Provider, opts ...Option) (*OpenResult, error) {
+	var o openOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	switch cfg.Signing.KeyStore {
 	case "keyfile", "":
 		store, err := keyfile.New(cfg.Signing.KeyPath, obs.WithComponent("keyfile"))
@@ -51,7 +73,7 @@ func Open(ctx context.Context, cfg *config.Config, ds output.DataStore, encrypto
 		return openVaultTransit(ctx, cfg, encryptor, obs)
 
 	case "postgres_key":
-		return openPostgresKey(cfg, ds, encryptor, obs)
+		return openPostgresKey(cfg, ds, encryptor, obs, &o)
 
 	default:
 		return nil, fmt.Errorf("unsupported signing.key_store: %q", cfg.Signing.KeyStore)
@@ -106,7 +128,6 @@ func (f closerFunc) Close() error {
 	return nil
 }
 
-// openPostgresKey creates an HA PostgreSQL KeyStore with a LISTEN/NOTIFY starter.
 // underlyingDataStore walks any decorator DataStores (those exposing
 // `Unwrap() output.DataStore`, e.g. the user-cache wrapper) to reach the
 // concrete adapter, so driver-specific factories can type-assert it regardless
@@ -125,7 +146,12 @@ func underlyingDataStore(ds output.DataStore) output.DataStore {
 	}
 }
 
-func openPostgresKey(cfg *config.Config, ds output.DataStore, encryptor output.DataEncryptor, obs *observability.Provider) (*OpenResult, error) {
+// openPostgresKey creates an HA PostgreSQL KeyStore with a LISTEN/NOTIFY starter.
+//
+// The HAKeyStore itself does no caching; a WrapKeyStore decorator provides the
+// single-slot fast-path cache (default process-global, overridable via
+// WithSigningKeyCache). The listener invalidates that decorator on NOTIFY.
+func openPostgresKey(cfg *config.Config, ds output.DataStore, encryptor output.DataEncryptor, obs *observability.Provider, o *openOptions) (*OpenResult, error) {
 	// The DataStore may be fronted by decorators (e.g. the user cache) that hide
 	// the concrete adapter, so unwrap before type-asserting.
 	pgDB, ok := underlyingDataStore(ds).(*postgres.DB)
@@ -138,12 +164,18 @@ func openPostgresKey(cfg *config.Config, ds output.DataStore, encryptor output.D
 
 	haStore := postgres.NewHAKeyStore(pgDB.Pool, encryptor, obs.WithComponent("ha-keystore"))
 
+	keyCache := o.signingKeyCache
+	if keyCache == nil {
+		keyCache = cache.NewMemory[*output.SigningKey]()
+	}
+	cachedStore := WrapKeyStore(haStore, keyCache, obs)
+
 	return &OpenResult{
-		Store: haStore,
+		Store: cachedStore,
 		RunNotify: func(ctx context.Context, reload func(context.Context) error) {
 			listener := postgres.NewKeyStoreListener(
 				cfg.Storage.Postgres.DSN,
-				haStore,
+				cachedStore,
 				reload,
 				obs.WithComponent("keystore-listener"),
 			)

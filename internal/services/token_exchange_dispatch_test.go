@@ -12,6 +12,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
@@ -60,14 +61,14 @@ type storeBundle struct {
 
 func newDispatchSetup(t *testing.T) *dispatchSetup {
 	t.Helper()
-	return newDispatchSetupWithConfig(t, services.TokenExchangeConfig{
+	return newDispatchSetupWithConfig(t, output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
 	})
 }
 
-func newDispatchSetupWithConfig(t *testing.T, cfg services.TokenExchangeConfig) *dispatchSetup {
+func newDispatchSetupWithConfig(t *testing.T, cfg output.TokenExchangeConfig) *dispatchSetup {
 	t.Helper()
 
 	stores := testdata.SetupTestStores(t)
@@ -78,7 +79,7 @@ func newDispatchSetupWithConfig(t *testing.T, cfg services.TokenExchangeConfig) 
 	if err != nil {
 		t.Fatalf("keyfile: %v", err)
 	}
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
 	bundle := &storeBundle{
@@ -88,7 +89,7 @@ func newDispatchSetupWithConfig(t *testing.T, cfg services.TokenExchangeConfig) 
 		brokerGrants: stores.BrokerGrant,
 	}
 
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, teIssuer, obs)
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest(teIssuer), obs)
 
 	enc := &dispatchEncryptor{}
 	stub := &dispatchStubAdapter{name: "oauth"}
@@ -105,7 +106,7 @@ func newDispatchSetupWithConfig(t *testing.T, cfg services.TokenExchangeConfig) 
 
 	svc := services.NewTokenExchangeService(
 		stores.Client, stores.MachineToken, jwksSvc, jwksSvc, stores.Revocation,
-		teIssuer, cfg,
+		staticIssuerForTest(teIssuer), static.NewTokenExchangeConfigProvider(cfg),
 		registry, stores.ConsentGrant, mintIssuer, brokerIssuer,
 		obs, auditSvc,
 	)
@@ -1175,10 +1176,10 @@ func TestDispatchBroker_BoundE_ScopeInsufficient_WrappedErrorPreservesCauseAndMi
 }
 
 // -------------------------------------------------------------------
-// Self-exchange (Mint dispatch). With allow_self_exchange on and the
-// requesting client matching the subject token's client_id, the
-// consent gate is bypassed (no third party); the operator allowlist
-// still applies.
+// Self-exchange (Mint dispatch): with allow_self_exchange on and the
+// requesting client == the subject token's client_id, consent is skipped.
+// The operator gate ran first and, with the empty allowlist seeded here,
+// restricts nothing — the first test pins that composed default on purpose.
 // -------------------------------------------------------------------
 
 func TestTokenExchangeService_Dispatch_MintTarget_SelfExchange_UserSubject_AllowsWithoutConsent(t *testing.T) {
@@ -1273,7 +1274,7 @@ func TestTokenExchangeService_Dispatch_MintTarget_SelfExchange_ClientCredentials
 // Inverse invariant: with AllowSelfExchange off, the consent gate
 // applies even when req.ClientID matches the subject's client_id.
 func TestTokenExchangeService_Dispatch_MintTarget_SelfExchange_Disabled_StillRequiresConsent(t *testing.T) {
-	setup := newDispatchSetupWithConfig(t, services.TokenExchangeConfig{
+	setup := newDispatchSetupWithConfig(t, output.TokenExchangeConfig{
 		AllowSelfExchange: false,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
@@ -1309,6 +1310,8 @@ func TestTokenExchangeService_Dispatch_MintTarget_SelfExchange_Disabled_StillReq
 
 // The operator allowlist is orthogonal access control over which
 // clients may act on the resource; self-exchange does not bypass it.
+// It bites only when the list is non-empty — the counterpart to the
+// empty-allowlist test above, which passes with no authorization gate.
 func TestTokenExchangeService_Dispatch_MintTarget_SelfExchange_OperatorGate_StillEnforced(t *testing.T) {
 	setup := newDispatchSetup(t)
 	ctx := context.Background()

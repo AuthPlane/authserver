@@ -171,16 +171,10 @@ func (r *ResourceRegistry) ListScopes(ctx context.Context, resourceID string) ([
 	return res.Scopes, nil
 }
 
-// List satisfies the legacy ResourceLister interface.  rotates
-// consumers to the typed methods on ResourceRegistry; until then this is the
-// substitution seam for CachedResourceProvider in cmd/authserver/serve.go.
-//
-// The interface signature (List() []ResourceInfo, no context, no error)
-// forces a context.Background() DB read here. Errors are logged and
-// surfaced as a nil slice — same semantics as CachedResourceProvider on a
-// failed initial reload.
-func (r *ResourceRegistry) List() []ResourceInfo {
-	ctx := context.Background()
+// List satisfies the ResourceLister interface, returning every configured
+// resource as the flat ResourceInfo shape. The caller's context flows to the
+// DB read; a store failure is returned rather than masked as an empty catalog.
+func (r *ResourceRegistry) List(ctx context.Context) ([]ResourceInfo, error) {
 	ctx, span := r.tracer.Start(ctx, "ResourceRegistry.List")
 	defer span.End()
 
@@ -188,15 +182,14 @@ func (r *ResourceRegistry) List() []ResourceInfo {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		r.logger.ErrorContext(ctx, "resource list failed", "error", err)
-		return nil
+		return nil, fmt.Errorf("list resources: %w", err)
 	}
 
 	infos := make([]ResourceInfo, len(rows))
 	for i, row := range rows {
 		infos[i] = resourceToInfo(row)
 	}
-	return infos
+	return infos, nil
 }
 
 // resourceToInfo converts the unified Resource shape into the legacy flat

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
@@ -28,42 +27,57 @@ type AgentEntry struct {
 	Description string `json:"description,omitempty"`
 }
 
+const jwksCacheKey = "jwks" // cache key for the JWKS document; value is *jose.JSONWebKeySet
+
 // JWKSService manages signing keys and builds JWKS documents.
 //
-// When used with the postgres_key backend and a KeyStoreListener, the
-// cached field holds a pre-built JWKS document populated via Reload.
-// BuildJWKS returns the cached value for zero-cost reads.
-//
-// For keyfile/vault_transit backends without a listener, the cache stays nil
-// and BuildJWKS falls back to direct store reads (backward compatible).
+// The injected cache holds a pre-built JWKS document: Reload populates it (e.g.
+// on a postgres_key LISTEN/NOTIFY) and BuildJWKS serves it for zero-cost reads,
+// falling back to direct store reads on a miss. A nil cache disables the fast
+// path, so BuildJWKS always reads from the store.
 type JWKSService struct {
 	keyStore  output.KeyStore
 	algorithm string
 	logger    *slog.Logger
 	tracer    trace.Tracer
 	metrics   *observability.Metrics
-	cached    atomic.Pointer[jose.JSONWebKeySet]
+	cache     output.Cache[*jose.JSONWebKeySet]
 
 	// Agent listing — optional. When set, includes agents array in JWKS document.
 	clientStore     output.ClientStore
 	enableAgentList bool
+
+	// agentsConfig — optional per-request config provider. When set, its
+	// EnableJWKSListing value gates the agents array in BuildJWKSDocument
+	// instead of the boot-time enableAgentList field.
+	agentsConfig output.AgentsConfigProvider
 }
 
 // NewJWKSService creates a new JWKS service.
-func NewJWKSService(keyStore output.KeyStore, algorithm string, obs *observability.Provider) *JWKSService {
+func NewJWKSService(keyStore output.KeyStore, cache output.Cache[*jose.JSONWebKeySet], algorithm string, obs *observability.Provider) *JWKSService {
 	return &JWKSService{
 		keyStore:  keyStore,
 		algorithm: algorithm,
 		logger:    obs.Logger.With("component", "jwks"),
 		tracer:    obs.Tracer,
 		metrics:   obs.Metrics,
+		cache:     cache,
 	}
 }
 
-// WithAgentListing enables the agents array in the JWKS document.
+// WithAgentListing stores the client store used to populate the agents array.
+// When WithAgentsConfig is also set, the per-request provider controls whether
+// the listing is included; otherwise the boot-time enableAgentList flag applies.
 func (s *JWKSService) WithAgentListing(clients output.ClientStore) {
 	s.clientStore = clients
 	s.enableAgentList = true
+}
+
+// WithAgentsConfig wires a per-request AgentsConfigProvider. When set,
+// BuildJWKSDocument resolves EnableJWKSListing from the provider on every
+// request instead of using the boot-time enableAgentList flag.
+func (s *JWKSService) WithAgentsConfig(p output.AgentsConfigProvider) {
+	s.agentsConfig = p
 }
 
 // GetSigningKey returns the current signing key, generating one if none exists.
@@ -88,16 +102,17 @@ func (s *JWKSService) GetSigningKey(ctx context.Context) (*output.SigningKey, er
 
 // BuildJWKS returns the JWKS document containing current and (optionally) previous keys.
 //
-// If the cache is populated (by Reload via LISTEN/NOTIFY), returns the cached
-// value immediately. Otherwise falls back to direct store reads for backward
-// compatibility with keyfile/vault_transit backends.
+// When the cache holds a document (populated by Reload), it is returned
+// immediately. Otherwise the document is built from direct store reads.
 func (s *JWKSService) BuildJWKS(ctx context.Context) (*jose.JSONWebKeySet, error) {
 	ctx, span := s.tracer.Start(ctx, "JWKSService.BuildJWKS")
 	defer span.End()
 
-	// Fast path: return cached JWKS.
-	if cached := s.cached.Load(); cached != nil {
-		return cached, nil
+	// Fast path: return cached JWKS (when a cache is configured).
+	if s.cache != nil {
+		if cached, _ := s.cache.Load(ctx, jwksCacheKey); cached != nil {
+			return cached, nil
+		}
 	}
 
 	// Slow path: direct store reads (backward compat for keyfile/vault_transit).
@@ -139,8 +154,28 @@ func (s *JWKSService) BuildJWKSDocument(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 
+	// Determine whether agent listing is enabled for this request.
+	// When a per-request provider is wired, consult it; otherwise fall back to
+	// the boot-time enableAgentList flag. Agent listing is a non-critical,
+	// off-by-default discovery add-on; a config-resolution error must not take
+	// down core key distribution (every resource server needs the signing keys
+	// to validate tokens). Degrade: record on the span, log, and serve the
+	// standard JWKS without the agents array — mirroring the non-fatal handling
+	// of a ListAgents failure below.
+	listingEnabled := s.enableAgentList
+	if s.agentsConfig != nil {
+		agentsCfg, cfgErr := s.agentsConfig.Config(ctx)
+		if cfgErr != nil {
+			span.RecordError(cfgErr)
+			s.logger.WarnContext(ctx, "resolve agents config failed; serving JWKS without agent listing", "error", cfgErr)
+			listingEnabled = false
+		} else {
+			listingEnabled = agentsCfg.EnableJWKSListing
+		}
+	}
+
 	// If agent listing is not enabled, return standard JWKS.
-	if !s.enableAgentList || s.clientStore == nil {
+	if !listingEnabled || s.clientStore == nil {
 		data, marshalErr := json.Marshal(jwks)
 		if marshalErr != nil {
 			span.RecordError(marshalErr)
@@ -226,7 +261,9 @@ func (s *JWKSService) Reload(ctx context.Context) error {
 	}
 
 	jwks := &jose.JSONWebKeySet{Keys: jwkKeys}
-	s.cached.Store(jwks)
+	if s.cache != nil {
+		_ = s.cache.Store(ctx, jwksCacheKey, jwks)
+	}
 
 	duration := time.Since(start)
 	if s.metrics != nil && s.metrics.KeyReloadDuration != nil {

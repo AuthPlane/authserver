@@ -102,7 +102,7 @@ var providerCreateCmd = &cobra.Command{
 	Short: "Create a broker provider",
 	Long: "Create a broker provider. --config-data points to a file holding " +
 		"the protocol-specific JSON. For OAuth providers the JSON's " +
-		"`client_secret_env` field carries the NAME of the env var the " +
+		"`client_secret_ref` field carries the NAME of the env var the " +
 		"AS will look up at runtime, NOT the secret value itself.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		slug, _ := cmd.Flags().GetString("slug")
@@ -270,7 +270,7 @@ func init() {
 	providerCreateCmd.Flags().String("protocol", "", "Protocol: oauth | api_key | service_account (required)")
 	providerCreateCmd.Flags().String("config-data", "",
 		"Path to JSON file holding the provider's protocol-specific config "+
-			"(required). For OAuth, client_secret_env is the env var NAME, not the secret.")
+			"(required). For OAuth, client_secret_ref is the env var NAME, not the secret.")
 
 	providerUpdateCmd.Flags().String("id", "", "Provider id (required)")
 	providerUpdateCmd.Flags().String("slug", "", "New slug")

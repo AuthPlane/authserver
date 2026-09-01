@@ -2,11 +2,15 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 
+	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/audit"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
 // Provider is the local interface mirroring input.AdminPort.
@@ -39,13 +43,25 @@ type FrontingAdminDeps struct {
 	Fronting input.FrontingAdminPort
 }
 
+// ExtraRoute is one downstream-supplied admin route. Feature-agnostic: the
+// server knows nothing about what the handler does. Registered on the same
+// mux and behind the same auth wrapper as every built-in admin route.
+type ExtraRoute struct {
+	Pattern string // ServeMux pattern; its path must route under /admin/
+	Handler http.Handler
+}
+
 // AuditRecorder records audit events. Matches services.AuditRecorder.
 type AuditRecorder interface {
 	Record(ctx context.Context, e audit.Event)
 }
 
-// registerRoutes wires all admin API route handlers on the mux.
-func registerRoutes(mux *http.ServeMux, authMW *apiKeyMiddleware, admin Provider, obs *observability.Provider, systemDeps *SystemDeps, keysDeps *KeysDeps, dcrDeps *DCRDeps, xaaDeps *XAADeps, raDeps *ResourceAdminDeps, bpDeps *BrokerProviderAdminDeps, gaDeps *GrantAdminDeps, iaDeps *IssuanceAdminDeps, faDeps *FrontingAdminDeps) {
+// registerRoutes wires all admin API route handlers on the mux. It returns an
+// error when a downstream-supplied extra route is malformed (nil handler or a
+// pattern outside /admin/), so the composition root decides how to fail rather
+// than the package panicking. A pattern collision remains ServeMux's native
+// panic — a wiring bug, like a collision among the built-in routes.
+func registerRoutes(mux *http.ServeMux, authMW AuthWrapper, admin Provider, obs *observability.Provider, systemDeps *SystemDeps, keysDeps *KeysDeps, dcrDeps *DCRDeps, xaaDeps *XAADeps, raDeps *ResourceAdminDeps, bpDeps *BrokerProviderAdminDeps, gaDeps *GrantAdminDeps, iaDeps *IssuanceAdminDeps, faDeps *FrontingAdminDeps, extra []ExtraRoute) error {
 	h := &handlers{admin: admin, obs: obs}
 
 	// Client routes.
@@ -115,16 +131,22 @@ func registerRoutes(mux *http.ServeMux, authMW *apiKeyMiddleware, admin Provider
 
 	// XAA (Enterprise-Managed Authorization) routes (optional).
 	if xaaDeps != nil && xaaDeps.IDP != nil {
+		// xaaGated applies the wrapping every XAA admin route shares: the auth
+		// gate (outer) then the per-request feature gate on xaaDeps.Config.
+		xaaGated := func(h http.HandlerFunc) http.Handler {
+			return authMW.Wrap(xaaFeatureGate(xaaDeps.Config, obs, h))
+		}
+
 		xh := &xaaIDPHandler{
 			idp: xaaDeps.IDP,
 			obs: obs,
 		}
-		mux.Handle("POST /admin/idps", authMW.Wrap(http.HandlerFunc(xh.handleRegisterIDP)))
-		mux.Handle("GET /admin/idps", authMW.Wrap(http.HandlerFunc(xh.handleListIDPs)))
-		mux.Handle("GET /admin/idps/{id}", authMW.Wrap(http.HandlerFunc(xh.handleGetIDP)))
-		mux.Handle("PUT /admin/idps/{id}", authMW.Wrap(http.HandlerFunc(xh.handleUpdateIDP)))
-		mux.Handle("DELETE /admin/idps/{id}", authMW.Wrap(http.HandlerFunc(xh.handleDeleteIDP)))
-		mux.Handle("POST /admin/idps/{id}/refresh-keys", authMW.Wrap(http.HandlerFunc(xh.handleRefreshKeys)))
+		mux.Handle("POST /admin/idps", xaaGated(xh.handleRegisterIDP))
+		mux.Handle("GET /admin/idps", xaaGated(xh.handleListIDPs))
+		mux.Handle("GET /admin/idps/{id}", xaaGated(xh.handleGetIDP))
+		mux.Handle("PUT /admin/idps/{id}", xaaGated(xh.handleUpdateIDP))
+		mux.Handle("DELETE /admin/idps/{id}", xaaGated(xh.handleDeleteIDP))
+		mux.Handle("POST /admin/idps/{id}/refresh-keys", xaaGated(xh.handleRefreshKeys))
 
 		// XAA Policy routes.
 		if xaaDeps.Policy != nil {
@@ -132,11 +154,11 @@ func registerRoutes(mux *http.ServeMux, authMW *apiKeyMiddleware, admin Provider
 				policy: xaaDeps.Policy,
 				obs:    obs,
 			}
-			mux.Handle("POST /admin/xaa/policies", authMW.Wrap(http.HandlerFunc(ph.handleCreatePolicy)))
-			mux.Handle("GET /admin/xaa/policies", authMW.Wrap(http.HandlerFunc(ph.handleListPolicies)))
-			mux.Handle("GET /admin/xaa/policies/{id}", authMW.Wrap(http.HandlerFunc(ph.handleGetPolicy)))
-			mux.Handle("PUT /admin/xaa/policies/{id}", authMW.Wrap(http.HandlerFunc(ph.handleUpdatePolicy)))
-			mux.Handle("DELETE /admin/xaa/policies/{id}", authMW.Wrap(http.HandlerFunc(ph.handleDeletePolicy)))
+			mux.Handle("POST /admin/xaa/policies", xaaGated(ph.handleCreatePolicy))
+			mux.Handle("GET /admin/xaa/policies", xaaGated(ph.handleListPolicies))
+			mux.Handle("GET /admin/xaa/policies/{id}", xaaGated(ph.handleGetPolicy))
+			mux.Handle("PUT /admin/xaa/policies/{id}", xaaGated(ph.handleUpdatePolicy))
+			mux.Handle("DELETE /admin/xaa/policies/{id}", xaaGated(ph.handleDeletePolicy))
 		}
 
 		// XAA Subject Mapping routes.
@@ -145,9 +167,9 @@ func registerRoutes(mux *http.ServeMux, authMW *apiKeyMiddleware, admin Provider
 				mapping: xaaDeps.SubjectMapping,
 				obs:     obs,
 			}
-			mux.Handle("POST /admin/xaa/subject-mappings", authMW.Wrap(http.HandlerFunc(smh.handleCreateMapping)))
-			mux.Handle("GET /admin/xaa/subject-mappings", authMW.Wrap(http.HandlerFunc(smh.handleListMappings)))
-			mux.Handle("DELETE /admin/xaa/subject-mappings/{id}", authMW.Wrap(http.HandlerFunc(smh.handleDeleteMapping)))
+			mux.Handle("POST /admin/xaa/subject-mappings", xaaGated(smh.handleCreateMapping))
+			mux.Handle("GET /admin/xaa/subject-mappings", xaaGated(smh.handleListMappings))
+			mux.Handle("DELETE /admin/xaa/subject-mappings/{id}", xaaGated(smh.handleDeleteMapping))
 		}
 	}
 
@@ -244,4 +266,79 @@ func registerRoutes(mux *http.ServeMux, authMW *apiKeyMiddleware, admin Provider
 		mux.Handle("DELETE /admin/fronting/{source}/{target}", authMW.Wrap(http.HandlerFunc(fh.handleDelete)))
 		mux.Handle("GET /admin/resources/{slug}/fronting", authMW.Wrap(http.HandlerFunc(fh.handleListForResource)))
 	}
+
+	// Extra routes supplied by a downstream build (optional).
+	// Registered on the same mux with the same resolved auth wrapper as every
+	// route above: an extra route inherits the sealed observability chain, the
+	// rate limiter, and the auth gate, and cannot opt out (fail-closed). A
+	// malformed route returns an error.
+	//
+	// Collision scope: only patterns of EQUAL specificity conflict, tripping
+	// ServeMux's native panic at construction (e.g. an exact duplicate of a
+	// built-in). A more-specific or subtree extra pattern does not conflict —
+	// ServeMux precedence lets it coexist and win over a built-in wildcard
+	// (e.g. GET /admin/clients/export shadows GET /admin/clients/{id}; GET
+	// /admin/ or GET /admin/ui/x shadow their subtree). This is not caught and
+	// not a fail-open — every extra route stays auth-gated; the downstream owns
+	// its own patterns and is responsible for not shadowing built-ins.
+	for _, er := range extra {
+		if err := validateExtraRoute(er); err != nil {
+			return err
+		}
+		mux.Handle(er.Pattern, authMW.Wrap(er.Handler))
+	}
+	return nil
+}
+
+// validateExtraRoute returns an error unless er is a well-formed extra admin
+// route: non-nil handler and a pattern whose path routes under /admin/. Per the
+// public ServeMux pattern grammar ("[METHOD ][HOST]/[PATH]"), trimming an
+// optional whitespace-separated method prefix leaves the "[HOST]/[PATH]"; a
+// host-bearing or empty pattern then fails the /admin/ prefix check, so the
+// seam cannot shadow /metrics or any surface outside this server's admin
+// namespace. It does not detect shadowing of a built-in route by a
+// more-specific pattern (see the registration loop above).
+func validateExtraRoute(er ExtraRoute) error {
+	if er.Handler == nil {
+		return fmt.Errorf("admin: extra route %q has a nil handler", er.Pattern)
+	}
+	path := er.Pattern
+	if i := strings.IndexAny(path, " \t"); i >= 0 {
+		path = strings.TrimLeft(path[i+1:], " \t")
+	}
+	if !strings.HasPrefix(path, "/admin/") {
+		return fmt.Errorf("admin: extra route pattern %q must route under /admin/", er.Pattern)
+	}
+	return nil
+}
+
+// xaaFeatureGate wraps an XAA admin handler with a per-request feature check.
+// A provider error is a 500 (cannot determine the feature state → fail closed);
+// a resolved-off config is a typed 503 feature_disabled; a resolved-on config
+// dispatches. The default static adapter never errors and reflects the boot
+// config, so the 500/503 branches are inert in the default deployment.
+func xaaFeatureGate(cfgp output.XAAConfigProvider, obs *observability.Provider, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A nil provider is a wiring error, not "feature off": fail closed with
+		// 500 rather than nil-panic. The default binary always wires Config; this
+		// guards a substitute deployment that mounts the routes (IDP set) but
+		// leaves Config unset.
+		if cfgp == nil {
+			obs.Logger.ErrorContext(r.Context(), "xaa gate: nil config provider")
+			writeAdminError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		cfg, err := cfgp.Config(r.Context())
+		if err != nil {
+			obs.Logger.ErrorContext(r.Context(), "xaa gate: resolve config", "error", err)
+			writeAdminError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if !cfg.Enabled {
+			fe := domain.NewFeatureDisabledError("xaa", "xaa.enabled")
+			writeAdminError(w, http.StatusServiceUnavailable, fe.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

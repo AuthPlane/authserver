@@ -16,6 +16,7 @@ import (
 
 	apipublic "github.com/authplane/authserver/api/public"
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/config"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
@@ -24,6 +25,7 @@ import (
 	"github.com/authplane/authserver/internal/domain/session"
 	"github.com/authplane/authserver/internal/domain/user"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/services"
 	"github.com/authplane/authserver/testdata"
 )
@@ -49,7 +51,7 @@ func newOAuthTestServer(t *testing.T) *oauthTestEnv {
 	if err != nil {
 		t.Fatalf("keyfile: %v", err)
 	}
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 
 	// Auth service.
 	authSvc := services.NewUserAuthService(stores.User, obs, nil)
@@ -84,7 +86,9 @@ func newOAuthTestServer(t *testing.T) *oauthTestEnv {
 
 	authzSvc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		nil, registry, false, obs,
+		nil, registry,
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
 	)
 
 	// Consent service.
@@ -93,34 +97,34 @@ func newOAuthTestServer(t *testing.T) *oauthTestEnv {
 	)
 
 	// Token service.
-	tokenCfg := services.TokenConfig{
+	tokenCfg := static.NewTokenConfigProvider(output.TokenConfig{
 		AccessTokenExpiry:  15 * time.Minute,
 		RefreshTokenExpiry: 24 * time.Hour,
-	}
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, "https://auth.example.com", obs)
+	})
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest("https://auth.example.com"), obs)
 	tokenSvc := services.NewTokenService(
 		stores.Session, stores.Token, stores.Client, stores.User,
-		jwksSvc, mintIssuer, "https://auth.example.com", tokenCfg, obs, nil,
+		jwksSvc, mintIssuer, tokenCfg, obs, nil,
 		stores.Revocation, nil,
 	)
 
 	// Revocation service.
-	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, nil, "", obs, nil, stores.Revocation)
+	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, nil, staticIssuerForTest(""), obs, nil, stores.Revocation)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		Auth:            authSvc,
-		Authorize:       authzSvc,
-		Consent:         consentSvc,
-		Token:           tokenSvc,
-		Revoke:          revokeSvc,
-		ResourceServers: testResourceServers(),
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		Auth:                  authSvc,
+		LoginDisplay:          static.NewLoginDisplayProvider(config.OIDCConfig{ShowLocalLogin: true}),
+		Authorize:             authzSvc,
+		Consent:               consentSvc,
+		Token:                 tokenSvc,
+		Revoke:                revokeSvc,
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -1727,7 +1731,7 @@ func TestAuthorize_RequireScope_RejectsEmptyScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("keyfile: %v", err)
 	}
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	authSvc := services.NewUserAuthService(stores.User, obs, nil)
 
 	now := time.Now().UTC()
@@ -1751,38 +1755,40 @@ func TestAuthorize_RequireScope_RejectsEmptyScope(t *testing.T) {
 
 	authzSvc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		nil, registry, true, obs, // requireScope=true
+		nil, registry,
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: true}),
+		obs, // requireScope=true
 	)
 
 	consentSvc := services.NewConsentService(
 		stores.ConsentGrant, stores.Session, stores.Client, registry, obs, nil,
 	)
-	tokenCfg := services.TokenConfig{
+	tokenCfg := static.NewTokenConfigProvider(output.TokenConfig{
 		AccessTokenExpiry:  15 * time.Minute,
 		RefreshTokenExpiry: 24 * time.Hour,
-	}
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, "https://auth.example.com", obs)
+	})
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest("https://auth.example.com"), obs)
 	tokenSvc := services.NewTokenService(
 		stores.Session, stores.Token, stores.Client, stores.User,
-		jwksSvc, mintIssuer, "https://auth.example.com", tokenCfg, obs, nil,
+		jwksSvc, mintIssuer, tokenCfg, obs, nil,
 		stores.Revocation, nil,
 	)
-	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, nil, "", obs, nil, stores.Revocation)
+	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, nil, staticIssuerForTest(""), obs, nil, stores.Revocation)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		Auth:            authSvc,
-		Authorize:       authzSvc,
-		Consent:         consentSvc,
-		Token:           tokenSvc,
-		Revoke:          revokeSvc,
-		ResourceServers: testResourceServers(),
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		Auth:                  authSvc,
+		LoginDisplay:          static.NewLoginDisplayProvider(config.OIDCConfig{ShowLocalLogin: true}),
+		Authorize:             authzSvc,
+		Consent:               consentSvc,
+		Token:                 tokenSvc,
+		Revoke:                revokeSvc,
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -2081,8 +2087,8 @@ func (s *stubTokenExchangeProvider) Exchange(ctx context.Context, req input.Toke
 // TestTokenExchange_ConsentRequired_ReturnsConsentURL asserts that the
 // token endpoint maps a domain.ConsentRequiredError to an
 // application/problem+json response with error code consent_required and
-// an absolute consent_url built from ConnectConsentBaseURL. The URL shape
-// itself is pinned by api/public/connection/consent_url_test.go.
+// an absolute consent_url built from the issuer (IssuerProvider). The URL
+// shape itself is pinned by api/public/connection/consent_url_test.go.
 func TestTokenExchange_ConsentRequired_ReturnsConsentURL(t *testing.T) {
 	mock := &stubTokenExchangeProvider{
 		exchangeFn: func(_ context.Context, _ input.TokenExchangeRequest) (*input.TokenExchangeResponse, error) {
@@ -2092,14 +2098,13 @@ func TestTokenExchange_ConsentRequired_ReturnsConsentURL(t *testing.T) {
 
 	obs := testObs()
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
 		TokenExchange:         mock,
-		ConnectConsentBaseURL: "https://as.test",
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		IssuerProvider:        staticIssuerForTest("https://as.test"),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -2157,7 +2162,7 @@ func TestTokenExchange_ConsentRequired_ReturnsConsentURL(t *testing.T) {
 }
 
 // TestTokenExchange_ConsentRequired_EmptyBase_OmitsConsentURL asserts that
-// when ConnectConsentBaseURL is empty the handler still emits the
+// when the issuer resolves empty the handler still emits the
 // consent_required error code, but the consent_url field is omitted from
 // the JSON response (per api/shared.WriteOAuthErrorWithConsent + omitempty).
 // The per-request warn log is not asserted here — it is a side effect, not
@@ -2171,14 +2176,14 @@ func TestTokenExchange_ConsentRequired_EmptyBase_OmitsConsentURL(t *testing.T) {
 
 	obs := testObs()
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		TokenExchange: mock,
-		// ConnectConsentBaseURL intentionally empty.
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		TokenExchange:         mock,
+		// IssuerProvider intentionally resolves empty → consent_url omitted.
+		IssuerProvider: staticIssuerForTest(""),
+		SessionCookie:  apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -2236,15 +2241,13 @@ func TestTokenExchange_ConsentRequired_EmptyProviderSlug_EmitsAuthorizeURL(t *te
 
 	obs := testObs()
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
 		TokenExchange:         mock,
-		ConnectConsentBaseURL: "https://as.test",
-		AuthorizeBaseURL:      "https://as.test",
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		IssuerProvider:        staticIssuerForTest("https://as.test"),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -2302,14 +2305,13 @@ func TestTokenExchange_ConsentRequired_BoundC_EmitsAuthorizeURLWithScope(t *test
 
 	obs := testObs()
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		TokenExchange:    mock,
-		AuthorizeBaseURL: "https://as.test",
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		TokenExchange:         mock,
+		IssuerProvider:        staticIssuerForTest("https://as.test"),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -2523,7 +2525,7 @@ func TestConsent_GET_BrokerResource_RendersErrorPage(t *testing.T) {
 		Slug:        "broker-test-provider",
 		DisplayName: "Broker Provider",
 		Protocol:    resource.ProtocolOAuth,
-		ConfigData:  []byte(`{"client_id":"stub","client_secret_env":"STUB"}`),
+		ConfigData:  []byte(`{"client_id":"stub","client_secret_ref":"STUB"}`),
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}

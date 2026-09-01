@@ -12,9 +12,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	apipublic "github.com/authplane/authserver/api/public"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/config"
 	"github.com/authplane/authserver/internal/domain/user"
 	"github.com/authplane/authserver/internal/observability"
@@ -29,12 +29,12 @@ type mockOIDCFlowProvider struct {
 	err     error
 }
 
-func (m *mockOIDCFlowProvider) AuthorizationURL(state, nonce, codeChallenge, redirectURI string) string {
-	return fmt.Sprintf("%s?state=%s&nonce=%s&code_challenge=%s&redirect_uri=%s",
-		m.authURL, state, nonce, codeChallenge, redirectURI)
+func (m *mockOIDCFlowProvider) AuthorizationURL(_ context.Context, state, nonce, codeChallenge string) (string, error) {
+	return fmt.Sprintf("%s?state=%s&nonce=%s&code_challenge=%s",
+		m.authURL, state, nonce, codeChallenge), nil
 }
 
-func (m *mockOIDCFlowProvider) AuthenticateOIDC(ctx context.Context, code, nonce, codeVerifier, redirectURI string) (*user.User, error) {
+func (m *mockOIDCFlowProvider) AuthenticateOIDC(ctx context.Context, code, nonce, codeVerifier string) (*user.User, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -56,20 +56,19 @@ func newOIDCTestServer(t *testing.T, mock *mockOIDCFlowProvider) *oidcTestEnv {
 	authSvc := services.NewUserAuthService(stores.User, obs, nil)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		Auth: authSvc,
-		OIDC: mock,
-		OIDCConfig: config.OIDCConfig{
-			Enabled:        true,
+		CORSConfigProvider:      testCORS(),
+		Auth:                    authSvc,
+		OIDC:                    mock,
+		OIDCStateConfigProvider: testOIDCStateConfig(),
+		StateCodec:              newStateCodecForTest([]byte("integration-test-key")),
+		LoginDisplay: static.NewLoginDisplayProvider(config.OIDCConfig{
 			DisplayName:    "Test IdP",
-			RedirectURI:    "http://localhost:9000/oidc/callback",
 			ShowLocalLogin: true,
-		},
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		}),
+		URLs:                  static.NewURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -246,6 +245,87 @@ func TestOIDCCallback_Success_CreatesSession(t *testing.T) {
 	}
 }
 
+// TestOIDCCallback_Redirect_LocationStaysOnThisOrigin is the OIDC-side twin of
+// TestLogin_PostRedirect_LocationStaysOnThisOrigin: the callback is the second
+// place a user-supplied redirect target reaches http.Redirect, and it is
+// reached with a freshly minted session cookie. Here the target travels inside
+// the signed state rather than a form field, so the assertion also covers the
+// round trip through the state codec.
+func TestOIDCCallback_Redirect_LocationStaysOnThisOrigin(t *testing.T) {
+	cases := []struct {
+		name     string
+		redirect string
+		want     string
+	}{
+		{"tab before authority", "/\t/evil.com", "/"},
+		{"nul before authority", "/\x00/evil.com", "/"},
+		{"del before authority", "/\x7f/evil.com", "/"},
+		{"scheme-relative", "//evil.com", "/"},
+		{"three leading slashes", "///evil.com", "/"},
+		{"backslash authority", `/\evil.com`, "/"},
+		{"absolute", "https://evil.com", "/"},
+		{"legitimate path still honoured", "/dashboard", "/dashboard"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testUser := &user.User{
+				ID:     "user-oidc-redirect",
+				Email:  "oidc-redirect@example.com",
+				Status: user.StatusActive,
+				Role:   user.RoleUser,
+			}
+			mock := &mockOIDCFlowProvider{
+				authURL: "https://idp.example.com/authorize",
+				user:    testUser,
+			}
+			env := newOIDCTestServer(t, mock)
+
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatalf("cookiejar: %v", err)
+			}
+			noRedirect := &http.Client{
+				Jar: jar,
+				CheckRedirect: func(*http.Request, []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+
+			// Step 1: start the flow carrying the redirect target, and pull the
+			// signed state back out of the upstream authorize URL.
+			startResp, err := noRedirect.Get(env.ts.URL + "/oidc/start?redirect=" + url.QueryEscape(tc.redirect))
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			startResp.Body.Close()
+
+			locURL, err := url.Parse(startResp.Header.Get("Location"))
+			if err != nil {
+				t.Fatalf("parse location: %v", err)
+			}
+			state := locURL.Query().Get("state")
+			if state == "" {
+				t.Fatal("state is empty in start redirect")
+			}
+
+			// Step 2: complete the callback; the jar carries the state cookie.
+			cbURL := fmt.Sprintf("%s/oidc/callback?code=test-auth-code&state=%s", env.ts.URL, url.QueryEscape(state))
+			cbResp, err := noRedirect.Get(cbURL)
+			if err != nil {
+				t.Fatalf("callback: %v", err)
+			}
+			cbResp.Body.Close()
+
+			if cbResp.StatusCode != http.StatusSeeOther {
+				t.Fatalf("status: got %d, want 303", cbResp.StatusCode)
+			}
+			if loc := cbResp.Header.Get("Location"); loc != tc.want {
+				t.Errorf("Location = %q, want %q", loc, tc.want)
+			}
+		})
+	}
+}
+
 func TestOIDCCallback_AuthFailed_ShowsError(t *testing.T) {
 	mock := &mockOIDCFlowProvider{
 		authURL: "https://idp.example.com/authorize",
@@ -326,16 +406,13 @@ func TestLoginPage_NoOIDCButton_WhenDisabled(t *testing.T) {
 
 	// No OIDC provider configured.
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		Auth: authSvc,
-		OIDCConfig: config.OIDCConfig{
-			ShowLocalLogin: true,
-		},
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		CORSConfigProvider:    testCORS(),
+		Auth:                  authSvc,
+		LoginDisplay:          static.NewLoginDisplayProvider(config.OIDCConfig{ShowLocalLogin: true}),
+		URLs:                  static.NewURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -365,20 +442,19 @@ func TestLoginPage_HidesPasswordForm_WhenShowLocalLoginFalse(t *testing.T) {
 	mock := &mockOIDCFlowProvider{authURL: "https://idp.example.com/authorize"}
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		Auth: authSvc,
-		OIDC: mock,
-		OIDCConfig: config.OIDCConfig{
-			Enabled:        true,
+		CORSConfigProvider:      testCORS(),
+		Auth:                    authSvc,
+		OIDC:                    mock,
+		OIDCStateConfigProvider: testOIDCStateConfig(),
+		StateCodec:              newStateCodecForTest([]byte("integration-test-key")),
+		LoginDisplay: static.NewLoginDisplayProvider(config.OIDCConfig{
 			DisplayName:    "Corporate SSO",
-			RedirectURI:    "http://localhost:9000/oidc/callback",
 			ShowLocalLogin: false,
-		},
-		SessionCfg: config.SessionConfig{
-			CookieName: "authserver_session",
-			MaxAge:     24 * time.Hour,
-			Secret:     "test-secret-32-bytes-long-enough",
-			SameSite:   "lax",
-		},
+		}),
+		URLs:                  static.NewURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		SessionCookie:         apipublic.SessionCookie{Name: "authserver_session"},
 	}, obs)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -411,6 +487,6 @@ func TestLoginPage_HidesPasswordForm_WhenShowLocalLoginFalse(t *testing.T) {
 
 // Compile-time check that mockOIDCFlowProvider satisfies the interface the HTTP layer needs.
 var _ interface {
-	AuthorizationURL(state, nonce, codeChallenge, redirectURI string) string
-	AuthenticateOIDC(ctx context.Context, code, nonce, codeVerifier, redirectURI string) (*user.User, error)
+	AuthorizationURL(ctx context.Context, state, nonce, codeChallenge string) (string, error)
+	AuthenticateOIDC(ctx context.Context, code, nonce, codeVerifier string) (*user.User, error)
 } = (*mockOIDCFlowProvider)(nil)

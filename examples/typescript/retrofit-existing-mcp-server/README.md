@@ -95,7 +95,7 @@ code, same `make verify`, just longer first build (~1 min).
 |---|---|
 | **Time to run** | About a minute first-run (`npm install` + AS pull); ~15 s warm |
 | **MCP framework** | `@modelcontextprotocol/sdk 1.29.0` on Express (matches both `package.json` files) |
-| **SDK** | `@authplane/mcp` 0.2.0 (in `after/` only) |
+| **SDK** | `@authplane/mcp` 0.3.0 (in `after/` only) |
 
 ## Troubleshooting
 

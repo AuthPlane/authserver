@@ -1,32 +1,37 @@
 package oauth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
-	"fmt"
+	"errors"
 	"html/template"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/authplane/authserver/api/shared"
 	"github.com/authplane/authserver/internal/crypto"
+	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
+	"github.com/authplane/authserver/internal/ports/output"
 )
 
-const oidcStateCookieName = "authserver_oidc_state"
+const (
+	oidcStateCookieName = "authserver_oidc_state"
+	// oidcStateClockSkew tolerates client/server clock drift in the
+	// "future" direction. Migrated from verifyState pre-refactor.
+	oidcStateClockSkew = -1 * time.Minute
+)
 
 // oidcHandler handles OIDC start + callback endpoints.
 type oidcHandler struct {
-	oidc        OIDCFlowProvider
-	session     *shared.SessionMiddleware
-	obs         *observability.Provider
-	redirectURI string
-	stateKey    []byte
+	oidc     OIDCFlowProvider
+	session  *shared.SessionMiddleware
+	obs      *observability.Provider
+	codec    output.StateCodec
+	urls     output.URLBuilder
+	stateCfg output.OIDCStateConfigProvider
 }
 
 // handleOIDCStart initiates the OIDC flow by redirecting to the upstream IdP.
@@ -40,20 +45,56 @@ func (h *oidcHandler) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 	verifier := crypto.GenerateVerifier()
 	challenge := crypto.ComputeS256Challenge(verifier)
 
-	// Bind state to the browser via a one-time nonce cookie.
+	stateCfg, err := h.stateCfg.Config(r.Context())
+	if err != nil {
+		h.obs.Logger.ErrorContext(r.Context(), "OIDC state config resolution failed", "error", err)
+		shared.RenderTemplate(r.Context(), w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
+		return
+	}
+	policy, err := h.session.CookiePolicy(r.Context())
+	if err != nil {
+		h.obs.Logger.ErrorContext(r.Context(), "OIDC state cookie policy resolution failed", "error", err)
+		shared.RenderTemplate(r.Context(), w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
+		return
+	}
+
+	// Bind state to the browser via a one-time nonce cookie. Written BEFORE the
+	// state is encoded, so a failed Encode leaves an orphan cookie: that is a
+	// deliberate, accepted trade-off (the cookie carries only the binding nonce
+	// and self-expires via MaxAge). TestOIDCStart_CodecEncodeError_Returns500
+	// pins this ordering — do not "fix" it without revisiting that contract.
 	browserNonce := randomHex(16)
-	h.setOIDCStateCookie(w, browserNonce)
+	h.setOIDCStateCookie(r.Context(), w, browserNonce, stateCfg.EffectiveMaxAge(), policy)
 
-	timestamp := strconv.FormatInt(time.Now().UTC().Unix(), 10)
-	payload := redirect + "|" + nonce + "|" + verifier + "|" + browserNonce + "|" + timestamp
-	sig := h.signState(payload)
-	state := base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig))
+	state := output.State{
+		Redirect:     redirect,
+		Nonce:        nonce,
+		Verifier:     verifier,
+		BrowserNonce: browserNonce,
+		IssuedAt:     time.Now().UTC(),
+	}
 
-	authURL := h.oidc.AuthorizationURL(state, nonce, challenge, h.redirectURI)
+	stateBytes, err := h.codec.Encode(r.Context(), state)
+	if err != nil || len(stateBytes) == 0 {
+		// The default codec never fails; the contract permits failure
+		// for impls that resolve signing material dynamically. A nil/empty
+		// return violates the StateCodec contract (port godoc: "On success,
+		// the returned slice MUST be non-nil and non-empty") — treat as
+		// server-side error.
+		h.obs.Logger.ErrorContext(r.Context(), "OIDC state encode failed or returned empty",
+			"error", err, "bytes_len", len(stateBytes))
+		shared.RenderTemplate(r.Context(), w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Authentication failed. Please try again."))
+		return
+	}
 
-	h.obs.Logger.DebugContext(r.Context(), "OIDC start redirect",
-		"redirect_uri", h.redirectURI,
-	)
+	authURL, err := h.oidc.AuthorizationURL(r.Context(), string(stateBytes), nonce, challenge)
+	if err != nil {
+		h.obs.Logger.ErrorContext(r.Context(), "build OIDC authorization URL for /oidc/start", "error", err)
+		shared.RenderTemplate(r.Context(), w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
+		return
+	}
+
+	h.obs.Logger.DebugContext(r.Context(), "OIDC start redirect")
 
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
@@ -68,123 +109,139 @@ func (h *oidcHandler) handleOIDCCallback(w http.ResponseWriter, r *http.Request)
 			"error", errParam,
 			"description", desc,
 		)
-		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, oidcErrorData{
-			Error: "Authentication failed. Please try again.",
-		})
+		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, h.oidcError(r, "Authentication failed. Please try again."))
 		return
 	}
 
 	code := r.URL.Query().Get("code")
 	stateRaw := r.URL.Query().Get("state")
 	if code == "" || stateRaw == "" {
-		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, oidcErrorData{
-			Error: "Missing authorization code or state.",
-		})
+		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, h.oidcError(r, "Missing authorization code or state."))
 		return
 	}
 
-	stateBytes, err := base64.RawURLEncoding.DecodeString(stateRaw)
+	state, err := h.codec.Decode(ctx, []byte(stateRaw))
 	if err != nil {
-		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, oidcErrorData{
-			Error: "Invalid state parameter.",
-		})
+		h.obs.Logger.WarnContext(ctx, "OIDC state decode failed", "error", err)
+		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, h.oidcError(r, "Invalid or expired state. Please try again."))
 		return
 	}
 
-	redirect, nonce, verifier, browserNonce, err := h.verifyState(string(stateBytes))
+	// Resolve the state TTL only after a malformed state has been rejected, so
+	// an undecodable callback never pays for provider resolution (which may do
+	// I/O in an alternative provider). Freshness genuinely needs it, so a
+	// resolution failure here is fatal — we cannot fail-open the replay window.
+	stateCfg, err := h.stateCfg.Config(ctx)
 	if err != nil {
-		h.obs.Logger.WarnContext(ctx, "OIDC state verification failed", "error", err)
-		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, oidcErrorData{
-			Error: "Invalid or expired state. Please try again.",
-		})
+		h.obs.Logger.ErrorContext(ctx, "OIDC state config resolution failed", "error", err)
+		shared.RenderTemplate(ctx, w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
 		return
 	}
 
-	// Verify state is bound to this browser via the nonce cookie.
+	// Freshness — migrated out of verifyState into the handler.
+	if age := time.Since(state.IssuedAt); age > stateCfg.EffectiveMaxAge() || age < oidcStateClockSkew {
+		h.obs.Logger.WarnContext(ctx, "OIDC state expired", "age", age)
+		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, h.oidcError(r, "Invalid or expired state. Please try again."))
+		return
+	}
+
+	// Browser binding — unchanged in behavior; reads state.BrowserNonce now.
 	stateCookie, err := r.Cookie(oidcStateCookieName)
-	if err != nil || !hmac.Equal([]byte(stateCookie.Value), []byte(browserNonce)) {
+	if err != nil || !hmac.Equal([]byte(stateCookie.Value), []byte(state.BrowserNonce)) {
 		h.obs.Logger.WarnContext(ctx, "OIDC state cookie mismatch")
-		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, oidcErrorData{
-			Error: "Invalid or expired state. Please try again.",
-		})
+		shared.RenderTemplate(ctx, w, http.StatusBadRequest, oidcErrorTmpl, h.oidcError(r, "Invalid or expired state. Please try again."))
 		return
 	}
-	h.clearOIDCStateCookie(w)
+	// Once binding passes the one-time cookie is ALWAYS burned. The delete needs
+	// no policy (Secure/SameSite don't participate in the overwrite match), so it
+	// never resolves the provider and can't be wedged into leaving the (state,
+	// nonce) pair replayable.
+	h.clearOIDCStateCookie(ctx, w)
 
-	u, err := h.oidc.AuthenticateOIDC(ctx, code, nonce, verifier, h.redirectURI)
+	u, err := h.oidc.AuthenticateOIDC(ctx, code, state.Nonce, state.Verifier)
 	if err != nil {
+		if errors.Is(err, domain.ErrOIDCUnavailable) {
+			// Upstream is unreachable — a server-side problem, not a failed
+			// user authentication. Report 500 + ERROR so it surfaces in
+			// monitoring instead of looking like the user mistyped something.
+			h.obs.Logger.ErrorContext(ctx, "OIDC upstream unavailable on callback", "error", err)
+			shared.RenderTemplate(ctx, w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
+			return
+		}
 		h.obs.Logger.WarnContext(ctx, "OIDC authentication failed", "error", err)
-		shared.RenderTemplate(ctx, w, http.StatusUnauthorized, oidcErrorTmpl, oidcErrorData{
-			Error: "Authentication failed. Please try again.",
-		})
+		shared.RenderTemplate(ctx, w, http.StatusUnauthorized, oidcErrorTmpl, h.oidcError(r, "Authentication failed. Please try again."))
 		return
 	}
 
-	h.session.SetSessionCookie(w, u.ID)
+	if err = h.session.SetSessionCookie(ctx, w, u.ID); err != nil {
+		h.obs.Logger.ErrorContext(ctx, "OIDC: set session cookie failed", "error", err)
+		shared.RenderTemplate(ctx, w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
+		return
+	}
 	h.obs.Logger.InfoContext(ctx, "OIDC user logged in", "user_id", u.ID, "email", u.Email)
 
-	http.Redirect(w, r, shared.SafeRedirect(redirect, "/"), http.StatusSeeOther)
-}
-
-func (h *oidcHandler) signState(payload string) string {
-	mac := hmac.New(sha256.New, h.stateKey)
-	mac.Write([]byte(payload))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-func (h *oidcHandler) verifyState(state string) (redirect, nonce, verifier, browserNonce string, err error) {
-	parts := strings.SplitN(state, "|", 6)
-	if len(parts) != 6 {
-		return "", "", "", "", fmt.Errorf("invalid state format")
-	}
-
-	redirect = parts[0]
-	nonce = parts[1]
-	verifier = parts[2]
-	browserNonce = parts[3]
-	timestampStr := parts[4]
-	sig := parts[5]
-
-	payload := redirect + "|" + nonce + "|" + verifier + "|" + browserNonce + "|" + timestampStr
-	expected := h.signState(payload)
-	if !hmac.Equal([]byte(sig), []byte(expected)) {
-		return "", "", "", "", fmt.Errorf("state signature mismatch")
-	}
-
-	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
+	safe := shared.SafeRedirect(state.Redirect, "/")
+	dest, err := h.urls.Resolve(ctx, safe)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("invalid state timestamp")
+		h.obs.Logger.ErrorContext(ctx, "build post-login URL", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
-	age := time.Since(time.Unix(timestamp, 0))
-	if age > 10*time.Minute || age < -time.Minute {
-		return "", "", "", "", fmt.Errorf("state expired (age: %v)", age)
-	}
-
-	return redirect, nonce, verifier, browserNonce, nil
+	http.Redirect(w, r, dest, http.StatusSeeOther)
 }
 
-func (h *oidcHandler) setOIDCStateCookie(w http.ResponseWriter, nonce string) {
+// stateCookiePath scopes the OIDC state cookie to the AS mount (or "/" at the
+// root) via the URLBuilder, matching the session cookie. A resolution error
+// falls back to "/" (warn-logged, not fatal). Set and Clear MUST agree.
+func (h *oidcHandler) stateCookiePath(ctx context.Context) string {
+	return shared.ResolvePath(ctx, h.urls, "/", h.obs.Logger)
+}
+
+func (h *oidcHandler) setOIDCStateCookie(ctx context.Context, w http.ResponseWriter, nonce string, maxAge time.Duration, policy output.SessionConfig) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcStateCookieName,
 		Value:    nonce,
-		Path:     "/",
-		MaxAge:   600,
+		Path:     h.stateCookiePath(ctx),
+		MaxAge:   shared.CookieMaxAgeSeconds(maxAge),
 		HttpOnly: true,
-		Secure:   h.session.Secure(),
-		SameSite: h.session.SameSite(),
+		// Same boot Secure floor as the session cookie: a provider may tighten
+		// Secure but never downgrade an HTTPS deployment. EffectiveSameSite
+		// applies the zero-value (omitted-attribute) backstop.
+		Secure:   policy.Secure || h.session.SecureFloor(),
+		SameSite: policy.EffectiveSameSite(),
 	})
 }
 
-func (h *oidcHandler) clearOIDCStateCookie(w http.ResponseWriter) {
+// clearOIDCStateCookie burns the one-time state cookie. SameSite doesn't
+// participate in the browser's overwrite match, but it does govern whether the
+// browser accepts the Set-Cookie cross-site — so the delete carries the
+// configured SameSite when the policy resolves best-effort, and a safe Lax +
+// boot Secure floor when it doesn't (the burn still can't be wedged by a
+// provider outage).
+func (h *oidcHandler) clearOIDCStateCookie(ctx context.Context, w http.ResponseWriter) {
+	sameSite := http.SameSiteLaxMode
+	secure := h.session.SecureFloor()
+	if policy, err := h.session.CookiePolicy(ctx); err == nil {
+		sameSite = policy.EffectiveSameSite()
+		secure = policy.Secure || h.session.SecureFloor()
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcStateCookieName,
 		Value:    "",
-		Path:     "/",
+		Path:     h.stateCookiePath(ctx),
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   h.session.Secure(),
-		SameSite: h.session.SameSite(),
+		Secure:   secure,
+		SameSite: sameSite,
 	})
+}
+
+// oidcError builds the OIDC error page data with the mount prefix populated.
+func (h *oidcHandler) oidcError(r *http.Request, msg string) oidcErrorData {
+	return oidcErrorData{
+		Error:    msg,
+		LoginURL: shared.ResolvePath(r.Context(), h.urls, "/login", h.obs.Logger),
+	}
 }
 
 var oidcErrorTmpl = template.Must(template.New("oidc_error").Parse(`<!DOCTYPE html>
@@ -236,7 +293,7 @@ a:hover{color:#4338ca}
 </div>
 <h1>Authentication failed</h1>
 <div class="error">{{.Error}}</div>
-<a href="/login">Back to sign in</a>
+<a href="{{.LoginURL}}">Back to sign in</a>
 </div>
 <div class="footer">Secured by Authplane</div>
 </div>

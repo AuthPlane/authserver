@@ -35,6 +35,7 @@ type consentPageData struct {
 	ResourceSlug        string
 	Scopes              []input.ScopeInfo
 	CSRFToken           string
+	FormAction          string
 }
 
 // loginPageData holds the template data for the login page.
@@ -45,9 +46,11 @@ type loginPageData struct {
 	OIDCDisplayName string
 	OIDCStartURL    string
 	ShowLocalLogin  bool
+	FormAction      string
 }
 
 // oidcErrorData holds the template data for the OIDC error page.
 type oidcErrorData struct {
-	Error string
+	Error    string
+	LoginURL string
 }

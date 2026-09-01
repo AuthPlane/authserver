@@ -10,7 +10,7 @@ import (
 	"github.com/authplane/authserver/e2e"
 )
 
-// TestReConnectUpsert_AP319 is the regression test for a second
+// TestReConnectUpsert is the regression test for a second
 // /connect dance for an already-bound (user, provider) used to 500 because
 // the connect-callback handler used a lookup → revoke → create pattern and
 // the UNIQUE (user_id, broker_provider_id) constraint covered both active
@@ -33,7 +33,7 @@ import (
 //
 // Stays Gate-0 clean: no internal/* imports, drives the public surface
 // only via the harness Admin* + RunFlow* helpers.
-func TestReConnectUpsert_AP319(t *testing.T) {
+func TestReConnectUpsert(t *testing.T) {
 	scopes := []string{"tools/echo"}
 	h, _ := e2e.SetupE2E(t, e2e.HarnessConfig{
 		EnableAdminAPI:             true,
@@ -53,7 +53,7 @@ func TestReConnectUpsert_AP319(t *testing.T) {
 		Protocol:    "oauth",
 		ConfigData: map[string]any{
 			"client_id":         "mock-client-id",
-			"client_secret_env": "CONNECTOR_E2E_MOCK_SECRET",
+			"client_secret_ref": "CONNECTOR_E2E_MOCK_SECRET",
 			"authorize_url":     mockBase + "/authorize",
 			"token_url":         mockBase + "/token",
 			"response_format":   "standard",
@@ -68,7 +68,7 @@ func TestReConnectUpsert_AP319(t *testing.T) {
 		Scopes:             []e2e.AdminScope{{Name: "repo", Upstream: "repo"}},
 	})
 
-	const email = "ap319-reconnect@example.com"
+	const email = "reconnect-upsert@example.com"
 	const password = "pass123"
 	h.CreateUser(email, password)
 

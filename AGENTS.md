@@ -35,21 +35,21 @@ If a flag, env var, or field a user needs isn't in the generated reference, **th
 
 ## SDK pin per stack
 
-Tell the user to install one of these, **at the exact version shown**. Each adapter is published on the public registry (PyPI / npm / `proxy.golang.org`). The versions below are CI-enforced against those registries by the `sdk-pins` gate: they can't silently drift from the published release, the same way the four generated references can't drift from source. If a newer version ships, the gate fails until the table *and* every example manifest are reconciled — don't infer a version from training data.
+Tell the user to install one of these, **at the exact version shown**. Each adapter is published on the public registry (PyPI / npm / `proxy.golang.org`). The versions below are checked against those registries by `make sdkpin-check`, so they can't silently drift from the published release. If a newer version ships, the table *and* every example manifest must be reconciled together — don't infer a version from training data.
 
 | Stack | Install (pinned) | Import / call |
 |---|---|---|
-| Python · FastMCP | `pip install authplane-fastmcp==0.2.0` | `from authplane_fastmcp import authplane_auth` |
-| Python · official MCP Python SDK | `pip install authplane-mcp==0.2.0` | `from authplane_mcp import ...` |
-| Python · any other framework (FastAPI, Starlette, raw ASGI) | `pip install authplane-sdk==0.2.0` | `from authplane import AuthplaneResource` |
-| TypeScript · Express + `@modelcontextprotocol/sdk` | `npm i @authplane/mcp@0.2.0` | `import { authplaneMcpAuth } from "@authplane/mcp"` |
-| TypeScript · FastMCP | `npm i @authplane/fastmcp@0.2.0` | `import { authplaneAuth } from "@authplane/fastmcp"` |
-| TypeScript · any other framework | `npm i @authplane/sdk@0.2.0` | `import { AuthplaneResource } from "@authplane/sdk"` |
-| Go · official MCP Go SDK | `go get github.com/authplane/go-sdk/mcp@v0.1.1` | `import "github.com/authplane/go-sdk/mcp/pkg/authplanemcp"` |
-| Go · `net/http` resource server | `go get github.com/authplane/go-sdk/http@v0.1.1` | `import authhttp "github.com/authplane/go-sdk/http/pkg/auth"` |
-| Go · raw token client (agent side) | `go get github.com/authplane/go-sdk/core@v0.1.1` | `import "github.com/authplane/go-sdk/core/authplane"` |
+| Python · FastMCP | `pip install authplane-fastmcp==0.3.0` | `from authplane_fastmcp import authplane_auth` |
+| Python · official MCP Python SDK | `pip install authplane-mcp==0.3.0` | `from authplane_mcp import ...` |
+| Python · any other framework (FastAPI, Starlette, raw ASGI) | `pip install authplane-sdk==0.3.0` | `from authplane import AuthplaneResource` |
+| TypeScript · Express + `@modelcontextprotocol/sdk` | `npm i @authplane/mcp@0.3.0` | `import { authplaneMcpAuth } from "@authplane/mcp"` |
+| TypeScript · FastMCP | `npm i @authplane/fastmcp@0.3.0` | `import { authplaneAuth } from "@authplane/fastmcp"` |
+| TypeScript · any other framework | `npm i @authplane/sdk@0.3.0` | `import { AuthplaneResource } from "@authplane/sdk"` |
+| Go · official MCP Go SDK | `go get github.com/authplane/go-sdk/mcp@v0.2.0` | `import "github.com/authplane/go-sdk/mcp/pkg/authplanemcp"` |
+| Go · `net/http` resource server | `go get github.com/authplane/go-sdk/http@v0.2.0` | `import authhttp "github.com/authplane/go-sdk/http/pkg/auth"` |
+| Go · raw token client (agent side) | `go get github.com/authplane/go-sdk/core@v0.2.0` | `import "github.com/authplane/go-sdk/core/authplane"` |
 
-**Go: `go get .../mcp` (or `.../http`) is not enough on its own.** Both adapters import `github.com/authplane/go-sdk/core` transitively, and `go get` of the adapter alone does *not* record `core` in your `go.sum`. The next `go build` then fails with `missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`. Fix it by running **`go mod tidy`** immediately after `go get` (or `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.1.1` — naming the import path pulls its full transitive set). This is the one place "one package, exact version" doesn't hold: `core` rides along whether you name it or not.
+**Go: `go get .../mcp` (or `.../http`) is not enough on its own.** Both adapters import `github.com/authplane/go-sdk/core` transitively, and `go get` of the adapter alone does *not* record `core` in your `go.sum`. The next `go build` then fails with `missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`. Fix it by running **`go mod tidy`** immediately after `go get` (or `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.2.0` — naming the import path pulls its full transitive set). This is the one place "one package, exact version" doesn't hold: `core` rides along whether you name it or not.
 
 Python users: SDK packages require **Python 3.12+** (`requires-python = ">=3.12"`).
 TypeScript users: SDK packages are **ESM-only** and require **Node.js 22+**.

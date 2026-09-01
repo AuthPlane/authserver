@@ -21,19 +21,23 @@ import (
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
-	"github.com/authplane/authserver/internal/ssrf"
 )
 
 const maxCIMDBodySize = 1 << 20 // 1MB
 
 var _ output.CIMDFetcher = (*Fetcher)(nil)
 
-// Fetcher fetches and caches CIMD documents over HTTPS.
+// Fetcher fetches and caches CIMD documents over HTTPS. It holds no policy
+// config of its own: RequireHTTPS/CacheTTL/FetchTimeout arrive per request via
+// the CIMDFetchConfig passed to Fetch (the service resolves them from the
+// per-request CIMDConfigProvider, the single source of truth).
 type Fetcher struct {
-	client        *http.Client
-	requireHTTPS  bool
+	// client is a single immutable client whose dispatchTransport routes each
+	// request to the SSRF-safe or plain transport based on the per-request
+	// RequireHTTPS carried in the request context.
+	client *http.Client
+
 	allowLoopback bool
-	cacheTTL      time.Duration
 	logger        *slog.Logger
 	tracer        trace.Tracer
 	metrics       *observability.Metrics
@@ -44,6 +48,12 @@ type Fetcher struct {
 
 // SetAllowLoopback enables loopback addresses (127.0.0.1, ::1, localhost)
 // for testing with httptest servers. MUST NOT be called in production.
+//
+// It relaxes only the URL-level validateURLSafety check and applies to the
+// plain transport (RequireHTTPS=false). It does NOT relax the SSRF-safe
+// transport: a request resolved with RequireHTTPS=true still has loopback
+// blocked at dial time (loopback ∈ ssrf.IsPrivateIP), so an https://127.0.0.1
+// fetch would be rejected regardless of this toggle.
 func (f *Fetcher) SetAllowLoopback(allow bool) {
 	f.allowLoopback = allow
 }
@@ -53,53 +63,44 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
-// New creates a CIMD fetcher.
-// When requireHTTPS is true (production), the HTTP client uses an SSRF-safe
-// transport that blocks connections to private/reserved IP addresses.
-// When requireHTTPS is false (dev/test), the default transport is used to
-// allow loopback connections.
-func New(requireHTTPS bool, cacheTTL, fetchTimeout time.Duration, obs *observability.Provider) *Fetcher {
-	httpClient := &http.Client{
-		Timeout: fetchTimeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			// Per spec: do NOT follow redirects.
-			return http.ErrUseLastResponse
-		},
-	}
-	if requireHTTPS {
-		httpClient.Transport = ssrf.NewSafeTransport()
-	}
-
+// New creates a CIMD fetcher. It takes no policy knobs: a single HTTP client is
+// built up front whose dispatchTransport selects the SSRF-safe or plain
+// transport per request from the RequireHTTPS value carried in the request
+// context. The per-request timeout is applied via the request context, so the
+// client leaves http.Client.Timeout unset.
+func New(obs *observability.Provider) *Fetcher {
 	return &Fetcher{
-		client:       httpClient,
-		requireHTTPS: requireHTTPS,
-		cacheTTL:     cacheTTL,
-		logger:       obs.Logger,
-		tracer:       obs.Tracer,
-		metrics:      obs.Metrics,
-		cache:        make(map[string]*cacheEntry),
+		client: &http.Client{
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				// Per spec: do NOT follow redirects.
+				return http.ErrUseLastResponse
+			},
+			Transport: newDispatchTransport(),
+		},
+		logger:  obs.Logger,
+		tracer:  obs.Tracer,
+		metrics: obs.Metrics,
+		cache:   make(map[string]*cacheEntry),
 	}
 }
 
-// Fetch retrieves a CIMD from the given URL.
-func (f *Fetcher) Fetch(ctx context.Context, docURL string) (*output.CIMDDocument, error) {
+// Fetch retrieves a CIMD from the given URL using the per-request cfg.
+func (f *Fetcher) Fetch(ctx context.Context, docURL string, cfg output.CIMDFetchConfig) (*output.CIMDDocument, error) {
 	ctx, span := f.tracer.Start(ctx, "CIMD.Fetch")
 	defer span.End()
 
-	// Check cache first.
-	if doc := f.getCached(docURL); doc != nil {
-		f.logger.DebugContext(ctx, "cimd cache hit", "url", docURL)
-		return doc, nil
-	}
-
-	// Validate URL scheme.
+	// Validate URL scheme. These are per-request policy gates on the URL (does
+	// THIS request's RequireHTTPS allow THIS scheme?), so they MUST run before
+	// the cache lookup: the cache is keyed by URL only, and a doc cached under a
+	// permissive RequireHTTPS=false request must not be served to a stricter
+	// RequireHTTPS=true request via a cache hit that skips the scheme check.
 	parsed, err := url.Parse(docURL)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("%w: %v", domain.ErrCIMDFetchFailed, err)
 	}
-	if f.requireHTTPS && parsed.Scheme != "https" {
+	if cfg.RequireHTTPS && parsed.Scheme != "https" {
 		schemeErr := fmt.Errorf("%w: HTTPS required, got %s", domain.ErrCIMDFetchFailed, parsed.Scheme)
 		span.RecordError(schemeErr)
 		span.SetStatus(codes.Error, schemeErr.Error())
@@ -119,8 +120,25 @@ func (f *Fetcher) Fetch(ctx context.Context, docURL string) (*output.CIMDDocumen
 		return nil, safeErr
 	}
 
-	// Fetch the document.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, docURL, http.NoBody)
+	// Cache lookup runs only after the per-request policy gates above have
+	// passed, so a cache hit can never bypass the scheme/SSRF checks.
+	if doc := f.getCached(docURL); doc != nil {
+		f.logger.DebugContext(ctx, "cimd cache hit", "url", docURL)
+		return doc, nil
+	}
+
+	// Fetch the document. Apply the per-request timeout via context, and carry
+	// the per-request RequireHTTPS in the context so dispatchTransport routes to
+	// the SSRF-safe or plain transport. Both knobs live on the request context —
+	// the shared client is never mutated.
+	reqCtx := ctx
+	if cfg.FetchTimeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, cfg.FetchTimeout)
+		defer cancel()
+	}
+	reqCtx = withRequireHTTPS(reqCtx, cfg.RequireHTTPS)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, docURL, http.NoBody)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -195,7 +213,7 @@ func (f *Fetcher) Fetch(ctx context.Context, docURL string) (*output.CIMDDocumen
 	}
 
 	// Cache the result.
-	f.putCache(docURL, &doc)
+	f.putCache(docURL, &doc, cfg.CacheTTL)
 
 	f.logger.InfoContext(ctx, "fetched cimd document", "url", docURL, "client_name", doc.ClientName)
 	return &doc, nil
@@ -279,11 +297,11 @@ func (f *Fetcher) getCached(key string) *output.CIMDDocument {
 	return entry.doc
 }
 
-func (f *Fetcher) putCache(key string, doc *output.CIMDDocument) {
+func (f *Fetcher) putCache(key string, doc *output.CIMDDocument, ttl time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cache[key] = &cacheEntry{
 		doc:       doc,
-		expiresAt: time.Now().Add(f.cacheTTL),
+		expiresAt: time.Now().Add(ttl),
 	}
 }

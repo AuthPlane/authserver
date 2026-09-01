@@ -1,7 +1,6 @@
 package admin_test
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -42,10 +41,10 @@ func newAdminTestServerWithFronting(t *testing.T) *frontingTestEnv {
 		services.WithResourceAdminTransactionManager(stores.TransactionMgr),
 	)
 	brokerProviderAdminSvc := services.NewBrokerProviderAdminService(
-		stores.BrokerProvider, obs, nil,
+		stores.BrokerProvider, obs, nil, noopSecretEncoder{},
 	)
 
-	srv := apiadmin.NewServer(context.Background(), config.AdminConfig{
+	srv := mustNewServer(t, config.AdminConfig{
 		Enabled: true,
 		Address: ":0",
 		APIKey:  testAPIKey,

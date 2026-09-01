@@ -13,15 +13,23 @@ import (
 )
 
 // newTestFamily returns a minimal valid TokenFamily for use in tests.
+//
+// AuthSessionID is derived from id rather than a shared constant: the
+// migration 003 index on auth_session_id is unique (one family per
+// authorization, by construction), so two families created in the same test
+// with the same non-empty AuthSessionID would collide on INSERT. Deriving it
+// from id keeps every call site's family session-linked without the caller
+// having to think about that invariant.
 func newTestFamily(id string) *token.Family {
 	return &token.Family{
-		ID:        id,
-		ClientID:  "client-1",
-		UserID:    "user-1",
-		Scope:     "tools/query",
-		Resource:  "https://mcp.example.com",
-		Status:    token.FamilyActive,
-		CreatedAt: time.Now().UTC(),
+		ID:            id,
+		ClientID:      "client-1",
+		UserID:        "user-1",
+		Scope:         "tools/query",
+		Resource:      "https://mcp.example.com",
+		Status:        token.FamilyActive,
+		CreatedAt:     time.Now().UTC(),
+		AuthSessionID: "sess-" + id,
 	}
 }
 
@@ -79,6 +87,9 @@ func RunTokenStoreTests(t *testing.T, newStores func(*testing.T) (output.TokenSt
 		if got.RevokedAt != nil {
 			t.Errorf("revoked_at: expected nil, got %v", got.RevokedAt)
 		}
+		if got.AuthSessionID != "sess-fam-1" {
+			t.Errorf("auth_session_id: got %q, want %q", got.AuthSessionID, "sess-fam-1")
+		}
 	})
 
 	t.Run("GetFamily_NotFound", func(t *testing.T) {
@@ -87,6 +98,70 @@ func RunTokenStoreTests(t *testing.T, newStores func(*testing.T) (output.TokenSt
 		ctx := context.Background()
 
 		_, err := store.GetFamily(ctx, "nonexistent")
+		if !errors.Is(err, domain.ErrInvalidGrant) {
+			t.Errorf("expected ErrInvalidGrant, got %v", err)
+		}
+	})
+
+	t.Run("GetFamilyByAuthSessionID", func(t *testing.T) {
+		store, clients, users := newStores(t)
+		seedFKParents(t, clients, users)
+		ctx := context.Background()
+
+		f := newTestFamily("fam-by-sess")
+		if err := store.CreateFamily(ctx, f); err != nil {
+			t.Fatalf("create family: %v", err)
+		}
+
+		got, err := store.GetFamilyByAuthSessionID(ctx, "sess-fam-by-sess")
+		if err != nil {
+			t.Fatalf("get by auth session id: %v", err)
+		}
+		if got.ID != "fam-by-sess" {
+			t.Errorf("id: got %q, want %q", got.ID, "fam-by-sess")
+		}
+		if got.AuthSessionID != "sess-fam-by-sess" {
+			t.Errorf("auth_session_id: got %q, want %q", got.AuthSessionID, "sess-fam-by-sess")
+		}
+	})
+
+	t.Run("CreateFamily_EmptyAuthSessionID_StoresAsNull", func(t *testing.T) {
+		// Both adapters map AuthSessionID == "" to a NULL column so it never
+		// collides with a real session id under the unique index. newTestFamily
+		// always derives a non-empty AuthSessionID, so this branch needs its own
+		// case: an empty AuthSessionID must round-trip as "", and — the behavior
+		// that actually matters — an empty-string lookup must not match a
+		// legacy row whose auth_session_id is NULL (SQL NULL is never equal to
+		// '').
+		store, clients, users := newStores(t)
+		seedFKParents(t, clients, users)
+		ctx := context.Background()
+
+		f := newTestFamily("fam-no-session")
+		f.AuthSessionID = ""
+		if err := store.CreateFamily(ctx, f); err != nil {
+			t.Fatalf("create family: %v", err)
+		}
+
+		got, err := store.GetFamily(ctx, "fam-no-session")
+		if err != nil {
+			t.Fatalf("get family: %v", err)
+		}
+		if got.AuthSessionID != "" {
+			t.Errorf("auth_session_id: got %q, want empty", got.AuthSessionID)
+		}
+
+		if _, err := store.GetFamilyByAuthSessionID(ctx, ""); !errors.Is(err, domain.ErrInvalidGrant) {
+			t.Errorf("GetFamilyByAuthSessionID(\"\") should not match a NULL auth_session_id row, got err=%v", err)
+		}
+	})
+
+	t.Run("GetFamilyByAuthSessionID_NotFound", func(t *testing.T) {
+		store, clients, users := newStores(t)
+		seedFKParents(t, clients, users)
+		ctx := context.Background()
+
+		_, err := store.GetFamilyByAuthSessionID(ctx, "sess-that-never-existed")
 		if !errors.Is(err, domain.ErrInvalidGrant) {
 			t.Errorf("expected ErrInvalidGrant, got %v", err)
 		}
@@ -225,8 +300,12 @@ func RunTokenStoreTests(t *testing.T, newStores func(*testing.T) (output.TokenSt
 			t.Fatalf("consume rt-0: %v", err)
 		}
 
-		if err := store.RevokeFamily(ctx, "fam-revoke"); err != nil {
+		revoked, err := store.RevokeFamily(ctx, "fam-revoke")
+		if err != nil {
 			t.Fatalf("revoke family: %v", err)
+		}
+		if !revoked {
+			t.Error("revoke family: got revoked=false on an active family, want true")
 		}
 
 		fam, err := store.GetFamily(ctx, "fam-revoke")
@@ -262,11 +341,19 @@ func RunTokenStoreTests(t *testing.T, newStores func(*testing.T) (output.TokenSt
 			t.Fatalf("create family: %v", err)
 		}
 
-		if err := store.RevokeFamily(ctx, "fam-idem"); err != nil {
+		revoked, err := store.RevokeFamily(ctx, "fam-idem")
+		if err != nil {
 			t.Fatalf("first revoke: %v", err)
 		}
-		if err := store.RevokeFamily(ctx, "fam-idem"); err != nil {
+		if !revoked {
+			t.Error("first revoke: got revoked=false, want true")
+		}
+		revoked, err = store.RevokeFamily(ctx, "fam-idem")
+		if err != nil {
 			t.Fatalf("second revoke (should be no-op): %v", err)
+		}
+		if revoked {
+			t.Error("second revoke: got revoked=true on an already-revoked family, want false")
 		}
 	})
 
@@ -380,7 +467,7 @@ func RunTokenStoreTests(t *testing.T, newStores func(*testing.T) (output.TokenSt
 		since := time.Now().UTC().Add(-time.Minute)
 
 		for i := 0; i < 2; i++ {
-			if err := store.RevokeFamily(ctx, fmt.Sprintf("fam-rcnt-%d", i)); err != nil {
+			if _, err := store.RevokeFamily(ctx, fmt.Sprintf("fam-rcnt-%d", i)); err != nil {
 				t.Fatalf("revoke %d: %v", i, err)
 			}
 		}

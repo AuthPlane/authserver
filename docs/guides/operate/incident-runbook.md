@@ -122,14 +122,21 @@ curl -fsS "http://localhost:9001/admin/audit?action=dcr.mode_updated&since=$(dat
 A wave of refresh-token reuse detections — possible token-theft campaign or buggy client.
 
 ### Symptoms
-- `authserver_refresh_token_reuse_total` (canonical: `internal/observability/metrics.go:140`) rate is non-zero for more than 5 minutes.
+- `authserver_refresh_token_reuse_total` (canonical: `RefreshTokenReuse` in `internal/observability/metrics.go`) rate is non-zero for more than 5 minutes.
 - Users report "logged out unexpectedly" support tickets.
-- `family.revoked` rows accumulate (canonical action: `internal/domain/audit/entity.go:41`).
+- `family.revoked` rows accumulate (canonical action: `ActionFamilyRevoked` in `internal/domain/audit/entity.go`).
+- `authserver_revocation_failures_total{path="reuse"}` is non-zero (`RevocationFailures` in `internal/observability/metrics.go`): `half="family"` → the family is **still active** (log `failed to revoke family during reuse detection`); `half="jti"` → the family's access tokens introspect as active until `exp` (log `JTI denylist failed during reuse detection`, audit row `family.denylist_failed`; each half reports its own failure, so when both failed both ERROR lines and both rows appear for the same `family_id` and both alerts fire together). Outcome table: [token design → reuse detection](token-design-internals.md#refresh-token-rotation-and-reuse-detection).
 
 ### Detect
 ```bash
 # All family revocations in the last hour
 curl -fsS "http://localhost:9001/admin/audit?action=family.revoked&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, detail}'
+# Detections whose revocation failed — these families are still live
+curl -fsS "http://localhost:9001/admin/audit?action=family.revocation_failed&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, detail}'
+# Families whose access tokens were not denylisted — they introspect as active until exp
+curl -fsS "http://localhost:9001/admin/audit?action=family.denylist_failed&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
   -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, detail}'
 ```
 
@@ -139,13 +146,23 @@ sum(rate(authserver_refresh_token_reuse_total[5m])) > 0.1
 ```
 
 ### Contain
-1. If one client dominates the burst: suspend it.
+1. If `RefreshReuseRevocationFailed` fired (`half="family"`): the family in the `failed to revoke family during reuse detection` log line (`family_id`) is **still live**. Revoke it directly, before the rest of the triage:
+   ```bash
+   curl -fsS -X DELETE -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" \
+     "http://localhost:9001/admin/tokens/$FAMILY_ID"        # family id → revokes the family + denylists its JTIs
+   ```
+   If that fails too, the database is the incident — the same failure hits every revocation until it is fixed. Once you know the user, `authserver admin user force-logout --id $USER_ID` burns every family they own.
+
+   If only `RefreshReuseDenylistFailed` fired (`half="jti"`): the family is already dead; run the same `DELETE` to retry the denylist (the insert is idempotent), or accept that its access tokens expire on their own within `exp` (15 min default).
+
+   A `204` confirms the family row and its refresh tokens are revoked; on this admin path the JTI-denylist half is still best-effort (a failure there is logged, not returned), so before standing down, introspect one of the family's recent access tokens and confirm it reports `active: false`.
+2. If one client dominates the burst: suspend it.
    ```bash
    authserver admin client list --status active --limit 200      # find the culprit
    curl -X PATCH -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" \
      "http://localhost:9001/admin/clients/$CLIENT_ID/suspend"
    ```
-2. If users are concentrated under one identity provider: pause that IDP at your enterprise IdP layer.
+3. If users are concentrated under one identity provider: pause that IDP at your enterprise IdP layer.
 
 ### Eradicate
 - Force-logout affected users (the family is already burnt; this also revokes any other family they own):
@@ -185,7 +202,7 @@ Prometheus: `rate(authserver_upstream_token_issued_total[5m])` (canonical: `inte
 
 ### Contain
 1. **Rotate the upstream secret at the provider.** GitHub: regenerate the OAuth app secret. Google: rotate the OAuth client. Slack: regenerate the app credentials.
-2. Update the env var that the provider's `client_secret_env` points at (e.g. `CONNECTOR_GITHUB_SECRET`). The secret value is **never stored in the AS database** — only the env-var **name** lives in `broker_providers.config_data` — so updating the env source and restarting is sufficient.
+2. Update the env var that the provider's `client_secret_ref` points at (e.g. `CONNECTOR_GITHUB_SECRET`). The secret value is **never stored in the AS database** — only the env-var **name** lives in `broker_providers.config_data` — so updating the env source and restarting is sufficient.
 3. Restart the AS.
 
 ### Eradicate
@@ -262,7 +279,7 @@ The MCP server itself is the primary enforcement point for DPoP — the AS only 
 | `force-logout` reports 0 families revoked but user is still logged in | User holds a stale access token (still in JWT TTL) | Revoke per-issuance, or wait for token TTL (`dcr.default_token_expiry`, default 15m). |
 | `revoke-broker` does not stop the agent from using the upstream | Already-vended upstream tokens are not AS-revocable | Coordinate with the upstream provider's revocation API. |
 | Suspended client's tokens still work | Suspend blocks new issuance; existing tokens valid until `exp` | Revoke at issuance level with `admin issuance revoke` for each `JTI`. |
-| Audit log misses the mutation you ran | The mutation hit a different instance / database; or you ran against a tenant config that doesn't audit | Confirm `storage.driver` is shared; check `audit.enabled`. |
+| Audit log misses the mutation you ran | The mutation hit a different instance / database; or you ran against a config that doesn't audit | Confirm `storage.driver` is shared; check `audit.enabled`. |
 
 ## Related
 

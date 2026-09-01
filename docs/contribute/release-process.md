@@ -126,8 +126,8 @@ versions. After a release that changes the wire shape:
 ```bash
 # Helm chart pulls the right image:
 helm show values charts/authplane | grep -E '^\s*tag:'
-docker pull authplane/authserver:vX.Y.Z
-docker run --rm authplane/authserver:vX.Y.Z version
+docker pull authplane/authserver:X.Y.Z
+docker run --rm authplane/authserver:X.Y.Z version
 
 # Binary tarball boots:
 curl -sL https://github.com/authplane/authserver/releases/download/vX.Y.Z/authserver_X.Y.Z_linux_amd64.tar.gz | tar -xz

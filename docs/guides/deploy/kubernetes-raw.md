@@ -105,7 +105,7 @@ spec:
         fsGroup: 65534
       containers:
         - name: authserver
-          image: authplane/authserver:latest   # pin to a released tag (e.g. :0.1.1) in production
+          image: authplane/authserver:latest   # pin to a released tag (e.g. :0.1.2) in production
           args: ["serve", "--config", "/config/config.yaml"]
           ports:
             - { name: http,  containerPort: 9000 }
@@ -123,12 +123,19 @@ spec:
               valueFrom: { secretKeyRef: { name: authplane-secrets, key: data-enc-key } }
           volumeMounts:
             - { name: config, mountPath: /config, readOnly: true }
+          # Both on /livez, which checks nothing. Liveness must not depend on the
+          # database (a restart cannot fix it, and cannot even succeed — the
+          # server migrates at startup). Readiness must not either: readiness is
+          # per pod, but JWKS and discovery are built from config and the signing
+          # key, so removing the pod during a database outage takes down the key
+          # set resource servers use to VALIDATE tokens. /ready still exists and
+          # still pings the database — point an uptime check at it.
           livenessProbe:
-            httpGet: { path: /health, port: 9000 }
+            httpGet: { path: /livez, port: 9000 }
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-            httpGet: { path: /health, port: 9000 }
+            httpGet: { path: /livez, port: 9000 }
             initialDelaySeconds: 3
             periodSeconds: 5
           resources:

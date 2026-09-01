@@ -59,7 +59,7 @@ func seedBrokerResource(t *testing.T, stores *sqlite.Stores, slug, displayName, 
 		Slug:        slug + "-provider",
 		DisplayName: displayName + " Provider",
 		Protocol:    resource.ProtocolOAuth,
-		ConfigData:  []byte(`{"client_id":"stub","client_secret_env":"STUB"}`),
+		ConfigData:  []byte(`{"client_id":"stub","client_secret_ref":"STUB"}`),
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}

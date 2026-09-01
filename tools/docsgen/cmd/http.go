@@ -642,6 +642,15 @@ func renderRouteSection(r httpRoute, src *srcref.SrcRef, repoRootPath string) st
 		b.WriteString("\n")
 	}
 
+	// Behavioral caveats that the DTO tables cannot express — cases where the
+	// wire shape is correct but the server does something a reader would not
+	// infer from it.
+	if note := routeNotes[r.Method+" "+r.Path]; note != "" {
+		b.WriteString("**Note** — ")
+		b.WriteString(note)
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString("---\n\n")
 	return b.String()
 }
@@ -691,6 +700,45 @@ func expandDTOLinks(s string) string {
 	}
 }
 
+// routeDescriptions maps "METHOD /path" → a prose statement of what the
+// endpoint does, used only for the OpenAPI operation `description`. The
+// Markdown reference already says this through routeBodyHints, but the OpenAPI
+// projection consumes those structurally (requestBody/responses) rather than as
+// prose — so an operation carrying a routeNotes caveat and nothing else reads
+// as if the caveat were the endpoint's purpose. Add an entry when a route has a
+// note whose opening sentence is not itself a statement about the endpoint.
+// `POST /oauth/register` needs none: its note opens by saying what the endpoint
+// creates.
+var routeDescriptions = map[string]string{
+	"POST /oauth/token": "Issues an access token for the grant named in `grant_type` " +
+		"(RFC 6749 §3.2): `authorization_code`, `refresh_token`, `client_credentials`, " +
+		"token-exchange and jwt-bearer. The request is form-encoded; DPoP-bound clients " +
+		"send a `DPoP` header.",
+}
+
+// routeNotes maps "METHOD /path" → a behavioral caveat that the DTO tables
+// cannot express: the wire shape is correct, but the server does something a
+// reader would not infer from it. Rendered as a "**Note**" paragraph in the
+// Markdown reference and as the operation `description` in the OpenAPI
+// projection, so machine consumers (client codegen, Swagger UI) see it too.
+// Keep entries to a short paragraph and name the remedy. A caveat belongs to
+// the endpoint whose behavior it describes: when the cause and the effect sit
+// on different routes, write a note on each and cross-reference by name rather
+// than growing one of them.
+var routeNotes = map[string]string{
+	"POST /oauth/register": "this endpoint creates **user-delegated clients**. Their scopes " +
+		"come from the user at consent time, so a `scope` member in the request is " +
+		"**discarded** and the response carries none. **Register machine-to-machine clients " +
+		"(`client_credentials`, jwt-bearer) with `POST /admin/clients` instead** — that is " +
+		"the only surface that sets a client's scope ceiling, so a client registered here " +
+		"starts without one and those two grants refuse every explicit `scope` at " +
+		"`POST /oauth/token` with `invalid_scope`.",
+	"POST /oauth/token": "`invalid_scope` on `client_credentials` or jwt-bearer usually " +
+		"means an empty client ceiling: the client's registered `scope` is read only by " +
+		"those two grants, and set only by the admin surface (`POST /admin/clients`, " +
+		"`PATCH /admin/clients/{client_id}`).",
+}
+
 // routeBodyHints maps "METHOD /path" → a short Markdown paragraph
 // linking the relevant DTO(s). Keep entries terse — the full wire shape
 // lives in the DTO section.
@@ -711,7 +759,7 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 		"**Response 201** — JSON {{dto:createClientResponse}}; `client_secret` is shown ONCE.\n\n" +
 		"**Errors** — 400 `invalid_request`, 401 `invalid_admin_key`, 409 `client_exists`.\n",
 
-	"GET /admin/clients":                     "**Response 200** — JSON `{ clients: [` {{dto:clientView}} `] }`.\n",
+	"GET /admin/clients":                     "**Response 200** — JSON array of {{dto:clientView}}.\n",
 	"GET /admin/clients/{id}":                "**Response 200** — JSON {{dto:clientView}}. 404 `client_not_found`.\n",
 	"PATCH /admin/clients/{id}":              "**Request** — JSON {{dto:updateClientRequest}} (pointer fields → partial update). **Response 200** — {{dto:clientView}}.\n",
 	"POST /admin/clients/{id}/rotate-secret": "**Response 200** — JSON {{dto:rotateSecretResponse}}; secret shown once.\n",
@@ -721,7 +769,7 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 	"PATCH /admin/clients/{id}/reactivate":   "**Response 200** — JSON {{dto:statusResponse}}.\n",
 
 	"POST /admin/users":               "**Request** — JSON {{dto:createUserRequest}}. **Response 201** — {{dto:userView}}.\n",
-	"GET /admin/users":                "**Response 200** — `{ users: [` {{dto:userView}} `] }`.\n",
+	"GET /admin/users":                "**Response 200** — JSON array of {{dto:userView}}.\n",
 	"GET /admin/users/{id}":           "**Response 200** — {{dto:userView}}.\n",
 	"PATCH /admin/users/{id}":         "**Request** — JSON {{dto:updateUserRequest}}. **Response 200** — {{dto:userView}}.\n",
 	"DELETE /admin/users/{id}":        "**Response 204** — no body.\n",
@@ -731,19 +779,19 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 	"PATCH /admin/users/{id}/enable":  "**Response 200** — JSON {{dto:statusResponse}}.\n",
 
 	"POST /admin/resources":        "**Request** — JSON {{dto:createResourceRequest}}. **Response 201** — {{dto:ResourceView}}.\n",
-	"GET /admin/resources":         "**Response 200** — `{ resources: [` {{dto:ResourceView}} `] }`.\n",
+	"GET /admin/resources":         "**Response 200** — JSON array of {{dto:ResourceView}}.\n",
 	"GET /admin/resources/{id}":    "**Response 200** — {{dto:ResourceView}}.\n",
 	"PATCH /admin/resources/{id}":  "**Request** — JSON {{dto:patchResourceRequest}}. **Response 200** — {{dto:ResourceView}}.\n",
 	"DELETE /admin/resources/{id}": "**Response 204** — no body. 409 {{dto:frontingLinkConflictResponse}} if fronting links reference the resource without `?cascade=true`.\n",
 
 	"POST /admin/broker-providers":        "**Request** — JSON {{dto:createBrokerProviderRequest}}. **Response 201** — {{dto:BrokerProviderView}}.\n",
-	"GET /admin/broker-providers":         "**Response 200** — `{ broker_providers: [` {{dto:BrokerProviderView}} `] }`.\n",
+	"GET /admin/broker-providers":         "**Response 200** — JSON array of {{dto:BrokerProviderView}}.\n",
 	"GET /admin/broker-providers/{id}":    "**Response 200** — {{dto:BrokerProviderView}}.\n",
 	"PATCH /admin/broker-providers/{id}":  "**Request** — JSON {{dto:patchBrokerProviderRequest}}. **Response 200** — {{dto:BrokerProviderView}}.\n",
 	"DELETE /admin/broker-providers/{id}": "**Response 204** — no body.\n",
 
 	"POST /admin/fronting":                     "**Request** — JSON {{dto:createFrontingLinkRequest}}; `?dry_run=true` validates without persisting. **Response 201** — {{dto:FrontingLinkView}}.\n",
-	"GET /admin/fronting":                      "**Response 200** — `{ fronting_links: [` {{dto:FrontingLinkView}} `] }`.\n",
+	"GET /admin/fronting":                      "**Response 200** — JSON array of {{dto:FrontingLinkView}}.\n",
 	"GET /admin/fronting/{source}/{target}":    "**Response 200** — {{dto:FrontingLinkView}}.\n",
 	"PATCH /admin/fronting/{source}/{target}":  "**Request** — JSON {{dto:patchFrontingLinkRequest}}. **Response 200** — {{dto:FrontingLinkView}}.\n",
 	"DELETE /admin/fronting/{source}/{target}": "**Response 204** — no body.\n",
@@ -763,7 +811,7 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 	"GET /admin/settings/dcr":   "**Response 200** — {{dto:dcrSettingsView}}.\n",
 	"PATCH /admin/settings/dcr": "**Request** — JSON {{dto:updateDCRSettingsRequest}}. **Response 200** — {{dto:dcrSettingsView}}.\n",
 
-	"GET /admin/audit":         "**Response 200** — `{ events: [` {{dto:auditEventView}} `] }`.\n",
+	"GET /admin/audit":         "**Response 200** — JSON array of {{dto:auditEventView}}.\n",
 	"GET /admin/stats":         "**Response 200** — {{dto:statsView}}.\n",
 	"POST /admin/auth/verify":  "**Response 200** — {{dto:authVerifyResponse}}.\n",
 	"GET /admin/system/status": "**Response 200** — {{dto:systemStatusResponse}}.\n",
@@ -777,6 +825,8 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 	"GET /.well-known/jwks.json":                  "**Response 200** — JWKS document (public keys only). Cache-Control `max-age=300`.\n",
 	"GET /.well-known/oauth-authorization-server": "**Response 200** — RFC 8414 metadata. Body shape: see `asMetadata` struct in `api/public/wellknown/dto.go`.\n",
 	"GET /.well-known/openid-configuration":       "**Response 200** — same shape as the RFC 8414 endpoint.\n",
+	"POST /login":                                 "**Response 303** — on success, redirects to the post-login target.\n\n**Response 404** — local password login is disabled (`oidc.show_local_login: false`). Answered before the body is read. `GET /login` still renders the page, without the password form.\n\n**Response 422** — the login page re-rendered with an error (bad form, bad CSRF nonce, rejected credential).\n\n**Response 429** — the submitted identity is locked out after `rate_limit.auth_fail_max` failures; carries `Retry-After` with the real remaining time. HTML, not an OAuth error body — the caller is a browser posting a form.\n",
+	"GET /livez":                                  "**Response 200** — {{dto:healthResponse}}. Always 200 while the process serves HTTP; checks no dependencies, so a liveness probe on it never restarts a pod over a backend outage.\n",
 	"GET /health":                                 "**Response 200** — {{dto:healthResponse}}.\n",
 	"GET /ready":                                  "**Response 200** — {{dto:healthResponse}}.\n",
 	"GET /metrics":                                "**Response 200** — Prometheus text-format metrics. Basic-auth protected.\n",

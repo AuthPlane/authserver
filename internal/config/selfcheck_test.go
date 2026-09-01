@@ -340,3 +340,110 @@ func TestFormatMisconfiguredReport_NamesEveryKey(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfCheck_XAA_Disabled — the block reports as disabled when the feature
+// is off, and says so about require_resource too. The chart defaults
+// xaa.enabled to false, so setting require_resource alone is an easy mistake;
+// reporting only "disabled" would leave the operator believing the setting
+// took effect, which is the very defect this check exists to prevent.
+func TestSelfCheck_XAA_Disabled(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		requireResource bool
+		wantInert       bool
+	}{
+		{"require_resource unset", false, false},
+		{"require_resource set", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.XAA.Enabled = false
+			cfg.XAA.RequireResource = tc.requireResource
+
+			got := findCheck(t, SelfCheck(*cfg), "xaa")
+			if got.Status != FeatureDisabled {
+				t.Fatalf("xaa: want Disabled, got %s (%+v)", got.Status, got)
+			}
+			if !strings.Contains(got.Detail, "xaa.enabled=false") {
+				t.Errorf("Detail should name the disabling key, got %q", got.Detail)
+			}
+			if gotInert := strings.Contains(got.Detail, "no effect"); gotInert != tc.wantInert {
+				t.Errorf("Detail mentions the inert flag = %v, want %v (%q)", gotInert, tc.wantInert, got.Detail)
+			}
+		})
+	}
+}
+
+// TestSelfCheck_XAA_ReportsRequireResource — the whole point of the entry: an
+// operator who sets the flag can see at boot that it took effect.
+func TestSelfCheck_XAA_ReportsRequireResource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		on   bool
+		want string
+	}{
+		{"off", false, "require_resource=false"},
+		{"on", true, "require_resource=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.XAA.Enabled = true
+			cfg.XAA.RequireResource = tc.on
+			cfg.Resources = []ResourceConfigUnified{{Slug: "my-mcp", URI: "https://api.example.com", BackendKind: "mint"}}
+
+			got := findCheck(t, SelfCheck(*cfg), "xaa")
+			if got.Status != FeatureEnabled {
+				t.Fatalf("xaa: want Enabled, got %s (%+v)", got.Status, got)
+			}
+			if !strings.Contains(got.Detail, tc.want) {
+				t.Errorf("Detail should state %q, got %q", tc.want, got.Detail)
+			}
+		})
+	}
+}
+
+// TestSelfCheck_XAA_RequireResourceWithoutSeededResourcesStillBoots — the
+// combination that would refuse every exchange is surfaced in Detail, but it
+// must not be Misconfigured: resources are also created at runtime through the
+// admin API, so an empty cfg.Resources is a legitimate starting state and
+// failing boot on it would break that topology.
+func TestSelfCheck_XAA_RequireResourceWithoutSeededResourcesStillBoots(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.XAA.Enabled = true
+	cfg.XAA.RequireResource = true
+	cfg.Resources = nil
+
+	checks := SelfCheck(*cfg)
+	if bad := MisconfiguredChecks(checks); len(bad) > 0 {
+		t.Fatalf("boot must not abort on this combination, got misconfigured: %+v", bad)
+	}
+	got := findCheck(t, checks, "xaa")
+	if !strings.Contains(got.Detail, "no resources with a uri seeded") {
+		t.Errorf("Detail should name the empty catalog, got %q", got.Detail)
+	}
+}
+
+// TestSelfCheck_XAA_ResourcesWithoutURIDoNotCount — enforcement matches the
+// request against Resource.URI, and nothing requires the key, so a catalog
+// seeded by slug alone can never satisfy require_resource. Counting those
+// entries would reassure an operator whose every exchange still fails.
+func TestSelfCheck_XAA_ResourcesWithoutURIDoNotCount(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.XAA.Enabled = true
+	cfg.XAA.RequireResource = true
+	cfg.Resources = []ResourceConfigUnified{
+		{Slug: "no-uri", BackendKind: "mint"},
+		{Slug: "also-no-uri", BackendKind: "mint"},
+	}
+
+	got := findCheck(t, SelfCheck(*cfg), "xaa")
+	if strings.Contains(got.Detail, "2 resource(s) with a uri") {
+		t.Fatalf("uri-less entries must not be counted as satisfying, got %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "no resources with a uri seeded") {
+		t.Errorf("Detail should say no usable resource is seeded, got %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "2 seeded without one") {
+		t.Errorf("Detail should account for the uri-less entries, got %q", got.Detail)
+	}
+}

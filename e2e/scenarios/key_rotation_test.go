@@ -47,7 +47,7 @@ func TestKeyRotation_OldTokensStillValid(t *testing.T) {
 	}
 
 	// 4. Introspect before rotation.
-	ir := h.IntrospectToken(tokens.AccessToken, clientID)
+	ir := h.IntrospectAsResourceServer(tokens.AccessToken, rs.URI)
 	if !ir.Active {
 		t.Fatal("pre-rotation token should be active")
 	}
@@ -66,7 +66,7 @@ func TestKeyRotation_OldTokensStillValid(t *testing.T) {
 	}
 
 	// 6. Token issued before should still verify and introspect as active.
-	ir2 := h.IntrospectToken(tokens.AccessToken, clientID)
+	ir2 := h.IntrospectAsResourceServer(tokens.AccessToken, rs.URI)
 	if !ir2.Active {
 		t.Fatal("token should still be active after JWKS verification")
 	}

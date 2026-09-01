@@ -90,16 +90,17 @@ see
 ## 3. Implement secret resolution
 
 Secrets are not stored in the database. The
-`config_data.<field>_env` convention (e.g. `client_secret_env`) names
+`config_data.<field>_ref` convention (e.g. `client_secret_ref`) names
 an environment variable on the authserver process, and the adapter
 resolves it through the `SecretResolver` interface defined in your
 adapter package (see
 [`internal/adapters/brokerproto/oauth/adapter.go:42`](../../internal/adapters/brokerproto/oauth/adapter.go)
 for the OAuth adapter's `SecretResolver`).
 
-The lone implementation lives in
-[`cmd/authserver/serve.go:847`](../../cmd/authserver/serve.go) as
-`envSecretResolver`. It calls `brokerproto.ValidEnvVarName` from
+The shared implementation lives in
+[`internal/adapters/static/secret_env.go`](../../internal/adapters/static/secret_env.go) as
+`static.EnvSecrets`, wired via `static.NewEnvSecrets()` in `cmd/authserver/serve.go`.
+It calls `brokerproto.ValidEnvVarName` from
 [`internal/brokerproto/secretrules.go:16`](../../internal/brokerproto/secretrules.go)
 **before** consulting `os.Getenv`, so only `CONNECTOR_*` or
 `AUTHPLANE_VAULT_*` prefixed names succeed. **Do not bypass this

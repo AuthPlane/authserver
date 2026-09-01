@@ -6,8 +6,12 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 func TestGenerateKeyPairES256(t *testing.T) {
@@ -369,5 +373,195 @@ func TestJWT_IatClaimPresent(t *testing.T) {
 	diff := time.Since(time.Unix(got.IssuedAt, 0))
 	if diff < 0 || diff > 5*time.Second {
 		t.Errorf("iat claim is not within 5 seconds of now: diff=%v", diff)
+	}
+}
+
+// signRawClaims signs arbitrary claims with kp as an at+jwt, bypassing
+// SignAccessToken and its ValidateAccessTokenClaims gate. It exists so tests
+// can build tokens the issuance path correctly refuses to produce.
+func signRawClaims(t *testing.T, kp *KeyPair, claims map[string]any) string {
+	t.Helper()
+
+	opts := &jose.SignerOptions{}
+	opts.WithType("at+jwt")
+	opts.WithHeader(jose.HeaderKey("kid"), kp.KeyID)
+
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: kp.Algorithm, Key: kp.PrivateKey}, opts)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+
+	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatalf("sign raw claims: %v", err)
+	}
+	return raw
+}
+
+// exp is REQUIRED for at+jwt (RFC 9068 §2.2), so a token without it must fail
+// closed at verification — not skip the expiry check and be accepted forever.
+// The tokens below are signed with the AS's own key but bypass
+// SignAccessToken, which correctly refuses to emit an exp-less token.
+func TestVerify_MissingExp_Rejected(t *testing.T) {
+	base := func() map[string]any {
+		return map[string]any{
+			"iss":       "http://localhost:9000",
+			"sub":       "user-123",
+			"aud":       []string{"https://mcp.example.com"},
+			"client_id": "client-abc",
+			"jti":       GenerateRandomString(16),
+			"iat":       time.Now().Unix(),
+		}
+	}
+
+	tests := []struct {
+		name   string
+		claims map[string]any
+	}{
+		{
+			name:   "exp absent",
+			claims: base(),
+		},
+		{
+			name: "exp zero",
+			claims: func() map[string]any {
+				c := base()
+				c["exp"] = 0
+				return c
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kp, err := GenerateKeyPair("ES256", "kid-no-exp")
+			if err != nil {
+				t.Fatalf("generate key: %v", err)
+			}
+			jwks := BuildJWKS(kp)
+
+			_, err = VerifyAccessToken(signRawClaims(t, kp, tt.claims), &jwks)
+			if err == nil {
+				t.Fatal("token without exp must be rejected at verification")
+			}
+			// "missing exp", not just "exp" — the latter also matches
+			// "token expired", which would let a fix that merely drops the
+			// zero-guard pass while reporting the wrong reason.
+			if !strings.Contains(err.Error(), "missing exp") {
+				t.Errorf("error should report the claim as missing, got %q", err)
+			}
+		})
+	}
+}
+
+// The issuance gate must refuse the same claims verification refuses, or the
+// server can sign a token it will then reject on every use. Covers exp and iat,
+// the two the fail-closed rule turns on; the string-valued claims are checked
+// here too so the gate has a regression test at all.
+func TestValidateAccessTokenClaims_RequiredClaims(t *testing.T) {
+	valid := func() AccessTokenClaims {
+		return AccessTokenClaims{
+			Issuer:   "http://localhost:9000",
+			Subject:  "user-123",
+			Audience: []string{"https://mcp.example.com"},
+			ClientID: "client-abc",
+			JTI:      GenerateRandomString(16),
+			IssuedAt: time.Now().Unix(),
+			Expiry:   time.Now().Add(time.Hour).Unix(),
+		}
+	}
+
+	if err := ValidateAccessTokenClaims(valid()); err != nil {
+		t.Fatalf("fully populated claims must pass, got %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*AccessTokenClaims)
+		wantErr string
+	}{
+		{"iss missing", func(c *AccessTokenClaims) { c.Issuer = "" }, "iss claim is required"},
+		{"sub missing", func(c *AccessTokenClaims) { c.Subject = "" }, "sub claim is required"},
+		{"aud missing", func(c *AccessTokenClaims) { c.Audience = nil }, "aud claim is required"},
+		{"client_id missing", func(c *AccessTokenClaims) { c.ClientID = "" }, "client_id claim is required"},
+		{"jti missing", func(c *AccessTokenClaims) { c.JTI = "" }, "jti claim is required"},
+		{"exp missing", func(c *AccessTokenClaims) { c.Expiry = 0 }, "exp claim is required"},
+		{"iat missing", func(c *AccessTokenClaims) { c.IssuedAt = 0 }, "iat claim is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := valid()
+			tt.mutate(&c)
+
+			err := ValidateAccessTokenClaims(c)
+			if err == nil {
+				t.Fatalf("claims missing %s must be rejected before signing", tt.name)
+			}
+			if err.Error() != tt.wantErr {
+				t.Errorf("want %q, got %q", tt.wantErr, err)
+			}
+
+			// The gate is only useful if SignAccessToken actually honors it.
+			kp, err := GenerateKeyPair("ES256", "kid-gate")
+			if err != nil {
+				t.Fatalf("generate key: %v", err)
+			}
+			if _, err := SignAccessToken(kp, c); err == nil {
+				t.Error("SignAccessToken must refuse to sign claims the gate rejects")
+			}
+		})
+	}
+}
+
+// iat is REQUIRED for at+jwt (RFC 9068 §2.2) exactly as exp is, so its absence
+// is a rejection too. Same construction as the exp case: signed with the AS's
+// own key but bypassing SignAccessToken, since every mint path sets iat.
+func TestVerify_MissingIat_Rejected(t *testing.T) {
+	base := func() map[string]any {
+		return map[string]any{
+			"iss":       "http://localhost:9000",
+			"sub":       "user-123",
+			"aud":       []string{"https://mcp.example.com"},
+			"client_id": "client-abc",
+			"jti":       GenerateRandomString(16),
+			"exp":       time.Now().Add(time.Hour).Unix(),
+		}
+	}
+
+	tests := []struct {
+		name   string
+		claims map[string]any
+	}{
+		{
+			name:   "iat absent",
+			claims: base(),
+		},
+		{
+			name: "iat zero",
+			claims: func() map[string]any {
+				c := base()
+				c["iat"] = 0
+				return c
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kp, err := GenerateKeyPair("ES256", "kid-no-iat")
+			if err != nil {
+				t.Fatalf("generate key: %v", err)
+			}
+			jwks := BuildJWKS(kp)
+
+			_, err = VerifyAccessToken(signRawClaims(t, kp, tt.claims), &jwks)
+			if err == nil {
+				t.Fatal("token without iat must be rejected at verification")
+			}
+			if !strings.Contains(err.Error(), "missing iat") {
+				t.Errorf("error should report the claim as missing, got %q", err)
+			}
+		})
 	}
 }

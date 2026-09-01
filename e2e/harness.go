@@ -21,17 +21,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
+
 	apiadmin "github.com/authplane/authserver/api/admin"
 	apipublic "github.com/authplane/authserver/api/public"
-	"github.com/authplane/authserver/api/public/wellknown"
 	"github.com/authplane/authserver/internal/adapters/aesmaster"
 	brokerprotoapikey "github.com/authplane/authserver/internal/adapters/brokerproto/apikey"
 	brokerprotooauth "github.com/authplane/authserver/internal/adapters/brokerproto/oauth"
 	brokerprotoserviceaccount "github.com/authplane/authserver/internal/adapters/brokerproto/serviceaccount"
+	"github.com/authplane/authserver/internal/adapters/cache"
 	"github.com/authplane/authserver/internal/adapters/cimd"
 	"github.com/authplane/authserver/internal/adapters/idpjwks"
 	"github.com/authplane/authserver/internal/adapters/keyfile"
 	"github.com/authplane/authserver/internal/adapters/sqlite"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/adapters/storage"
 	"github.com/authplane/authserver/internal/brokerproto"
 	"github.com/authplane/authserver/internal/config"
@@ -141,9 +144,9 @@ func (h *TestHarness) TokenRequests(providerSlug string) []url.Values {
 	return out
 }
 
-// harnessSecretResolver implements brokerproto/oauth.SecretResolver for
-// tests by returning a fixed dummy client_secret regardless of the env-var
-// name. The mock upstream does not validate the secret, so a constant
+// harnessSecretResolver implements the brokerproto SecretResolver surface for
+// tests by returning a fixed dummy client_secret regardless of the secret
+// reference. The mock upstream does not validate the secret, so a constant
 // value suffices and keeps E2E setup zero-config (no env-var plumbing per
 // service in each test file). Production uses the os.Getenv-backed
 // resolver in cmd/authserver/serve.go::envSecretResolver.
@@ -152,9 +155,19 @@ func (h *TestHarness) TokenRequests(providerSlug string) []url.Values {
 // vars directly; this struct intentionally does not call os.Getenv.
 type harnessSecretResolver struct{}
 
-// Resolve returns the fixed test client_secret. envVarName is ignored.
-func (harnessSecretResolver) Resolve(_ string) (string, error) {
+// Resolve returns the fixed test client_secret. ctx and src are ignored.
+func (harnessSecretResolver) Resolve(_ context.Context, _ output.SecretSource) (string, error) {
 	return "harness-mock-client-secret", nil
+}
+
+// harnessSessionSecret is the e2e output.SessionSecretProvider. NewServer now
+// requires Deps.SessionSecretProvider (no silent ephemeral fallback), so the
+// harness supplies a fixed secret for every call.
+type harnessSessionSecret struct{}
+
+// Secret returns the fixed E2E session secret. ctx is ignored.
+func (harnessSessionSecret) Secret(_ context.Context) ([]byte, error) {
+	return []byte("e2e-test-session-secret-32-byte!"), nil
 }
 
 // _ keeps the os import live (used by direct os.Setenv calls in some
@@ -185,6 +198,9 @@ type HarnessConfig struct {
 	EnableXAA bool
 	// XAASubjectMode controls subject mapping: "auto_map" (default) or "strict".
 	XAASubjectMode string
+	// XAARequireResource refuses jwt-bearer exchanges that name no resource,
+	// on the assertion or the request (xaa.require_resource).
+	XAARequireResource bool
 
 	// EnableAdminAPI starts the admin HTTP server alongside
 	// the public AS so scenarios can drive /admin/resources,
@@ -231,7 +247,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	// Pass userStore to every service and the SessionMiddleware so admin
 	// Update/Delete invalidations propagate to the stale-session check, and
 	// reads ride the cache uniformly.
-	userStore := storage.WrapUserStore(stores.User, 60*time.Second, 1024)
+	userStore := storage.WrapUserStore(stores.User, cache.NewMemoryTTLBounded[*storage.Entry](60*time.Second, 1024))
 
 	// 2. Key store (temp dir).
 	keyDir := t.TempDir()
@@ -241,7 +257,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	}
 
 	// 3. Services — mirrors cmd/authserver/main.go runServe() exactly.
-	jwksSvc := services.NewJWKSService(keyStore, "ES256", obs.WithComponent("jwks"))
+	jwksSvc := services.NewJWKSService(keyStore, cache.NewMemory[*jose.JSONWebKeySet](), "ES256", obs.WithComponent("jwks"))
 	auditSvc := services.NewAuditService(stores.Audit, obs.WithComponent("audit"))
 
 	dcrMode := hcfg.DCRMode
@@ -249,9 +265,9 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		dcrMode = "open"
 	}
 
-	cimdFetcher := cimd.New(false, 5*time.Minute, 10*time.Second, obs.WithComponent("cimd"))
+	cimdFetcher := cimd.New(obs.WithComponent("cimd"))
 	cimdFetcher.SetAllowLoopback(true) // E2E tests use httptest servers on loopback.
-	dcrModeConfig := services.DCRMode{Mode: dcrMode, ApprovedRedirects: hcfg.ApprovedRedirects}
+	dcrModeProvider := static.NewDCRModeProvider(dcrMode, hcfg.ApprovedRedirects)
 
 	// compute the runtime-enabled grant set so admin + DCR + CIMD
 	// reject registrations asking for grants the AS isn't configured to
@@ -267,17 +283,43 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	if hcfg.EnableXAA {
 		enabledGrants = append(enabledGrants, "urn:ietf:params:oauth:grant-type:jwt-bearer")
 	}
+	grantsProvider := static.NewEnabledGrantsProvider(enabledGrants)
+
+	// Shared config providers consumed by both the feature services and the AS
+	// metadata discovery document (built into asMetadataSvc before srvReal).
+	// E2E uses loopback httptest servers, so RequireHTTPS=false.
+	cimdConfigProvider := static.NewCIMDConfigProvider(output.CIMDConfig{
+		Enabled:      true,
+		RequireHTTPS: false,
+		CacheTTL:     5 * time.Minute,
+		FetchTimeout: 10 * time.Second,
+	})
+	oauthConfigProvider := static.NewOAuthConfigProvider(output.OAuthConfig{
+		RequireScope:         false,
+		IntrospectionEnabled: true,
+	})
+	agentsConfigProvider := static.NewAgentsConfigProvider(output.AgentsConfig{
+		AgentIdentityEnabled: true,
+	})
+	dpopConfigProvider := static.NewDPoPConfigProvider(output.DPoPConfig{
+		Enabled:       hcfg.EnableDPoP,
+		ProofLifetime: 60 * time.Second,
+		RequireNonce:  false,
+		NonceTTL:      60 * time.Second,
+	})
 
 	cimdSvc := services.NewCIMDService(
-		stores.Client, cimdFetcher, dcrModeConfig, obs.WithComponent("cimd-svc"),
-		services.WithCIMDEnabledGrants(enabledGrants),
+		stores.Client, cimdFetcher, dcrModeProvider,
+		cimdConfigProvider,
+		obs.WithComponent("cimd-svc"),
+		services.WithCIMDEnabledGrants(grantsProvider),
 	)
 
 	dcrSvc := services.NewDCRService(
 		stores.Client,
-		dcrModeConfig,
+		dcrModeProvider,
 		obs.WithComponent("dcr"), auditSvc,
-		services.WithDCREnabledGrants(enabledGrants),
+		services.WithDCREnabledGrants(grantsProvider),
 	)
 
 	authSvc := services.NewUserAuthService(userStore, obs.WithComponent("auth"), auditSvc)
@@ -312,7 +354,9 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 
 	authzSvc := services.NewAuthorizeService(
 		stores.Client, stores.Session, stores.ConsentGrant,
-		cimdSvc, resourceRegistry, false, obs.WithComponent("authorize"),
+		cimdSvc, resourceRegistry,
+		oauthConfigProvider,
+		obs.WithComponent("authorize"),
 	)
 
 	consentSvc := services.NewConsentService(
@@ -320,34 +364,35 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		obs.WithComponent("consent"), auditSvc,
 	)
 
-	tokenCfg := services.TokenConfig{
+	tokenConfigProvider := static.NewTokenConfigProvider(output.TokenConfig{
 		AccessTokenExpiry:  15 * time.Minute,
 		RefreshTokenExpiry: 24 * time.Hour,
-	}
+	})
 
 	// Use a placeholder issuer; we'll update it after the server starts.
-	mintIssuerPlaceholder := services.NewMintIssuer(jwksSvc, stores.Issuance, "http://placeholder", obs.WithComponent("mint-issuer"))
+	mintIssuerPlaceholder := services.NewMintIssuer(jwksSvc, stores.Issuance, static.NewIssuerProvider("http://placeholder"), obs.WithComponent("mint-issuer"))
 	tokenSvc := services.NewTokenService(
 		stores.Session, stores.Token, stores.Client, userStore,
-		jwksSvc, mintIssuerPlaceholder, "http://placeholder", tokenCfg,
+		jwksSvc, mintIssuerPlaceholder, tokenConfigProvider,
 		obs.WithComponent("token"), auditSvc,
 		stores.Revocation, resourceLister,
 	)
 
-	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, "http://placeholder", obs.WithComponent("revoke"), auditSvc, stores.Revocation)
+	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, static.NewIssuerProvider("http://placeholder"), obs.WithComponent("revoke"), auditSvc, stores.Revocation)
 
 	// Introspection service — use placeholder issuer, will be rebuilt.
 	introspectSvc := services.NewIntrospectionService(
 		jwksSvc, stores.Revocation, stores.MachineToken, stores.Client, userStore,
-		"http://placeholder", obs.WithComponent("introspect"), auditSvc,
+		static.NewIssuerProvider("http://placeholder"), obs.WithComponent("introspect"), auditSvc,
 	)
+	introspectSvc.WithResourceRegistry(resourceRegistry)
 
 	adminSvc := services.NewAdminService(
 		stores.Client, userStore, stores.Token, stores.Audit,
 		obs.WithComponent("admin"), auditSvc,
 		services.WithMachineTokenStore(stores.MachineToken),
 		services.WithRevocationStore(stores.Revocation),
-		services.WithEnabledGrants(enabledGrants),
+		services.WithEnabledGrants(grantsProvider),
 	)
 
 	// Fronting-link service. Constructed
@@ -386,7 +431,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	if hcfg.EnableClientCredentials {
 		clientCredsSvc = services.NewClientCredentialsService(
 			stores.Client, stores.MachineToken, jwksSvc,
-			"http://placeholder", 1*time.Hour,
+			static.NewIssuerProvider("http://placeholder"), static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{TokenExpiry: 1 * time.Hour}),
 			obs.WithComponent("client-credentials"), auditSvc,
 			resourceLister,
 		)
@@ -433,32 +478,43 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	}
 
 	deps := apipublic.Deps{
-		JWKS:       jwksSvc,
-		DCR:        dcrSvc,
-		Auth:       authSvc,
-		Authorize:  authzSvc,
-		Consent:    consentSvc,
-		Token:      tokenSvc,
-		Revoke:     revokeSvc,
-		Introspect: introspectSvc,
-		Health:     db,
-		ResourceServers: func() []wellknown.ResourceEntry {
-			infos := resourceLister.List()
-			entries := make([]wellknown.ResourceEntry, len(infos))
-			for i, info := range infos {
-				entries[i] = wellknown.ResourceEntry{URI: info.URI, Scopes: info.Scopes}
-			}
-			return entries
-		},
-		SessionCfg:       config.SessionConfig{},
-		RateLimitCfg:     rlCfg,
-		HasAgentIdentity: true,
-		OIDCConfig:       config.OIDCConfig{ShowLocalLogin: true},
+		URLs:                  static.NewURLBuilder(),
+		JWKS:                  jwksSvc,
+		DCR:                   dcrSvc,
+		Auth:                  authSvc,
+		Authorize:             authzSvc,
+		Consent:               consentSvc,
+		Token:                 tokenSvc,
+		Revoke:                revokeSvc,
+		Introspect:            introspectSvc,
+		OAuthConfig:           oauthConfigProvider,
+		Health:                db,
+		SessionSecretProvider: harnessSessionSecret{},
+		SessionConfigProvider: static.NewSessionConfigProvider(output.SessionConfig{
+			MaxAge:   24 * time.Hour,
+			SameSite: http.SameSiteLaxMode,
+		}),
+		OIDCStateConfigProvider: static.NewOIDCStateConfigProvider(output.OIDCStateConfig{
+			MaxAge: 10 * time.Minute,
+		}),
+		SessionCookie: apipublic.SessionCookie{},
+		RateLimitCfg:  rlCfg,
+		LoginDisplay:  static.NewLoginDisplayProvider(config.OIDCConfig{ShowLocalLogin: true}),
 		// have SessionMiddleware reject session cookies whose userID
 		// no longer exists in the user store. Same shared instance the
 		// services use (see userStore above) so admin Update/Delete
 		// invalidations propagate to the stale-session check.
 		Users: userStore,
+		// Placeholder satisfies the oauth handlers at construction time; it is
+		// overwritten with the real ts.URL value before the second
+		// apipublic.NewServer call that actually backs test scenarios. The AS
+		// metadata discovery routes are only registered on that second server
+		// (deps.ASMetadata is wired there), so no issuer placeholder is needed.
+		IssuerProvider: static.NewIssuerProvider("http://placeholder"),
+		// CORS allowed-origins provider is required by NewServer. serverCfg sets
+		// no AllowedOrigins, so this is CORS-disabled — matching the harness's
+		// pre-seam behavior.
+		CORSConfigProvider: static.NewCORSConfigProvider(serverCfg.AllowedOrigins),
 	}
 	// Avoid typed-nil → interface assignment (Go interface nil gotcha).
 	if clientCredsSvc != nil {
@@ -471,10 +527,10 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 
 	// 5. Now that we know the URL, re-create services with correct issuer.
 	// The token/introspection services use issuer for JWT claims. We need it to match.
-	mintIssuerReal := services.NewMintIssuer(jwksSvc, stores.Issuance, ts.URL, obs.WithComponent("mint-issuer"))
+	mintIssuerReal := services.NewMintIssuer(jwksSvc, stores.Issuance, static.NewIssuerProvider(ts.URL), obs.WithComponent("mint-issuer"))
 	tokenSvcReal := services.NewTokenService(
 		stores.Session, stores.Token, stores.Client, userStore,
-		jwksSvc, mintIssuerReal, ts.URL, tokenCfg,
+		jwksSvc, mintIssuerReal, tokenConfigProvider,
 		obs.WithComponent("token"), auditSvc,
 		stores.Revocation, resourceLister,
 	)
@@ -486,9 +542,12 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	tokenSvcReal.WithResourceRegistry(resourceRegistry)
 	introspectSvcReal := services.NewIntrospectionService(
 		jwksSvc, stores.Revocation, stores.MachineToken, stores.Client, userStore,
-		ts.URL, obs.WithComponent("introspect"), auditSvc,
+		static.NewIssuerProvider(ts.URL), obs.WithComponent("introspect"), auditSvc,
 	)
-	revokeSvcReal := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, ts.URL, obs.WithComponent("revoke"), auditSvc, stores.Revocation)
+	// mirror cmd/authserver/serve.go so a resource server may introspect a
+	// token minted for it.
+	introspectSvcReal.WithResourceRegistry(resourceRegistry)
+	revokeSvcReal := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, static.NewIssuerProvider(ts.URL), obs.WithComponent("revoke"), auditSvc, stores.Revocation)
 	serverCfg.Issuer = ts.URL
 
 	// Rebuild with correct issuer.
@@ -500,7 +559,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	if hcfg.EnableClientCredentials {
 		clientCredsSvcReal = services.NewClientCredentialsService(
 			stores.Client, stores.MachineToken, jwksSvc,
-			ts.URL, 1*time.Hour,
+			static.NewIssuerProvider(ts.URL), static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{TokenExpiry: 1 * time.Hour}),
 			obs.WithComponent("client-credentials"), auditSvc,
 			resourceLister,
 		)
@@ -534,12 +593,12 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		}
 		tokenExchangeSvcReal = services.NewTokenExchangeService(
 			stores.Client, stores.MachineToken, jwksSvc, jwksSvc,
-			stores.Revocation, ts.URL,
-			services.TokenExchangeConfig{
+			stores.Revocation, static.NewIssuerProvider(ts.URL),
+			static.NewTokenExchangeConfigProvider(output.TokenExchangeConfig{
 				AllowSelfExchange: hcfg.TokenExchangeAllowSelfExchange,
 				MaxChainDepth:     maxDepth,
 				TokenExpiry:       1 * time.Hour,
-			},
+			}),
 			resourceRegistry, stores.ConsentGrant, mintIssuerReal, brokerIssuer,
 			obs.WithComponent("token-exchange"), auditSvc,
 		)
@@ -549,11 +608,12 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		deps.TokenExchange = tokenExchangeSvcReal
 	}
 
-	// AuthorizeBaseURL powers 's bound-B / bound-C consent_url
-	// flavor: /authorize?resource=<mcp_slug>&scope=<missing>. Without
-	// this, the oauth handler's writeTokenError emits an empty
-	// consent_url for AS-side re-consent flows.
-	deps.AuthorizeBaseURL = ts.URL
+	// IssuerProvider powers both consent_url flavors emitted by the oauth
+	// handler's writeTokenError: the bound-B / bound-C AS-side re-consent URL
+	// (/authorize?resource=<mcp_slug>&scope=<missing>) and the bound-D /
+	// bound-E broker upstream re-connect URL (/connect/<provider>). Without
+	// it those flows emit an empty consent_url.
+	deps.IssuerProvider = static.NewIssuerProvider(ts.URL)
 
 	// ConnectService — wired whenever the harness has a state secret + an
 	// encryptor (always true now since BrokerIssuer needs an
@@ -562,29 +622,22 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		connectSvc = services.NewConnectService(
 			resourceRegistry, stores.Resource, stores.BrokerProvider, stores.BrokerGrant, stores.ConnectPendingState,
 			bpRegistry, encryptor,
-			testStateSecret,
-			ts.URL,
-			ts.URL,
-			[]string{},
+			static.NewConnectStateConfigProvider(testStateSecret),
+			static.NewIssuerProvider(ts.URL),
+			static.NewConnectConfigProvider(output.ConnectConfig{RedirectBaseURL: ts.URL}),
 			obs.WithComponent("connect"), auditSvc,
 		)
 		deps.Connect = connectSvc
-		deps.ConnectConsentBaseURL = ts.URL
 	}
 
 	// Wire DPoP proof-of-possession (RFC 9449) if enabled.
 	if hcfg.EnableDPoP {
-		dpopCfg := services.DPoPConfig{
-			ProofLifetime: 60 * time.Second,
-			RequireNonce:  false,
-			NonceTTL:      60 * time.Second,
-		}
-		tokenSvcReal.WithDPoP(stores.DPoPNonce, dpopCfg)
+		tokenSvcReal.WithDPoP(stores.DPoPNonce, dpopConfigProvider)
 		if clientCredsSvcReal != nil {
-			clientCredsSvcReal.WithDPoP(stores.DPoPNonce, dpopCfg)
+			clientCredsSvcReal.WithDPoP(stores.DPoPNonce, dpopConfigProvider)
 		}
 		if tokenExchangeSvcReal != nil {
-			tokenExchangeSvcReal.WithDPoP(stores.DPoPNonce, dpopCfg)
+			tokenExchangeSvcReal.WithDPoP(stores.DPoPNonce, dpopConfigProvider)
 		}
 		deps.DPoPNonce = stores.DPoPNonce
 		deps.DPoPCfg = config.DPoPConfig{
@@ -600,19 +653,30 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	var xaaPolicySvc *services.XAAPolicyService
 	var subjectMappingSvc *services.SubjectMappingService
 	if hcfg.EnableXAA {
-		xaaJWKSCache := idpjwks.New(stores.IDP, idpjwks.CacheConfig{TTL: 5 * time.Minute}, obs.WithComponent("idp-jwks"))
-		// Use a regular HTTP client for tests (SSRF-safe client blocks loopback).
-		xaaJWKSCache.WithHTTPClient(&http.Client{Timeout: 10 * time.Second})
+		// The SSRF-safe client blocks loopback, so the harness injects a plain
+		// one. Test-only — see idpjwks.WithHTTPClient.
+		xaaJWKSCache := idpjwks.New(stores.IDP, cache.NewMemory[*idpjwks.Entry](), idpjwks.CacheConfig{TTL: 5 * time.Minute}, obs.WithComponent("idp-jwks"),
+			idpjwks.WithHTTPClient(&http.Client{Timeout: 10 * time.Second}))
 
 		xaaIDPSvc = services.NewXAAIDPService(
 			stores.IDP, xaaJWKSCache, idpjwks.DiscoverJWKSUri,
-			ts.URL, obs.WithComponent("xaa-idp"), auditSvc,
+			static.NewIssuerProvider(ts.URL), obs.WithComponent("xaa-idp"), auditSvc,
 		)
 
+		subjectMode := hcfg.XAASubjectMode
+		if subjectMode == "" {
+			subjectMode = "auto_map"
+		}
 		jwtBearerSvc := services.NewJWTBearerService(
 			stores.IDP, xaaJWKSCache, stores.AssertionJTI,
 			stores.Client, stores.MachineToken, jwksSvc,
-			ts.URL, 1*time.Hour, 5*time.Minute,
+			static.NewIssuerProvider(ts.URL),
+			static.NewXAAConfigProvider(output.XAAConfig{
+				TokenExpiry:     1 * time.Hour,
+				MaxAssertionAge: 5 * time.Minute,
+				SubjectMode:     subjectMode,
+				RequireResource: hcfg.XAARequireResource,
+			}),
 			obs.WithComponent("jwt-bearer"), auditSvc,
 			resourceLister,
 		)
@@ -630,23 +694,33 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 			obs.WithComponent("subject-mapping"),
 		)
 
-		subjectMode := hcfg.XAASubjectMode
-		if subjectMode == "" {
-			subjectMode = "auto_map"
-		}
-		jwtBearerSvc.WithPolicy(xaaPolicySvc, subjectMappingSvc, subjectMode)
+		jwtBearerSvc.WithPolicy(xaaPolicySvc, subjectMappingSvc)
 
 		if hcfg.EnableDPoP {
-			dpopCfg := services.DPoPConfig{
+			jwtBearerSvc.WithDPoP(stores.DPoPNonce, static.NewDPoPConfigProvider(output.DPoPConfig{
+				Enabled:       true,
 				ProofLifetime: 60 * time.Second,
 				RequireNonce:  false,
 				NonceTTL:      60 * time.Second,
-			}
-			jwtBearerSvc.WithDPoP(stores.DPoPNonce, dpopCfg)
+			}))
 		}
 
 		deps.JWTBearer = jwtBearerSvc
 	}
+
+	// AS metadata discovery assembler, built with the real issuer (ts.URL) and
+	// the shared static providers. Discovery routes are registered only on the
+	// real server below (deps.ASMetadata is non-nil here).
+	deps.ASMetadata = services.NewASMetadataService(
+		static.NewIssuerProvider(ts.URL),
+		grantsProvider,
+		cimdConfigProvider,
+		dpopConfigProvider,
+		oauthConfigProvider,
+		agentsConfigProvider,
+		resourceLister,
+		obs.WithComponent("as-metadata"),
+	)
 
 	srvReal := apipublic.NewServer(context.Background(), serverCfg, deps, obs.WithComponent("http"))
 	// Replace handler on the test server.
@@ -663,6 +737,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	if hcfg.EnableAdminAPI {
 		brokerProviderAdminSvc := services.NewBrokerProviderAdminService(
 			stores.BrokerProvider, obs.WithComponent("broker-provider-admin"), auditSvc,
+			static.NewConfigSecretBackend(nil),
 		)
 		grantAdminSvc := services.NewGrantAdminService(
 			stores.ConsentGrant, stores.BrokerGrant, stores.Issuance,
@@ -671,7 +746,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		issuanceAdminSvc := services.NewIssuanceAdminService(
 			stores.Issuance, obs.WithComponent("issuance-admin"), auditSvc,
 		)
-		adminSrv := apiadmin.NewServer(
+		adminSrv, err := apiadmin.NewServer(
 			context.Background(),
 			config.AdminConfig{Enabled: true, Address: ":0", APIKey: harnessAdminAPIKey},
 			adminSvc,
@@ -684,6 +759,9 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 				Fronting:        &apiadmin.FrontingAdminDeps{Fronting: frontingAdminSvc},
 			},
 		)
+		if err != nil {
+			t.Fatalf("admin server: %v", err)
+		}
 		adminTS = httptest.NewServer(adminSrv.Handler())
 		t.Cleanup(adminTS.Close)
 	}
@@ -862,6 +940,61 @@ func (h *TestHarness) RegisterScope(resourceURI, name, description string) {
 	}
 }
 
+// AuthorizeRuntimeClient adds clientID to the Resource's
+// policy.runtime.client_ids — the only place Authplane learns which
+// client_ids may act AS a Resource. Introspection needs it so a resource
+// server may ask about tokens minted for it.
+func (h *TestHarness) AuthorizeRuntimeClient(resourceURI, clientID string) {
+	h.T.Helper()
+	ctx := context.Background()
+	rows, err := h.resourceStore.List(ctx, output.ResourceFilter{})
+	if err != nil {
+		h.T.Fatalf("list resources: %v", err)
+	}
+	for _, res := range rows {
+		if res.URI != resourceURI {
+			continue
+		}
+		for _, existing := range res.Policy.Runtime.ClientIDs {
+			if existing == clientID {
+				return
+			}
+		}
+		res.Policy.Runtime.ClientIDs = append(res.Policy.Runtime.ClientIDs, clientID)
+		if err := h.resourceStore.Update(ctx, res); err != nil {
+			h.T.Fatalf("authorize runtime client: %v", err)
+		}
+		return
+	}
+	h.T.Fatalf("authorize runtime client: no resource with uri %q", resourceURI)
+}
+
+// ResourceServerClient registers confidential credentials and authorizes them
+// to act AS the Resource at resourceURI. This models the RFC 7662 caller: a
+// resource server asking the AS about a token one of its clients presented,
+// which is never the client that owns the token.
+func (h *TestHarness) ResourceServerClient(resourceURI string) (clientID, clientSecret string) {
+	h.T.Helper()
+	clientID, clientSecret = h.RegisterConfidentialClient([]string{"authorization_code"}, "")
+	h.AuthorizeRuntimeClient(resourceURI, clientID)
+	return clientID, clientSecret
+}
+
+// IntrospectAsResourceServer introspects token as the resource server for
+// resourceURI, registering and authorizing fresh credentials on the way.
+//
+// Use it for a single assertion. Calling it twice around a state change gives
+// each side a *different* caller, so an "expected inactive" assertion would
+// pass on a broken entitlement setup exactly as readily as on the state change
+// it means to prove. Where a test asserts before and after, call
+// ResourceServerClient once and IntrospectToken twice with that pair —
+// user_disable_test.go and token_lifecycle_test.go do.
+func (h *TestHarness) IntrospectAsResourceServer(token, resourceURI string) *IntrospectResponse {
+	h.T.Helper()
+	rsID, rsSecret := h.ResourceServerClient(resourceURI)
+	return h.IntrospectToken(token, rsID, rsSecret)
+}
+
 // NewClient creates an http.Client with a cookie jar for browser simulation.
 func (h *TestHarness) NewClient() *http.Client {
 	jar, _ := cookiejar.New(nil)
@@ -874,8 +1007,35 @@ func (h *TestHarness) NewClient() *http.Client {
 	}
 }
 
-// Login performs a POST /login and returns the session cookie value.
+// Login performs a POST /login and asserts it succeeded.
 func (h *TestHarness) Login(client *http.Client, email, password, redirect string) {
+	h.T.Helper()
+
+	resp, err := h.LoginResponse(client, email, password, redirect)
+	if err != nil {
+		// Not re-labelled: LoginResponse names the request that failed, which
+		// is the GET as often as the POST.
+		h.T.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		h.T.Fatalf("POST /login: expected 303, got %d", resp.StatusCode)
+	}
+}
+
+// LoginResponse performs a POST /login and hands back the raw response so the
+// caller can inspect headers the redirect itself carries. The body is still
+// open; callers close it.
+//
+// The POST error is returned rather than fatal because a malformed Location
+// header fails the round trip in the client, not the server: net/http parses
+// Location before consulting CheckRedirect, so an unparseable value surfaces
+// as a transport error. A caller asserting on redirect targets needs to see
+// that per-case instead of losing the whole test — h.T is the parent *testing.T,
+// so a Fatalf here would abort every remaining subtest. Login wraps this for
+// the common case where only success matters.
+func (h *TestHarness) LoginResponse(client *http.Client, email, password, redirect string) (*http.Response, error) {
 	h.T.Helper()
 
 	// First GET /login to get any initial cookie + CSRF token.
@@ -885,7 +1045,8 @@ func (h *TestHarness) Login(client *http.Client, email, password, redirect strin
 	}
 	getResp, err := client.Get(loginURL)
 	if err != nil {
-		h.T.Fatalf("GET /login: %v", err)
+		// No URL here: client.Get returns a *url.Error that already prints it.
+		return nil, fmt.Errorf("login page fetch: %w", err)
 	}
 	body, _ := io.ReadAll(getResp.Body)
 	getResp.Body.Close()
@@ -899,15 +1060,7 @@ func (h *TestHarness) Login(client *http.Client, email, password, redirect strin
 		"csrf_token": {csrfToken},
 		"redirect":   {redirect},
 	}
-	resp, err := client.PostForm(h.Issuer+"/login", form)
-	if err != nil {
-		h.T.Fatalf("POST /login: %v", err)
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusSeeOther {
-		h.T.Fatalf("POST /login: expected 303, got %d", resp.StatusCode)
-	}
+	return client.PostForm(h.Issuer+"/login", form)
 }
 
 // Authorize starts the authorization flow and returns the session ID from the consent redirect.
@@ -1247,6 +1400,28 @@ func (h *TestHarness) IntrospectToken(token, clientID string, clientSecret ...st
 		h.T.Fatalf("decode introspect response: %v", err)
 	}
 	return &ir
+}
+
+// IntrospectTokenStatus introspects and returns the raw HTTP status alongside
+// the decoded body, for tests asserting on client-authentication refusals
+// rather than on token state.
+func (h *TestHarness) IntrospectTokenStatus(token, clientID, clientSecret string) (*IntrospectResponse, int) {
+	h.T.Helper()
+
+	form := url.Values{"token": {token}, "client_id": {clientID}}
+	if clientSecret != "" {
+		form.Set("client_secret", clientSecret)
+	}
+	resp, err := http.PostForm(h.Issuer+"/oauth/introspect", form)
+	if err != nil {
+		h.T.Fatalf("POST /oauth/introspect: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var ir IntrospectResponse
+	_ = json.Unmarshal(body, &ir)
+	return &ir, resp.StatusCode
 }
 
 // SuspendClient suspends a client via the admin service.
@@ -2276,4 +2451,3 @@ func (h *TestHarness) RunFlowConnect(email, password, providerSlug string) {
 			providerSlug, callbackResp.StatusCode, body)
 	}
 }
-

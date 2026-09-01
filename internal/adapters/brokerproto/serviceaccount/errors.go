@@ -14,7 +14,7 @@ var errUpstreamHTTP = errors.New("service_account upstream returned non-2xx stat
 var errUpstreamMissingAccessToken = errors.New("service_account upstream response missing access_token")
 
 // errSAKeyLookup is returned when the SecretResolver cannot resolve the
-// configured sa_key_env or the resolved value is not a usable PEM. Surfaced
+// configured sa_key_ref or the resolved value is not a usable PEM. Surfaced
 // as its own sentinel so wiring code can distinguish missing-key-config
 // from upstream failures.
 var errSAKeyLookup = errors.New("service_account SA key lookup failed")

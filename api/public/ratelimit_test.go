@@ -8,10 +8,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
-	"time"
 
 	apipublic "github.com/authplane/authserver/api/public"
-	"github.com/authplane/authserver/api/shared"
 	"github.com/authplane/authserver/internal/config"
 )
 
@@ -20,9 +18,13 @@ func newRateLimitTestServer(t *testing.T, rlCfg config.RateLimitConfig) *httptes
 	jwksSvc := newTestJWKSService(t)
 
 	srv := apipublic.NewServer(context.Background(), testServerCfg(), apipublic.Deps{
-		JWKS:            jwksSvc,
-		ResourceServers: testResourceServers(),
-		RateLimitCfg:    rlCfg,
+		CORSConfigProvider:    testCORS(),
+		URLs:                  testURLBuilder(),
+		SessionSecretProvider: testSessionSecret(),
+		SessionConfigProvider: testSessionConfig(),
+		JWKS:                  jwksSvc,
+		IssuerProvider:        staticIssuerForTest("https://auth.example.com"),
+		RateLimitCfg:          rlCfg,
 	}, testObs())
 
 	ts := httptest.NewServer(srv.Handler())
@@ -199,75 +201,5 @@ func TestRateLimit_RetryAfterOnAll429s(t *testing.T) {
 		}
 		// Done after first endpoint — all share the same per-IP limiter.
 		break
-	}
-}
-
-func TestRateLimit_Lockout_TriggersAndExpires(t *testing.T) {
-	cfg := config.RateLimitConfig{
-		Enabled:           true,
-		RequestsPerSecond: 100,
-		Burst:             100,
-		AuthFailMax:       3,
-		AuthFailWindow:    10 * time.Second,
-		AuthLockout:       100 * time.Millisecond, // short for testing
-	}
-
-	rl := shared.NewRateLimiter(context.Background(), cfg)
-
-	// Record failures.
-	for i := 0; i < 3; i++ {
-		rl.RecordAuthFailure("test-ip")
-	}
-
-	if !rl.IsLockedOut("test-ip") {
-		t.Error("expected lockout after 3 failures")
-	}
-
-	// Wait for lockout to expire.
-	time.Sleep(150 * time.Millisecond)
-
-	if rl.IsLockedOut("test-ip") {
-		t.Error("lockout should have expired")
-	}
-}
-
-// Matrix: 11.7 — lockout triggers are observable via slog + lockout callback
-func TestRateLimit_LockoutCallback_Fires(t *testing.T) {
-	cfg := config.RateLimitConfig{
-		Enabled:           true,
-		RequestsPerSecond: 100,
-		Burst:             100,
-		AuthFailMax:       2,
-		AuthFailWindow:    10 * time.Second,
-		AuthLockout:       1 * time.Second,
-	}
-
-	rl := shared.NewRateLimiter(context.Background(), cfg)
-
-	// Set lockout callback.
-	var callbackIP string
-	rl.OnLockoutBlock = func(ip string) {
-		callbackIP = ip
-	}
-
-	// Trigger lockout.
-	rl.RecordAuthFailure("10.0.0.1")
-	rl.RecordAuthFailure("10.0.0.1")
-
-	// Make a request via middleware to trigger the callback.
-	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req, _ := http.NewRequest("GET", "/test", nil)
-	req.RemoteAddr = "10.0.0.1:12345"
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusTooManyRequests {
-		t.Fatalf("status: got %d, want 429", rr.Code)
-	}
-	if callbackIP != "10.0.0.1" {
-		t.Errorf("lockout callback should fire with IP '10.0.0.1', got %q", callbackIP)
 	}
 }

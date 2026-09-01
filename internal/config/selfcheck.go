@@ -57,7 +57,7 @@ type FeatureCheck struct {
 //
 // The set of subsystems is intentionally bounded to those named by
 // plus the resource-policy gap from. Additional subsystems
-// (OIDC, XAA, …) can be added later — every new entry tightens the
+// (OIDC, …) can be added later — every new entry tightens the
 // "no silent degradation" contract.
 func SelfCheck(cfg Config) []FeatureCheck {
 	return []FeatureCheck{
@@ -68,6 +68,7 @@ func SelfCheck(cfg Config) []FeatureCheck {
 		validateDPoP(cfg),
 		validateDCR(cfg),
 		validateResources(cfg),
+		validateXAA(cfg),
 	}
 }
 
@@ -379,6 +380,60 @@ func validateResources(cfg Config) FeatureCheck {
 		Name:   name,
 		Status: FeatureEnabled,
 		Detail: fmt.Sprintf("%d ok", len(cfg.Resources)),
+	}
+}
+
+// validateXAA reports the cross-app-access block. Report-only by design:
+// every combination below is a legitimate deployment.
+func validateXAA(cfg Config) FeatureCheck {
+	const name = "xaa"
+	if !cfg.XAA.Enabled {
+		// The chart defaults xaa.enabled to false, so require_resource is
+		// easy to set alone; say it is inert rather than only "disabled".
+		detail := "xaa.enabled=false"
+		if cfg.XAA.RequireResource {
+			detail += " (require_resource=true has no effect)"
+		}
+		return FeatureCheck{
+			Name:   name,
+			Status: FeatureDisabled,
+			Detail: detail,
+		}
+	}
+
+	if !cfg.XAA.RequireResource {
+		return FeatureCheck{
+			Name:   name,
+			Status: FeatureEnabled,
+			Detail: "require_resource=false",
+		}
+	}
+
+	// Only entries with a uri can satisfy the flag — enforcement matches on
+	// Resource.URI and nothing requires the key.
+	withURI := 0
+	for _, r := range cfg.Resources {
+		if r.URI != "" {
+			withURI++
+		}
+	}
+	if withURI == 0 {
+		// Not a failure: enforcement reads the runtime catalog, so a
+		// deployment seeded through the admin API is fine with none here.
+		detail := "require_resource=true, no resources with a uri seeded in config"
+		if len(cfg.Resources) > 0 {
+			detail += fmt.Sprintf(" (%d seeded without one)", len(cfg.Resources))
+		}
+		return FeatureCheck{
+			Name:   name,
+			Status: FeatureEnabled,
+			Detail: detail + " (the runtime catalog may still be populated via POST /admin/resources)",
+		}
+	}
+	return FeatureCheck{
+		Name:   name,
+		Status: FeatureEnabled,
+		Detail: fmt.Sprintf("require_resource=true, %d resource(s) with a uri seeded", withURI),
 	}
 }
 

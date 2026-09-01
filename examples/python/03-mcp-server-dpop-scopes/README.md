@@ -1,7 +1,7 @@
 # Tier 03 — DPoP-bound MCP server + agent with per-tool scopes (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 15 lines · Total example: 187 lines · SDK: python-sdk 0.2.0**
+**Auth-specific code: 15 lines · Total example: 187 lines · SDK: python-sdk 0.3.0**
 <!-- loccount:end -->
 
 A paired MCP server and agent that demonstrate two production-shaped auth
@@ -39,8 +39,8 @@ concerns layered on top of tier 02:
 |---|---|
 | **Time to run** | ~3 minutes (first build is ~90s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, **Python 3.12+** (only if you run outside Docker — `pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` + `authplane-fastmcp` 0.2.0 (PyPI) |
-| **MCP framework** | `fastmcp >= 3.0, < 4` (matches `pyproject.toml`) |
+| **SDK** | `authplane-sdk` + `authplane-fastmcp` 0.3.0 (PyPI) |
+| **MCP framework** | `fastmcp >= 3.2, < 4` (matches `pyproject.toml`) — the 3.2 floor comes from `authplane-fastmcp` 0.3.0 |
 
 ## Run it in 3 commands
 

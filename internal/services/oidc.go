@@ -43,20 +43,28 @@ func NewOIDCFacade(provider output.OIDCProvider, users output.UserStore, obs *ob
 }
 
 // AuthorizationURL delegates to the upstream provider.
-func (f *OIDCFacade) AuthorizationURL(state, nonce, codeChallenge, redirectURI string) string {
-	return f.provider.AuthorizationURL(state, nonce, codeChallenge, redirectURI)
+func (f *OIDCFacade) AuthorizationURL(ctx context.Context, state, nonce, codeChallenge string) (string, error) {
+	return f.provider.AuthorizationURL(ctx, state, nonce, codeChallenge)
 }
 
 // AuthenticateOIDC exchanges the code, provisions or updates the user, and returns the user.
-func (f *OIDCFacade) AuthenticateOIDC(ctx context.Context, code, nonce, codeVerifier, redirectURI string) (*user.User, error) {
+func (f *OIDCFacade) AuthenticateOIDC(ctx context.Context, code, nonce, codeVerifier string) (*user.User, error) {
 	ctx, span := f.tracer.Start(ctx, "OIDCFacade.AuthenticateOIDC")
 	defer span.End()
 
 	// 1. Exchange code and verify ID token via upstream provider.
-	result, err := f.provider.ExchangeCode(ctx, code, nonce, codeVerifier, redirectURI)
+	result, err := f.provider.ExchangeCode(ctx, code, nonce, codeVerifier)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
+		if errors.Is(err, domain.ErrOIDCUnavailable) {
+			// Infrastructure failure (config / discovery / JWKS unreachable),
+			// not a user authentication failure: log at ERROR and propagate the
+			// sentinel so the callback handler returns a 500, not a 401. Do not
+			// record it as a failed login attempt.
+			f.logger.ErrorContext(ctx, "OIDC upstream unavailable during code exchange", "error", err)
+			return nil, err
+		}
 		f.logger.WarnContext(ctx, "OIDC code exchange failed", "error", err)
 		f.metrics.LoginAttempts.Add(ctx, 1, otelmetric.WithAttributes(
 			attribute.String("result", "failure"),
@@ -103,7 +111,7 @@ func (f *OIDCFacade) AuthenticateOIDC(ctx context.Context, code, nonce, codeVeri
 				attribute.String("result", "failure"),
 			))
 			f.metrics.AuthDenied.Add(ctx, 1, otelmetric.WithAttributes(
-				attribute.String("reason", "user_disabled"),
+				attribute.String("reason", reasonUserDisabled),
 			))
 			if f.audit != nil {
 				f.audit.Record(ctx, audit.NewEvent(audit.ActionUserOIDCLoginFailed, u.ID, "", "", "user disabled"))

@@ -14,12 +14,14 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/domain/session"
 	"github.com/authplane/authserver/internal/domain/user"
 	"github.com/authplane/authserver/internal/ports/input"
+	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/services"
 	"github.com/authplane/authserver/testdata"
 )
@@ -33,6 +35,10 @@ type dpopTokenTestSetup struct {
 }
 
 func newDPoPTokenTestSetup(t *testing.T) *dpopTokenTestSetup {
+	return newDPoPTokenTestSetupWithEnabled(t, true)
+}
+
+func newDPoPTokenTestSetupWithEnabled(t *testing.T, dpopEnabled bool) *dpopTokenTestSetup {
 	t.Helper()
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
@@ -58,28 +64,30 @@ func newDPoPTokenTestSetup(t *testing.T) *dpopTokenTestSetup {
 		t.Fatalf("keyfile: %v", err)
 	}
 
-	jwksSvc := services.NewJWKSService(ks, "ES256", obs)
+	jwksSvc := services.NewJWKSService(ks, nil, "ES256", obs)
 	auditSvc := services.NewAuditService(stores.Audit, obs)
 
-	cfg := services.TokenConfig{
+	cfg := static.NewTokenConfigProvider(output.TokenConfig{
 		AccessTokenExpiry:  15 * time.Minute,
 		RefreshTokenExpiry: 24 * time.Hour,
-	}
+	})
 
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, "https://auth.example.com", obs)
+	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest("https://auth.example.com"), obs)
 
 	tokenSvc := services.NewTokenService(
 		stores.Session, stores.Token, stores.Client, stores.User,
-		jwksSvc, mintIssuer, "https://auth.example.com", cfg, obs, auditSvc,
+		jwksSvc, mintIssuer, cfg, obs, auditSvc,
 		stores.Revocation, nil,
 	)
 
-	// Enable DPoP on the token service.
-	tokenSvc.WithDPoP(stores.DPoPNonce, services.DPoPConfig{
+	// Wire DPoP on the token service. dpopEnabled mirrors a substitute provider
+	// toggling DPoP per request; the OSS default always resolves Enabled=true.
+	tokenSvc.WithDPoP(stores.DPoPNonce, static.NewDPoPConfigProvider(output.DPoPConfig{
+		Enabled:       dpopEnabled,
 		ProofLifetime: 60 * time.Second,
 		RequireNonce:  false,
 		NonceTTL:      60 * time.Second,
-	})
+	}))
 
 	// Generate a client DPoP key pair (ES256).
 	dpopKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -216,6 +224,48 @@ func TestToken_ExchangeCode_WithDPoP_BindsJKT(t *testing.T) {
 	}
 }
 
+// TestToken_ExchangeCode_DPoPDisabled_IgnoresProof_StandardBearer verifies that
+// when the resolved DPoP config reports Enabled=false, a presented DPoP proof is
+// ignored and a standard Bearer token is issued (no cnf binding). The OSS default
+// always resolves Enabled=true, so this exercises the substitute-provider path
+// where DPoP is toggled off per request.
+func TestToken_ExchangeCode_DPoPDisabled_IgnoresProof_StandardBearer(t *testing.T) {
+	setup := newDPoPTokenTestSetupWithEnabled(t, false)
+	c, code, verifier := setup.createSessionWithCode(t)
+
+	proof := setup.createDPoPProof(t, "POST", "https://auth.example.com/oauth/token")
+
+	resp, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+		DPoPProof:    proof,
+		HTTPMethod:   "POST",
+		HTTPURL:      "https://auth.example.com/oauth/token",
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+
+	// DPoP disabled for this request → proof ignored → standard Bearer.
+	if resp.TokenType != "Bearer" {
+		t.Errorf("token_type: got %q, want Bearer (DPoP disabled)", resp.TokenType)
+	}
+
+	jwks, err := setup.jwksSvc.BuildJWKS(context.Background())
+	if err != nil {
+		t.Fatalf("build jwks: %v", err)
+	}
+	claims, err := crypto.VerifyAccessToken(resp.AccessToken, jwks)
+	if err != nil {
+		t.Fatalf("verify jwt: %v", err)
+	}
+	if claims.Cnf != nil {
+		t.Error("cnf claim must be absent when DPoP is disabled for the request")
+	}
+}
+
 // TestToken_ExchangeCode_InvalidDPoPProof_Returns400 verifies that an invalid
 // DPoP proof causes the exchange to fail.
 func TestToken_ExchangeCode_InvalidDPoPProof_Returns400(t *testing.T) {
@@ -236,6 +286,43 @@ func TestToken_ExchangeCode_InvalidDPoPProof_Returns400(t *testing.T) {
 	}
 	if !isDPoPError(err) {
 		t.Errorf("expected DPoP error, got: %v", err)
+	}
+}
+
+// A rejected DPoP proof spends the authorization code, so the retry RFC 9449 §8
+// mandates for use_dpop_nonce finds the code already gone. Pinned deliberately:
+// hoisting the validation above the consume was tried and reverted, because it
+// put the proof verification behind no caller check at all.
+func TestToken_ExchangeCode_RejectedDPoPProof_SpendsTheCode(t *testing.T) {
+	setup := newDPoPTokenTestSetup(t)
+	c, code, verifier := setup.createSessionWithCode(t)
+
+	if _, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+		DPoPProof:    "not-a-valid-jwt",
+		HTTPMethod:   "POST",
+		HTTPURL:      "https://auth.example.com/oauth/token",
+	}); !isDPoPError(err) {
+		t.Fatalf("err = %v, want a DPoP error", err)
+	}
+
+	// The retry the protocol expects — with a proof the server accepts — finds
+	// the code already spent.
+	_, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+		DPoPProof:    setup.createDPoPProof(t, "POST", "https://auth.example.com/oauth/token"),
+		HTTPMethod:   "POST",
+		HTTPURL:      "https://auth.example.com/oauth/token",
+	})
+	if !errors.Is(err, domain.ErrCodeConsumed) {
+		t.Fatalf("err = %v, want ErrCodeConsumed — if the retry now succeeds the validation "+
+			"moved above the consume, which is only safe if it stays behind caller proof", err)
 	}
 }
 
@@ -406,7 +493,7 @@ func TestIntrospect_DPoPBoundToken_ReturnsCNFJKT(t *testing.T) {
 	jwksMock := &mockJWKSBuild{kp: kp}
 	svc := services.NewIntrospectionService(
 		jwksMock, stores.Revocation, stores.MachineToken, stores.Client, stores.User,
-		"https://auth.example.com", obs, nil,
+		staticIssuerForTest("https://auth.example.com"), obs, nil,
 	)
 
 	resp, err := svc.IntrospectToken(context.Background(), input.IntrospectRequest{
@@ -498,7 +585,7 @@ func TestIntrospect_StandardBearerToken_NoCnf(t *testing.T) {
 	jwksMock := &mockJWKSBuild{kp: kp}
 	svc := services.NewIntrospectionService(
 		jwksMock, stores.Revocation, stores.MachineToken, stores.Client, stores.User,
-		"https://auth.example.com", obs, nil,
+		staticIssuerForTest("https://auth.example.com"), obs, nil,
 	)
 
 	resp, err := svc.IntrospectToken(context.Background(), input.IntrospectRequest{
