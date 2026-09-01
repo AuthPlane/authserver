@@ -47,7 +47,7 @@ Step 1 — authenticate `checksums.txt`:
 cosign verify-blob \
   --certificate checksums.txt.pem \
   --signature checksums.txt.sig \
-  --certificate-identity "https://github.com/authplane/authserver/.github/workflows/release.yml@refs/tags/v${VERSION}" \
+  --certificate-identity "https://github.com/AuthPlane/authserver/.github/workflows/release.yml@refs/tags/v${VERSION}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   checksums.txt
 ```
@@ -70,7 +70,7 @@ consistency between two files an attacker could have replaced together.
 
 ```bash
 cosign verify \
-  --certificate-identity "https://github.com/authplane/authserver/.github/workflows/release.yml@refs/tags/v0.1.2" \
+  --certificate-identity "https://github.com/AuthPlane/authserver/.github/workflows/release.yml@refs/tags/v0.1.2" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   authplane/authserver:0.1.2
 ```
@@ -102,6 +102,20 @@ It is what makes the check meaningful: a signature made by any other workflow,
 repository, or tag fails verification even though it is a perfectly valid
 Sigstore signature.
 
+**The case matters.** The identity is compared as an exact string, and the
+certificate carries the repository's canonical name — `AuthPlane/authserver`,
+not `authplane/authserver`. GitHub redirects the lowercase form for git and
+HTTP, so it works everywhere else and fails only here, with a message that
+reads like a bad signature rather than a typo:
+
+```
+none of the expected identities matched what was in the certificate,
+got subjects [https://github.com/AuthPlane/authserver/...]
+```
+
+If you see that, compare the `got subjects` value to what you passed before
+concluding anything about the artifact.
+
 Pin it to the exact tag as shown. Loosening it to
 `--certificate-identity-regexp` with a broad pattern will accept signatures
 from other tags — and, if the pattern is loose enough, other repositories.
@@ -110,8 +124,9 @@ from other tags — and, if the pattern is loose enough, other repositories.
 
 Do not install the artifact. A failure is one of:
 
-- **Wrong `--certificate-identity`** — the version in the identity string must
-  match the tag you downloaded from. This is the common cause.
+- **Wrong `--certificate-identity`** — either the case (`AuthPlane`, not
+  `authplane`) or the version in the identity string. These are the common
+  causes, and both look like a signature failure rather than a typo.
 - **Re-downloaded one file but not the others** — `checksums.txt`, its `.sig`
   and `.pem` are a set and must come from the same release.
 - **A genuine mismatch** — report it via [SECURITY.md](../../../SECURITY.md).
