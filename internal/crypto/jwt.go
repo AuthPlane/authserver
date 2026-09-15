@@ -79,7 +79,6 @@ type AccessTokenClaims struct {
 	NotBefore  int64                  `json:"nbf"`
 	Cnf        map[string]interface{} `json:"cnf,omitempty"`         // DPoP confirmation claim (RFC 9449 §6): {"jkt": "<thumbprint>"}
 	Act        map[string]interface{} `json:"act,omitempty"`         // RFC 8693 §4.1: delegation chain {"sub": "...", "act": {...}}
-	MayAct     map[string]interface{} `json:"may_act,omitempty"`     // RFC 8693 §5: authorized actors {"sub": "..."}
 	AgentID    string                 `json:"agent_id,omitempty"`    // Authplane extension: client_id of the acting agent
 	AgentChain []string               `json:"agent_chain,omitempty"` // Authplane extension: ordered delegation chain [root, ..., acting_agent]
 }

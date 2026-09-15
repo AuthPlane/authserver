@@ -239,15 +239,15 @@ opt-in trusted-proxy configuration, which authserver does not currently offer.
 - **Scope subset enforcement**: The exchanged token's scope must be ≤ the subject token's scope.
 - **Chain depth limit**: `max_chain_depth` prevents unbounded delegation.
 - **Self-exchange blocked** (by default): A client can't exchange its own token back to itself unless `allow_self_exchange` is explicitly enabled.
-- **`may_act` claim check**: The requesting client must be authorized — either via the `may_act` claim in the subject token or via the configuration allowlist.
+- **Acting-client authorization**: A client exchanging a token issued to a *different* client must be named in the target resource's `policy.exchange.allowed_client_ids`, or in its `policy.runtime.client_ids` (which declares the caller *is* that resource). Without a `resource` parameter there is no gate that can authorize a cross-client exchange, so it is refused.
 
 ### T17: Cross-client unauthorized exchange
 
 **Scenario**: An attacker registers an MCP server client and tries to exchange tokens belonging to users of a different application.
 
 **Why it fails**:
-- **Per-resource exchange policy**: Each Mint or Broker resource carries `policy.exchange.allowed_client_ids` — only clients in that list (or any client when the list is empty — user consent is a separate gate, skipped for Mint self-exchange and on fronted paths, Mint→Mint and Mint→Broker alike) may act for that resource.
-- **The acting client is gated**: the per-resource policy is matched against the requesting client's `client_id` (who's asking for the exchange). The subject token's `client_id` (the app the token was issued to) is *not* matched against the allowlist — it is the lookup key for the consent grant below, so it constrains which consent row must exist rather than who may act.
+- **Per-resource exchange policy**: Each Mint or Broker resource carries `policy.exchange.allowed_client_ids` — only clients in that list may act for that resource. An empty list is permissive, but only for a client exchanging a token issued to itself; a client presenting a token minted for a *different* client must, on the direct Mint path, be named either in that list or in the resource's `policy.runtime.client_ids` — the latter declaring that the caller *is* the resource, so the token's holder and its audience coincide and no third party is being delegated to. That asymmetry is the whole of this scenario's defense: the exchange is authorized by a `consent_grants` row keyed on the subject token's client, so without the allowlist entry the attacker's client would spend a grant belonging to the victim's application. Fronted paths are excluded because they read no consent row at all — the operator's fronting link is itself the explicit declaration.
+- **The acting client is gated**: the per-resource policy is matched against the requesting client's `client_id` (who's asking for the exchange). The subject token's `client_id` (the app the token was issued to) is *not* matched against the allowlist — it is the lookup key for the consent grant below, so it constrains which consent row must exist rather than who may act. Keying consent on the subject token's client is deliberate and is what makes a delegation chain expressible at all: a downstream agent never faces the user, so it can only inherit the grant its caller holds. The operator allowlist is where that inheritance is authorized.
 - **Consent** still applies: even an allowed client must have a `consent_grants` row for the (user, agent, resource) tuple covering the requested scopes — except a Mint self-exchange (`allow_self_exchange: true`, same `client_id`) or a fronted exchange, which skip this gate. Fronting skips it on both target kinds: on Mint→Mint the link stands in for the consent row, and on Mint→Broker dispatch hands off to the fronted-broker path before the agent-attestation lookup, so no `consent_grants` row is consulted there either. Neither is unbounded: every requested target scope must appear in the fronting link's `scope_map` and the subject token must already cover the source side of that mapping — and a Broker vend still has to fit inside the upstream `broker_grants` ceiling. The two paths do not derive that source-side requirement the same way, and the difference is only visible on a `scope_map` where several source keys point at one target: Mint→Broker (`validateBrokerTargets`) clears the target if the subject carries **any** of them, while Mint→Mint (`requiredSourceScopesForTargets`) requires the lexicographically first one specifically. So `{"a": ["t"], "b": ["t"]}` with a `b`-only subject token reaches `t` through a Broker target and is denied `invalid_scope` through a Mint one. Single-source maps — the common shape — behave identically.
 - **Audit trail**: every exchange writes an `issuances` row carrying the acting `client_id` (on a fronted exchange, the source resource's slug), the subject user, the resource and the granted scopes. The row has a single `client_id` column — the subject token's own `client_id` is not persisted there; delegation is reconstructed from `agent_id` + `agent_chain` and the token's `act` claim.
 
@@ -266,6 +266,42 @@ opt-in trusted-proxy configuration, which authserver does not currently offer.
 
 ---
 
+### T19: Using the authorization server as an outbound fetch amplifier
+
+**Scenario**: `GET /oauth/authorize` takes no session, and a URL-shaped
+`client_id` is resolved by fetching that URL. An attacker points it at a third
+party — `client_id=https://victim.example.com/x.json` — and repeats, turning
+unauthenticated requests into outbound traffic from your server: a reflected
+denial of service aimed at the victim, and memory and sockets spent on yours.
+
+**Why it's contained**:
+- **Negative cache**: A target that fails is not re-fetched for 30 seconds.
+  Measured before this existed, 50 inbound requests produced 50 outbound ones;
+  they now produce one.
+- **Single-flight**: Concurrent requests naming the same URL share one outbound
+  fetch rather than each making their own.
+- **Global in-flight limit**: At most 16 CIMD fetches run at once, whatever the
+  inbound rate. This is what bounds the memory held in read buffers (up to 1 MB
+  per fetch) and the bandwidth aimed at any one third party. The cap is per
+  process, like the rate limiter and the lockout tracker, so an N-replica
+  deployment allows N × 16 concurrent fetches.
+- **SSRF-safe transport**: With `cimd.allow_private_addresses` off (the
+  default), every resolved address is checked before the dial, so private and
+  link-local targets are refused. `cimd.require_https` does not govern this —
+  it checks the URL's scheme and nothing else.
+
+**What this does not do**: it bounds the cost, it does not require
+authorization. A caller who has never logged in can still cause *some* outbound
+request to a host they choose — one per URL per 30 seconds, within a global cap
+of 16 concurrent. If that is unacceptable in your deployment, set
+`dcr.mode: admin_only`, which stops URL-shaped `client_id`s from resolving at
+all, or turn CIMD off with `cimd.enabled: false`.
+
+**What to monitor**: `authserver_cimd_fetch_suppressed_total`. A sustained rate
+means someone is driving fetches, not that clients are registering.
+
+---
+
 ## What to monitor in production
 
 These are the signals that tell you something might be wrong:
@@ -279,6 +315,7 @@ These are the signals that tell you something might be wrong:
 | Token exchange denials | `authplane_token_exchange_denied_total` | Unauthorized exchange attempts. Check the `reason` label. |
 | Machine token denials | `authplane_client_credentials_denied_total` | Clients trying grants they're not authorized for. |
 | Admin API audit events | Audit log: `action=client_registered`, `client_suspended`, etc. | Track all administrative changes. |
+| CIMD fetches being driven | `authserver_cimd_fetch_suppressed_total` | Someone is pointing `/oauth/authorize` at URLs of their choosing. `reason=capacity` means the global in-flight limit is saturating. |
 
 ---
 

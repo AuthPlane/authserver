@@ -27,9 +27,9 @@ For a deeper architectural picture, see [Concepts → Delegation & agent chains]
 
 ## Steps
 
-### 1. Enable the grant on Authplane
+### 1. Confirm the grant is enabled on Authplane
 
-It's off by default. Set both env vars and restart:
+It is on by default as of v0.2.0. If an operator turned it off, or you want to pin the token lifetime, set the env vars and restart:
 
 ```bash
 # Variables verified against docs/reference/env-vars.md

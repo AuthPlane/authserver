@@ -74,12 +74,14 @@ What each flag is doing:
   README quick-start omits it (it's relying on that default); the
   `examples/` `.env` files set it explicitly. Same value, two styles — see
   [Reconciling the two AS-config presentations](#reconciling-the-two-as-config-presentations).
-- `AUTHPLANE_CLIENT_CREDENTIALS_ENABLED=true` turns on the machine-to-machine
-  grant. **Every grant is off by default** and the discovery endpoint
-  silently omits a grant that isn't enabled — so if you skip this, the
-  token step below fails with `unsupported_grant_type`. (DPoP and token
-  exchange have their own `AUTHPLANE_*_ENABLED` flags; see
-  [`docs/reference/env-vars.md`](../../reference/env-vars.md).)
+- `AUTHPLANE_CLIENT_CREDENTIALS_ENABLED=true` keeps the machine-to-machine
+  grant on. It is the default as of v0.2.0, so the line is redundant on a
+  stock server — it is set explicitly here so the value is visible, the
+  same way the issuer is. The discovery endpoint silently omits a grant
+  that has been disabled, so if the token step below fails with
+  `unsupported_grant_type`, this is the first thing to check. (DPoP and
+  token exchange have their own `AUTHPLANE_*_ENABLED` flags, also on by
+  default; see [`docs/reference/env-vars.md`](../../reference/env-vars.md).)
 
 Wait for readiness, then export the admin bearer for the calls below:
 

@@ -5,9 +5,11 @@ package wellknown
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
+	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
 )
@@ -16,6 +18,7 @@ import (
 type handler struct {
 	jwks       JWKSProvider
 	asMetadata input.ASMetadataPort
+	prMetadata input.PRMetadataPort
 	obs        *observability.Provider
 }
 
@@ -68,9 +71,54 @@ func (h *handler) handleASMetadata(w http.ResponseWriter, r *http.Request) {
 		ScopesSupported:                   md.ScopesSupported,
 		ResourceIndicatorsSupported:       md.ResourceIndicatorsSupported,
 		ClientIDMetadataDocumentSupported: md.ClientIDMetadataDocumentSupported,
-		DPoPSigningAlgValuesSupported:     md.DPoPSigningAlgValuesSupported,
-		AgentIdentitySupported:            md.AgentIdentitySupported,
-		IdentityAssertionSupported:        md.IdentityAssertionSupported,
+
+		AuthorizationResponseIssParameterSupported: md.AuthorizationResponseIssParameterSupported,
+
+		DPoPSigningAlgValuesSupported: md.DPoPSigningAlgValuesSupported,
+		AgentIdentitySupported:        md.AgentIdentitySupported,
+
+		AuthorizationGrantProfilesSupported: md.AuthorizationGrantProfilesSupported,
+		IdentityAssertionSupported:          md.IdentityAssertionSupported,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// handlePRMetadata serves GET /.well-known/oauth-protected-resource and its
+// path-suffixed form (RFC 9728 §3.1). It is a thin transport adapter: the
+// PRMetadataPort resolves which Resource is being asked about and assembles the
+// document; this handler maps it onto the wire DTO and encodes it.
+func (h *handler) handlePRMetadata(w http.ResponseWriter, r *http.Request) {
+	// PathValue is empty for the bare well-known route, which the service reads
+	// as "the Resource identified by this origin".
+	ref := r.PathValue("ref")
+
+	md, err := h.prMetadata.Metadata(r.Context(), ref)
+	if err != nil {
+		// A reference naming no registered Resource is a 404, not a 500: the
+		// endpoint answers for Resources this AS knows about, and "no such
+		// resource" is a legitimate answer to a client probing an identifier.
+		if errors.Is(err, domain.ErrResourceNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		h.obs.Logger.ErrorContext(r.Context(),
+			"build protected resource metadata failed",
+			"ref", ref,
+			"error", err,
+		)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	doc := protectedResourceMetadata{
+		Resource:               md.Resource,
+		AuthorizationServers:   md.AuthorizationServers,
+		ScopesSupported:        md.ScopesSupported,
+		BearerMethodsSupported: md.BearerMethodsSupported,
+		ResourceName:           md.ResourceName,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

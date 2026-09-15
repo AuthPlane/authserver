@@ -24,7 +24,7 @@
 #      commands from the README continue to work.
 services:
   authserver:
-    image: authplane/authserver:latest
+    image: ${AUTHSERVER_IMAGE:-authplane/authserver:latest}
     # ---------------------------------------------------------------------
     # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
     # ---------------------------------------------------------------------

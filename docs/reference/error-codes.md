@@ -56,7 +56,8 @@ Is error = "use_dpop_nonce"?
 
 Is error = "access_denied"?
   → Token exchange: you're not authorized to exchange this token.
-  → Check: is your client in the target resource's policy.exchange.allowed_client_ids?
+  → Check: is your client in the target resource's policy.exchange.allowed_client_ids
+    (or its policy.runtime.client_ids, if your client IS that resource)?
 
 Is error = "consent_required"?
   → Token exchange against a Broker resource: the user has not consented
@@ -201,7 +202,7 @@ The request is authenticated but not authorized.
 |---|---|---|
 | Identity assertion denied by policy | No XAA policy allows this IdP/client/scope/resource combination | Create or update a policy via `POST /admin/xaa/policies` that permits the combination. |
 | No subject mapping found for identity | Subject mode is `strict` and no mapping exists for the IdP subject | Create a subject mapping via `POST /admin/xaa/subject-mappings`. |
-| Token exchange: not authorized | Your client isn't in the target resource's `policy.exchange.allowed_client_ids` and the subject token doesn't have a `may_act` claim for you | Add your client to `policy.exchange.allowed_client_ids` on the target resource via `PATCH /admin/resources/{id}`, or empty the list to allow any client. |
+| Token exchange: not authorized | Your client isn't in the target resource's `policy.exchange.allowed_client_ids` or its `policy.runtime.client_ids` | Add your client to `policy.exchange.allowed_client_ids` on the target resource via `PATCH /admin/resources/{id}`. Emptying the list allows any client only when it exchanges a token issued to itself — if your subject token was minted for a different `client_id`, you must be listed in one of the two. If your client *is* the target resource, `policy.runtime.client_ids` is the entry to add, and it is the one you likely already have. |
 | Token exchange: chain too deep | Delegation chain exceeds `max_chain_depth` | Increase the limit or reduce delegation levels. |
 | OIDC auth failed | Upstream identity provider rejected the authentication | Check IdP config: client_id, client_secret, redirect_uri. |
 

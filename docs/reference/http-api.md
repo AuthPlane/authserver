@@ -15,6 +15,8 @@ All endpoints are documented from their route registration site in `api/public/*
 | --- | --- | --- | --- |
 | `GET` | `/.well-known/jwks.json` | public | [#http-public-well-known-jwks-json](#http-public-well-known-jwks-json) |
 | `GET` | `/.well-known/oauth-authorization-server` | public | [#http-public-well-known-oauth-authorization-server](#http-public-well-known-oauth-authorization-server) |
+| `GET` | `/.well-known/oauth-protected-resource` | public | [#http-public-well-known-oauth-protected-resource](#http-public-well-known-oauth-protected-resource) |
+| `GET` | `/.well-known/oauth-protected-resource/{ref...}` | public | [#http-public-well-known-oauth-protected-resource-ref](#http-public-well-known-oauth-protected-resource-ref) |
 | `GET` | `/.well-known/openid-configuration` | public | [#http-public-well-known-openid-configuration](#http-public-well-known-openid-configuration) |
 | `GET` | `/admin/audit` | admin | [#http-admin-audit-list](#http-admin-audit-list) |
 | `POST` | `/admin/auth/verify` | admin | [#http-admin-auth-verify](#http-admin-auth-verify) |
@@ -120,7 +122,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/wellknown/routes.go:39`
+**Source** — `api/public/wellknown/routes.go:44`
 
 **Response 200** — JWKS document (public keys only). Cache-Control `max-age=300`.
 
@@ -132,9 +134,29 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/wellknown/routes.go:42`
+**Source** — `api/public/wellknown/routes.go:47`
 
 **Response 200** — RFC 8414 metadata. Body shape: see `asMetadata` struct in `api/public/wellknown/dto.go`.
+
+---
+
+### `GET /.well-known/oauth-protected-resource`
+
+<a id="http-public-well-known-oauth-protected-resource"></a>
+
+**Server** — public (:9000)  
+**Auth** — none (public; request-body parameters identify the caller)  
+**Source** — `api/public/wellknown/routes.go:63`
+
+---
+
+### `GET /.well-known/oauth-protected-resource/{ref...}`
+
+<a id="http-public-well-known-oauth-protected-resource-ref"></a>
+
+**Server** — public (:9000)  
+**Auth** — none (public; request-body parameters identify the caller)  
+**Source** — `api/public/wellknown/routes.go:64`
 
 ---
 
@@ -144,7 +166,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/wellknown/routes.go:43`
+**Source** — `api/public/wellknown/routes.go:48`
 
 **Response 200** — same shape as the RFC 8414 endpoint.
 
@@ -196,7 +218,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — browser session cookie (managed by `shared.SessionMiddleware`)  
-**Source** — `api/public/oauth/routes.go:242`
+**Source** — `api/public/oauth/routes.go:252`
 
 ---
 
@@ -206,7 +228,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — browser session cookie (managed by `shared.SessionMiddleware`)  
-**Source** — `api/public/oauth/routes.go:243`
+**Source** — `api/public/oauth/routes.go:253`
 
 ---
 
@@ -216,7 +238,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/wellknown/routes.go:48`
+**Source** — `api/public/wellknown/routes.go:69`
 
 **Response 200** — [`healthResponse`](#dto-health-response).
 
@@ -228,7 +250,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/wellknown/routes.go:47`
+**Source** — `api/public/wellknown/routes.go:68`
 
 **Response 200** — [`healthResponse`](#dto-health-response). Always 200 while the process serves HTTP; checks no dependencies, so a liveness probe on it never restarts a pod over a backend outage.
 
@@ -240,7 +262,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:219`
+**Source** — `api/public/oauth/routes.go:225`
 
 ---
 
@@ -250,7 +272,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:220`
+**Source** — `api/public/oauth/routes.go:226`
 
 **Response 303** — on success, redirects to the post-login target.
 
@@ -268,7 +290,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:221`
+**Source** — `api/public/oauth/routes.go:227`
 
 ---
 
@@ -278,7 +300,7 @@ All endpoints are documented from their route registration site in `api/public/*
 
 **Server** — public (:9000)  
 **Auth** — browser session cookie (managed by `shared.SessionMiddleware`)  
-**Source** — `api/public/oauth/routes.go:155`
+**Source** — `api/public/oauth/routes.go:161`
 
 Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_challenge_method=S256`). Redirects to `/consent` after login.
 
@@ -290,7 +312,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:178`
+**Source** — `api/public/oauth/routes.go:184`
 
 **Request** — form-encoded `token`. **Response 200** — RFC 7662 introspection response.
 
@@ -302,7 +324,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:138`
+**Source** — `api/public/oauth/routes.go:144`
 
 **Request** — RFC 7591 client metadata JSON. **Response 201** — registered client metadata.
 
@@ -316,7 +338,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:170`
+**Source** — `api/public/oauth/routes.go:176`
 
 **Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009).
 
@@ -328,7 +350,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:163`
+**Source** — `api/public/oauth/routes.go:169`
 
 **Request** — form-encoded `application/x-www-form-urlencoded`. Grant params depend on `grant_type` (`authorization_code`, `client_credentials`, `refresh_token`, `urn:ietf:params:oauth:grant-type:token-exchange`, `urn:ietf:params:oauth:grant-type:jwt-bearer`). DPoP-bound clients send `DPoP` header; the AS may answer with `WWW-Authenticate: DPoP error="use_dpop_nonce"`.
 
@@ -346,7 +368,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:281`
+**Source** — `api/public/oauth/routes.go:291`
 
 ---
 
@@ -356,7 +378,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/oauth/routes.go:280`
+**Source** — `api/public/oauth/routes.go:290`
 
 ---
 
@@ -366,7 +388,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
-**Source** — `api/public/wellknown/routes.go:49`
+**Source** — `api/public/wellknown/routes.go:70`
 
 **Response 200** — [`healthResponse`](#dto-health-response).
 
@@ -1522,9 +1544,11 @@ asMetadata is the JSON body for GET /.well-known/oauth-authorization-server (RFC
 | `scopes_supported` | `[]string` | no | `omitempty` |
 | `resource_indicators_supported` | `bool` | yes |  |
 | `client_id_metadata_document_supported` | `bool` | no | `omitempty` |
+| `authorization_response_iss_parameter_supported` | `bool` | yes | AuthorizationResponseIssParameterSupported is RFC 9207 Section 2.3. No omitempty: a client distinguishes "false" from "absent" only by the local policy in Section 2.4, and omitting the field when true would be a lie, while emitting it explicitly lets a client enforce the strict branch — reject an authorization response that arrives with no iss. |
 | `dpop_signing_alg_values_supported` | `[]string` | no | `omitempty` |
 | `authplane_agent_identity_supported` | `bool` | no | `omitempty`. Authplane extension (non-standard) |
-| `identity_assertion_supported` | `bool` | no | `omitempty`. MCP XAA extension |
+| `authorization_grant_profiles_supported` | `[]string` | no | `omitempty`. AuthorizationGrantProfilesSupported is the discovery field the stable MCP Enterprise-Managed Authorization extension reads (its Discovery section: a client determines profile support by checking for urn:ietf:params:oauth:grant-profile:id-jag here). Defined in draft-ietf-oauth-identity-assertion-authz-grant Section 7.2. |
+| `identity_assertion_supported` | `bool` | no | `omitempty`. IdentityAssertionSupported is a non-standard Authplane flag for the same capability, emitted before the extension stabilized. Deprecated: no conformant client reads it; scheduled for removal in v0.3.0. Clients must use authorization_grant_profiles_supported. |
 
 ### `auditEventView`
 
@@ -1849,6 +1873,22 @@ patchResourceRequest is the JSON body for PATCH /admin/resources/{id}. Pointer f
 | `scopes` | `*[]scopeWithUpstreamView` | no | `omitempty` |
 | `policy` | `*policyView` | no | `omitempty` |
 
+### `protectedResourceMetadata`
+
+<a id="dto-protected-resource-metadata"></a>
+
+protectedResourceMetadata is the JSON body for GET /.well-known/oauth-protected-resource and its path-suffixed form (RFC 9728 §2). Field order follows the RFC's own presentation order. resource is the only REQUIRED member and so carries no omitempty; the rest are OPTIONAL and are omitted rather than emitted empty, since a client reads an empty scopes_supported as "this resource advertises no scopes" rather than "this server did not say".
+
+**Source** — `api/public/wellknown/dto.go:62`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `resource` | `string` | yes |  |
+| `authorization_servers` | `[]string` | no | `omitempty` |
+| `scopes_supported` | `[]string` | no | `omitempty` |
+| `bearer_methods_supported` | `[]string` | no | `omitempty` |
+| `resource_name` | `string` | no | `omitempty` |
+
 ### `rateLimitConfigView`
 
 <a id="dto-rate-limit-config-view"></a>
@@ -1858,6 +1898,48 @@ patchResourceRequest is the JSON body for PATCH /admin/resources/{id}. Pointer f
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `enabled` | `bool` | yes |  |
+
+### `registerRequest`
+
+<a id="dto-register-request"></a>
+
+registerRequest is the JSON body for POST /oauth/register: the RFC 7591 client metadata members this authorization server reads. Members outside this set are accepted and ignored, per RFC 7591 §3.1. (Kept as a wire DTO rather than decoding into the input port type so docsgen, which reads struct tags from this file, can publish a field table for the endpoint.)
+
+**Source** — `api/public/oauth/dto.go:73`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `redirect_uris` | `[]string` | yes |  |
+| `client_name` | `string` | yes |  |
+| `grant_types` | `[]string` | yes |  |
+| `response_types` | `[]string` | yes |  |
+| `token_endpoint_auth_method` | `string` | yes |  |
+| `application_type` | `string` | no | `omitempty`. ApplicationType is the OIDC application_type: "web" or "native". MCP clients are required to send it — omitting it defaults to "web" under OIDC, which refuses the localhost redirect URIs native clients need. |
+| `agent` | `bool` | no | `omitempty`. Agent marks the client as an agent (Authplane extension, not RFC 7591). |
+| `agent_description` | `string` | no | `omitempty`. AgentDescription is a human-readable agent description (Authplane extension, max 255 chars). |
+
+### `registerResponse`
+
+<a id="dto-register-response"></a>
+
+registerResponse is the JSON body returned by POST /oauth/register (RFC 7591 §3.2.1).
+
+**Source** — `api/public/oauth/dto.go:92`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `client_id` | `string` | yes |  |
+| `client_secret` | `string` | no | `omitempty` |
+| `client_id_issued_at` | `int64` | yes |  |
+| `client_secret_expires_at` | `*int64` | no | `omitempty` |
+| `redirect_uris` | `[]string` | yes |  |
+| `client_name` | `string` | yes |  |
+| `grant_types` | `[]string` | yes |  |
+| `response_types` | `[]string` | yes |  |
+| `token_endpoint_auth_method` | `string` | yes |  |
+| `application_type` | `string` | yes | ApplicationType is always concrete, resolved through the OIDC default, so a client that omitted it learns what it was defaulted to. |
+| `agent` | `bool` | no | `omitempty` |
+| `agent_description` | `string` | no | `omitempty` |
 
 ### `rotateKeyResponse`
 

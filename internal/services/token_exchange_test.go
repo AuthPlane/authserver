@@ -289,11 +289,19 @@ func TestTokenExchange_Delegation_BuildsActClaim(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange, because cross-client delegation is not authorizable on
+	// the resource-less path any more. may_act was its only gate, and the
+	// writer that produced the claim went in Inc 71 — no token this server
+	// issues can carry one, so the branch that read it was unreachable and is
+	// now gone. Cross-client delegation is authorized by naming a resource,
+	// which puts the request on the unified path and its operator gate; the
+	// dispatch tests cover that.
+	//
+	// What this test asserts is the act-claim shape, and the self-exchange
+	// path builds it through exactly the same code.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(actorClient.ID)
@@ -337,13 +345,12 @@ func TestTokenExchange_MultiHop_ChainNested(t *testing.T) {
 	})
 
 	// Client A issued the original subject token with an existing act claim from Agent-1.
-	clientA, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	clientB, clientBSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	subjectClaims := defaultSubjectClaims(clientA.ID)
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(clientB.ID)
 	// Pre-populate an act claim: Agent-1 already acted.
 	subjectClaims.Act = token.ActClaimToMap(&token.ActClaim{Sub: "agent-1-id"})
-	subjectClaims.MayAct = map[string]interface{}{"sub": clientB.ID}
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(clientB.ID)
@@ -526,38 +533,16 @@ func TestTokenExchange_SelfExchange_Allowed(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------------------
-// Test 9: Cross-client may_act — allowed
-// -------------------------------------------------------------------
-func TestTokenExchange_CrossClient_MayAct_Allowed(t *testing.T) {
-	setup := newTETestSetup(t, output.TokenExchangeConfig{
-		AllowSelfExchange: false, // self-exchange disabled
-		MaxChainDepth:     5,
-		TokenExpiry:       15 * time.Minute,
-	})
-
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
-	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
-
-	// Subject token has may_act authorizing actorClient.
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
-	subjectToken := setup.mintSubjectToken(t, subjectClaims)
-
-	resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
-		SubjectToken:     subjectToken,
-		SubjectTokenType: token.TokenTypeAccessToken,
-		ClientID:         actorClient.ID,
-		ClientSecret:     actorSecret,
-	})
-	if err != nil {
-		t.Fatalf("exchange: %v", err)
-	}
-
-	if resp.AccessToken == "" {
-		t.Error("access_token is empty")
-	}
-}
+// The cross-client may_act tests that stood here are gone with the mechanism.
+// may_act was the only cross-client gate on the resource-less path, and the
+// writer that produced the claim was removed in Inc 71 — a subject token must
+// be signed by this server's key and carry its issuer, so no token reaching
+// this path could ever have carried one. The reader was unreachable; these
+// tests reached it only by constructing claims in process.
+//
+// Test 10 below is now the whole of the behaviour: cross-client exchange on
+// this path is refused. Cross-client delegation is authorized by naming a
+// resource, covered in token_exchange_dispatch_test.go.
 
 // -------------------------------------------------------------------
 // Test 10: Cross-client not authorized — rejected
@@ -572,9 +557,10 @@ func TestTokenExchange_CrossClient_NotAuthorized_Rejected(t *testing.T) {
 	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	// Subject token has no may_act and self-exchange is disabled — the
-	// surviving cross-client paths after  (may_act + the unified
-	// per-Resource operator gate) both refuse, so checkPolicy() rejects.
+	// Genuinely cross-client: the acting client is not the subject token's
+	// client, and self-exchange is disabled. checkPolicy has nothing left to
+	// authorize this with — cross-client exchange is only authorized by naming
+	// a resource, which routes to the unified operator gate instead of here.
 	subjectClaims := defaultSubjectClaims(subClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
@@ -1152,11 +1138,10 @@ func TestTokenExchange_ExpiredActorToken_Rejected(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	// Actor token is expired.
@@ -1187,11 +1172,10 @@ func TestTokenExchange_MalformedActorToken_Rejected(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	_, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
@@ -1214,11 +1198,10 @@ func TestTokenExchange_ActorTokenDifferentIssuer_Rejected(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	// Actor token has wrong issuer — VerifyAccessTokenWithIssuer will reject it.
@@ -1247,11 +1230,10 @@ func TestTokenExchange_InvalidActorTokenType_Rejected(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(actorClient.ID)
@@ -1491,60 +1473,6 @@ func TestTokenExchange_SelfExchange_Denied(t *testing.T) {
 	}
 }
 
-func TestTokenExchange_MayAct_WrongActorSub_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, output.TokenExchangeConfig{
-		AllowSelfExchange: false,
-		MaxChainDepth:     5,
-		TokenExpiry:       15 * time.Minute,
-	})
-
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
-	actorClientA, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
-	actorClientB, actorBSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
-
-	// Subject token authorizes clientA — but clientB tries to exchange it.
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClientA.ID}
-	subjectToken := setup.mintSubjectToken(t, subjectClaims)
-
-	_, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
-		SubjectToken:     subjectToken,
-		SubjectTokenType: token.TokenTypeAccessToken,
-		ClientID:         actorClientB.ID,
-		ClientSecret:     actorBSecret,
-	})
-	if !errors.Is(err, domain.ErrTokenExchangeNotAuthorized) {
-		t.Errorf("err = %v, want ErrTokenExchangeNotAuthorized (may_act.sub mismatch)", err)
-	}
-}
-
-func TestTokenExchange_MayAct_MalformedField_Rejected(t *testing.T) {
-	setup := newTETestSetup(t, output.TokenExchangeConfig{
-		AllowSelfExchange: false,
-		MaxChainDepth:     5,
-		TokenExpiry:       15 * time.Minute,
-	})
-
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
-	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
-
-	// Subject token has malformed may_act (sub is an integer, not string).
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": 12345} // wrong type
-	subjectToken := setup.mintSubjectToken(t, subjectClaims)
-
-	_, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
-		SubjectToken:     subjectToken,
-		SubjectTokenType: token.TokenTypeAccessToken,
-		ClientID:         actorClient.ID,
-		ClientSecret:     actorSecret,
-	})
-	// Should be denied: type assertion fails, falls through to allowlist (empty) → denied.
-	if !errors.Is(err, domain.ErrTokenExchangeNotAuthorized) {
-		t.Errorf("err = %v, want ErrTokenExchangeNotAuthorized (malformed may_act)", err)
-	}
-}
-
 // ===================================================================
 // MALFORMED INPUT TESTS
 // ===================================================================
@@ -1735,12 +1663,11 @@ func TestTokenExchange_StampsActorTypeAgent_ForAgentClient(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	setup.setClientAgent(t, actorClient.ID, true)
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(actorClient.ID)
@@ -1779,12 +1706,11 @@ func TestTokenExchange_StampsActorTypeService_ForNonAgentClient(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	// Default createTEClient leaves IsAgent=false; no flip needed.
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(actorClient.ID)
@@ -1825,16 +1751,15 @@ func TestTokenExchange_PreservesInnerHopActorType(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	// Outer acting client is a service; inner pre-existing hop claims agent.
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectClaims.Act = token.ActClaimToMap(&token.ActClaim{
 		Sub:    "prior-agent",
 		Extras: map[string]interface{}{"actor_type": "agent"},
 	})
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(actorClient.ID)
@@ -1933,11 +1858,10 @@ func TestTokenExchange_DoesNotStampNonIdentityClaims(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
-	subjectClaims := defaultSubjectClaims(subClient.ID)
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(actorClient.ID)
@@ -1989,14 +1913,14 @@ func TestTokenExchange_StripsNonIdentityClaimsFromInnerHops(t *testing.T) {
 		TokenExpiry:       15 * time.Minute,
 	})
 
-	subClient, _ := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 	actorClient, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
 
 	// Subject token whose inner act hop carries forbidden non-identity
 	// claims alongside sub. We build the raw map directly rather than via
 	// ActClaimToMap so the test exercises the sanitize path on ingestion,
 	// not a property of the domain converter.
-	subjectClaims := defaultSubjectClaims(subClient.ID)
+	// Self-exchange; see the note in TestTokenExchange_Delegation_BuildsActClaim.
+	subjectClaims := defaultSubjectClaims(actorClient.ID)
 	subjectClaims.Act = map[string]interface{}{
 		"sub": "agent-inner",
 		"exp": float64(1234567890),
@@ -2005,7 +1929,6 @@ func TestTokenExchange_StripsNonIdentityClaimsFromInnerHops(t *testing.T) {
 		"iat": float64(1234567800),
 		"jti": "inner-jti",
 	}
-	subjectClaims.MayAct = map[string]interface{}{"sub": actorClient.ID}
 	subjectToken := setup.mintSubjectToken(t, subjectClaims)
 
 	actorClaims := defaultSubjectClaims(actorClient.ID)

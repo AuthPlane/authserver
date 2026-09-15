@@ -46,8 +46,11 @@ async def main() -> int:
         dev_mode=True,
     )
     try:
+        # The subject must already hold the scope the exchange asks for — an
+        # exchange can narrow a scoped subject, never widen it (RFC 8693 §2.1).
         base_token = (await client.client_credentials(
-            scopes=["mcp:tools"], resources=[os.environ["BROKER_RESOURCE_URI"]],
+            scopes=[os.environ.get("BROKER_SCOPE", "repo")],
+            resources=[os.environ["BROKER_RESOURCE_URI"]],
         )).access_token
         try:
             vended = await client.exchange(TokenExchangeOptions(

@@ -66,6 +66,11 @@ func TestAgentIdentity_MintIssuance_ClaimsInJWT_AndOnIssuance(t *testing.T) {
 	// up by slug internally.
 	mcpBRes := h.AdminGetResourceBySlug("mcp-1")
 
+	// mcp-a delegates alice's agent-issued token onward to mcp-b. The
+	// consent grant it spends belongs to the agent, so the operator of
+	// mcp-b has to name mcp-a as a permitted delegate.
+	h.AdminAllowExchangeClient("mcp-1", mcpAID)
+
 	// Drive consent through the public surface (auth-code grant against
 	// /authorize → /consent) for each MCP resource. Replaces the
 	// Gate-0 shortcut h.SeedConsentGrant. The returned auth code is

@@ -95,6 +95,14 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 		return nil, err
 	}
 
+	// Validated up front, alongside the other client-metadata checks, so an
+	// unknown value is refused before a client_id is generated.
+	if err := client.ValidateApplicationType(req.ApplicationType); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidClient, err)
+	}
+
 	// Apply RFC 7591 defaults.
 	params := client.CreateParams{
 		Name:                    req.ClientName,
@@ -136,8 +144,12 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 		RegistrationSource:      client.SourceDCR,
 		IsAgent:                 params.IsAgent,
 		AgentDescription:        params.AgentDescription,
-		IssuedAt:                now,
-		UpdatedAt:               now,
+		// Stored as sent, including empty. EffectiveApplicationType applies the
+		// OIDC default on read, so an empty column stays distinguishable from an
+		// explicit "web" for anyone auditing which clients declared an intent.
+		ApplicationType: req.ApplicationType,
+		IssuedAt:        now,
+		UpdatedAt:       now,
 	}
 
 	// Handle confidential client (secret generation).
@@ -185,8 +197,11 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 		GrantTypes:              c.GrantTypes,
 		ResponseTypes:           c.ResponseTypes,
 		TokenEndpointAuthMethod: c.TokenEndpointAuthMethod,
-		Agent:                   c.IsAgent,
-		AgentDescription:        c.AgentDescription,
+		// Resolved, not raw: the response always states a concrete value, so a
+		// client that omitted the field learns what it was defaulted to.
+		ApplicationType:  c.EffectiveApplicationType(),
+		Agent:            c.IsAgent,
+		AgentDescription: c.AgentDescription,
 	}
 
 	if plainSecret != "" {

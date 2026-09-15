@@ -36,6 +36,14 @@ type consentPageData struct {
 	Scopes              []input.ScopeInfo
 	CSRFToken           string
 	FormAction          string
+
+	// RedirectHost is the host an approval sends the authorization code to,
+	// and RedirectIsLoopback marks it as the user's own machine. Rendered
+	// next to the decision buttons rather than in the header, because the
+	// header is built from a self-declared client name and this is the part
+	// of the request the server actually verified.
+	RedirectHost       string
+	RedirectIsLoopback bool
 }
 
 // loginPageData holds the template data for the login page.
@@ -53,4 +61,48 @@ type loginPageData struct {
 type oidcErrorData struct {
 	Error    string
 	LoginURL string
+}
+
+// registerRequest is the JSON body for POST /oauth/register: the RFC 7591
+// client metadata members this authorization server reads. Members outside this
+// set are accepted and ignored, per RFC 7591 §3.1.
+//
+// (Kept as a wire DTO rather than decoding into the input port type so docsgen,
+// which reads struct tags from this file, can publish a field table for the
+// endpoint.)
+type registerRequest struct {
+	RedirectURIs            []string `json:"redirect_uris"`
+	ClientName              string   `json:"client_name"`
+	GrantTypes              []string `json:"grant_types"`
+	ResponseTypes           []string `json:"response_types"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	// ApplicationType is the OIDC application_type: "web" or "native". MCP
+	// clients are required to send it — omitting it defaults to "web" under
+	// OIDC, which refuses the localhost redirect URIs native clients need.
+	ApplicationType string `json:"application_type,omitempty"`
+	// Agent marks the client as an agent (Authplane extension, not RFC 7591).
+	Agent bool `json:"agent,omitempty"`
+	// AgentDescription is a human-readable agent description (Authplane
+	// extension, max 255 chars).
+	AgentDescription string `json:"agent_description,omitempty"`
+}
+
+// registerResponse is the JSON body returned by POST /oauth/register
+// (RFC 7591 §3.2.1).
+type registerResponse struct {
+	ClientID              string `json:"client_id"`
+	ClientSecret          string `json:"client_secret,omitempty"`
+	ClientIDIssuedAt      int64  `json:"client_id_issued_at"`
+	ClientSecretExpiresAt *int64 `json:"client_secret_expires_at,omitempty"`
+
+	RedirectURIs            []string `json:"redirect_uris"`
+	ClientName              string   `json:"client_name"`
+	GrantTypes              []string `json:"grant_types"`
+	ResponseTypes           []string `json:"response_types"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	// ApplicationType is always concrete, resolved through the OIDC default, so
+	// a client that omitted it learns what it was defaulted to.
+	ApplicationType  string `json:"application_type"`
+	Agent            bool   `json:"agent,omitempty"`
+	AgentDescription string `json:"agent_description,omitempty"`
 }

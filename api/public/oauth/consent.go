@@ -8,6 +8,7 @@ import (
 
 	"github.com/authplane/authserver/api/shared"
 	"github.com/authplane/authserver/internal/domain"
+	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
 	"github.com/authplane/authserver/internal/ports/output"
@@ -19,6 +20,12 @@ type consentHandler struct {
 	session *shared.SessionMiddleware
 	obs     *observability.Provider
 	urls    output.URLBuilder
+	// issuerProvider resolves the AS issuer identifier for the RFC 9207 iss
+	// parameter on the authorization response this handler emits. Consent is a
+	// second entry point to the same response as GET /oauth/authorize, so it
+	// carries the same obligation: a code handed back from here without iss is
+	// one a conformant client must reject.
+	issuerProvider output.IssuerProvider
 }
 
 func (h *consentHandler) handleGetConsent(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +79,8 @@ func (h *consentHandler) handleGetConsent(w http.ResponseWriter, r *http.Request
 		ResourceSlug:        view.ResourceSlug,
 		Scopes:              view.Scopes,
 		CSRFToken:           csrfToken,
+		RedirectHost:        client.RedirectURIHost(view.RedirectURI),
+		RedirectIsLoopback:  client.IsLoopbackRedirectURI(view.RedirectURI),
 	})
 }
 
@@ -132,6 +141,22 @@ func (h *consentHandler) handlePostConsent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Resolved before GrantConsent, mirroring handleAuthorize. GrantConsent
+	// mints an authorization code, writes the consent grant and commits; if the
+	// issuer were resolved afterwards, a failure would leave an orphaned code in
+	// the database, a persisted grant, and a client waiting on a loopback
+	// listener that never receives a redirect. Failing first costs the user a
+	// 500 and nothing else.
+	iss, err := h.issuer(r)
+	if err != nil {
+		h.obs.Logger.ErrorContext(r.Context(),
+			"cannot emit the RFC 9207 iss parameter on the consent redirect",
+			"error", err,
+		)
+		shared.WriteErrorPage(w, r, http.StatusInternalServerError, "Error", "The authorization server could not resolve its issuer.")
+		return
+	}
+
 	result, err := h.consent.GrantConsent(r.Context(), input.GrantConsentRequest{
 		SessionID:      sessionID,
 		UserID:         userID,
@@ -153,7 +178,7 @@ func (h *consentHandler) handlePostConsent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	redirectWithCode(w, r, result.RedirectURI, result.Code, result.State)
+	redirectWithCode(w, r, result.RedirectURI, result.Code, result.State, iss)
 }
 
 // consentTmpl renders the per-MCP consent screen ( / DESIGN_v4 §7).
@@ -213,6 +238,21 @@ font-weight:600;cursor:pointer;transition:all 0.2s ease;letter-spacing:0.01em}
 .btn-deny{background:#fff;color:#475569;border:1px solid #cbd5e1}
 .btn-deny:hover{background:#f8fafc;border-color:#94a3b8;color:#1e293b}
 .footer{text-align:center;margin-top:24px;font-size:0.8em;color:#94a3b8}
+/* A client name is self-declared and can be arbitrarily long; keep it from
+   pushing the destination out of view or overflowing the card. */
+.client{overflow-wrap:anywhere}
+/* The destination sits directly above the buttons: it is what the user is
+   being asked to check, and it must not be mistakable for the client's own
+   text. Its own border and label keep it structurally separate from anything
+   the client supplied. */
+.destination{border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;margin-bottom:20px;
+background:#f8fafc}
+.destination .dest-label{font-size:0.8em;font-weight:600;text-transform:uppercase;
+letter-spacing:0.05em;color:#64748b;margin-bottom:6px}
+.destination .host{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.95em;
+font-weight:700;color:#0f172a;overflow-wrap:anywhere}
+.destination.local{background:#fffbeb;border-color:#fcd34d}
+.destination .warn{margin-top:8px;font-size:0.85em;color:#92400e;line-height:1.5}
 </style>
 </head>
 <body>
@@ -252,6 +292,17 @@ font-weight:600;cursor:pointer;transition:all 0.2s ease;letter-spacing:0.01em}
 <label class="remember">
 <input type="checkbox" name="remember"> Remember this decision
 </label>
+{{if .RedirectHost}}
+<div class="destination{{if .RedirectIsLoopback}} local{{end}}">
+<div class="dest-label">Approving will send your authorization to</div>
+<div class="host">{{.RedirectHost}}</div>
+{{if .RedirectIsLoopback}}
+<div class="warn">This address is your own computer. Any program running on it can
+ask for this — including one you did not intend to authorize. Continue only if you
+started this yourself, just now.</div>
+{{end}}
+</div>
+{{end}}
 <div class="buttons">
 <button type="submit" name="action" value="deny" class="btn-deny">Deny</button>
 <button type="submit" name="action" value="allow" class="btn-allow">Allow access</button>
@@ -262,3 +313,20 @@ font-weight:600;cursor:pointer;transition:all 0.2s ease;letter-spacing:0.01em}
 </div>
 </body>
 </html>`))
+
+// issuer resolves the AS issuer identifier for the RFC 9207 iss parameter.
+// See oauthHandler.resolveIssuer for why an unresolvable issuer fails the
+// request instead of degrading to an omitted iss.
+func (h *consentHandler) issuer(r *http.Request) (string, error) {
+	if h.issuerProvider == nil {
+		return "", errors.New("no issuer provider is wired")
+	}
+	issuer, err := h.issuerProvider.Issuer(r.Context())
+	if err != nil {
+		return "", err
+	}
+	if issuer == "" {
+		return "", errors.New("issuer resolved empty")
+	}
+	return issuer, nil
+}

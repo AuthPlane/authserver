@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 56 lines · SDK: ts-sdk 0.3.0**
+**Auth-specific code: 6 lines · Total example: 62 lines · SDK: ts-sdk 0.4.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP
@@ -37,8 +37,8 @@ that needs to talk to the other resource.
 | | |
 |---|---|
 | **Time to run** | ~2 minutes (after tier 01 is already up) |
-| **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, Node.js 22+ (only if you run outside Docker), tier 01 running |
-| **SDK** | `@authplane/sdk` 0.3.0 (npm) |
+| **Prereqs** | Node.js 22+, `curl`, `jq`, tier 01 running |
+| **SDK** | `@authplane/sdk` 0.4.0 (npm) |
 | **Runtime** | Node.js 22 + `tsx`, plain `fetch` against the MCP streamable-http transport |
 
 ## Run it in 3 commands
@@ -49,13 +49,13 @@ make run
 make verify
 ```
 
-`make run` builds the agent's container image but does not start any
+`make run` installs the agent's dependencies but does not start any
 long-running service — the agent is a one-shot client. `make verify`
 waits for tier 01 to be up, registers an OAuth client + Mint resource
-against the tier-01 authserver, then runs the agent container once. The
+against the tier-01 authserver, then runs the agent once via `tsx`. The
 agent mints a token and calls the tier-01 `echo` tool. `make clean`
-tears down anything `docker compose` brought up and removes the `.env`
-file the run target created.
+removes the `.env` file the run target created; `make distclean` also
+removes `node_modules`.
 
 ## Step by step
 
@@ -76,7 +76,7 @@ describe what's happening so you can reproduce the flow by hand.
 > token to verify the flow works.
 
 1. **Bring up tier 01.** This example is a pure client — the authserver
-   and MCP server live in the tier-01 compose project.
+   and MCP server are the ones tier 01 starts.
 
    ```bash
    cd ../01-mcp-server-basic
@@ -107,7 +107,7 @@ describe what's happening so you can reproduce the flow by hand.
    [`docs/reference/cli.md#cli-admin-resource-create`](../../../docs/reference/cli.md#cli-admin-resource-create)):
 
    ```bash
-   docker compose -f ../01-mcp-server-basic/docker-compose.yml exec authserver \
+   docker exec authplane-tier01-as \
      /authserver admin resource create \
        --slug demo-mcp \
        --uri http://localhost:8080/mcp \
@@ -145,20 +145,18 @@ describe what's happening so you can reproduce the flow by hand.
    `client_credentials` token at `POST /oauth/token`, and the agent then
    POSTs an authenticated JSON-RPC `tools/call` to the MCP server.
 
-   The agent container joins tier-01's compose network so it can resolve
-   the service hostnames directly. The SDK enforces that the discovered
-   issuer matches the configured one, so use the same
-   `http://authserver:9000` value tier 01's AS was bootstrapped with —
-   not `http://localhost:9000`.
+   The agent runs natively on the host, so it reaches the AS and the
+   MCP server at their localhost ports. The SDK enforces that the
+   discovered issuer matches the configured one byte for byte, so use the
+   same `http://localhost:9000` value tier 01's AS announces.
 
    ```bash
-   docker compose run --rm \
-     -e AUTHPLANE_ISSUER=http://authserver:9000 \
-     -e AUTHPLANE_RESOURCE=http://localhost:8080/mcp \
-     -e AUTHPLANE_CLIENT_ID="$CLIENT_ID" \
-     -e AUTHPLANE_CLIENT_SECRET="$CLIENT_SECRET" \
-     -e MCP_URL=http://mcp-server:8080/mcp \
-     agent
+   AUTHPLANE_ISSUER=http://localhost:9000 \
+   AUTHPLANE_RESOURCE=http://localhost:8080/mcp \
+   AUTHPLANE_CLIENT_ID="$CLIENT_ID" \
+   AUTHPLANE_CLIENT_SECRET="$CLIENT_SECRET" \
+   MCP_URL=http://localhost:8080/mcp \
+   npx tsx agent.ts
    ```
 
    `AUTHPLANE_RESOURCE` stays at the public `http://localhost:8080/mcp`
@@ -236,14 +234,12 @@ upstream (GitHub) with `ConsentRequiredError` handling.
 
 ## Use a locally-built authserver image
 
-This example does not start its own authserver by default — tier 01 owns
-that. If you want to run tier 02 standalone (no tier 01 process), bring
-up the gated `authserver` service in this directory's `docker-compose.yml`
-with `docker compose --profile standalone up -d`. To build the AS from
-this checkout rather than pulling
-`authplane/authserver:latest`, follow the **LOCAL BUILD ESCAPE
-HATCH** comment block in
-[`../../_shared/docker-compose.authserver.yml`](../../_shared/docker-compose.authserver.yml).
-Mirror the change in this example's `docker-compose.yml` (the
-`authserver` service mirrors the same definition) — replace the `image:`
-line with the `build:` block shown in the shared file.
+This example does not start its own authserver — tier 01 owns that. To
+run tier 01 against an image built from this checkout rather than
+`authplane/authserver:latest`, build it at the repo root and pass the tag
+through `AUTHSERVER_IMAGE`:
+
+```bash
+( cd ../../.. && docker build -t authserver:dev -f build/Dockerfile . )
+( cd ../01-mcp-server-basic && AUTHSERVER_IMAGE=authserver:dev make run )
+```

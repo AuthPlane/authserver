@@ -38,7 +38,11 @@ type Deps struct {
 	// ASMetadata assembles the AS discovery document (RFC 8414). Required for
 	// the oauth-authorization-server / openid-configuration routes; built in
 	// cmd from the static providers (api/ may not import services/adapters).
-	ASMetadata        input.ASMetadataPort
+	ASMetadata input.ASMetadataPort
+	// PRMetadata assembles Protected Resource Metadata (RFC 9728) for the
+	// Resources registered with this AS. Optional: nil leaves the
+	// oauth-protected-resource routes unregistered.
+	PRMetadata        input.PRMetadataPort
 	DCR               oauth.DCRProvider
 	Auth              oauth.UserAuthProvider
 	Authorize         oauth.AuthorizeProvider
@@ -97,12 +101,15 @@ type Deps struct {
 	SessionCookie SessionCookie
 	RateLimitCfg  config.RateLimitConfig
 	Connect       connectionapi.ConnectProvider
-	// IssuerProvider resolves the AS issuer URL — the public base for
-	// everything under the host. The OAuth sub-package builds both
-	// consent_required URL flavors from it: the broker upstream re-connect
-	// URL (/connect/<provider>) and the AS-side re-consent URL
-	// (/authorize?resource=…, token-exchange and bound-B/bound-C flows).
-	// In the OSS deployment this is the static cfg.Server.Issuer.
+	// IssuerProvider resolves the AS issuer URL — the public base for everything
+	// under the host, and the value stamped into the RFC 9207 iss parameter on
+	// every authorization response.
+	//
+	// REQUIRED whenever Authorize or Consent is set — NewServer panics
+	// otherwise. It also feeds the consent_required consent_url flavors, which
+	// was its original and only purpose; RFC 9207 made it load-bearing for the
+	// authorize and consent endpoints, which refuse to emit an authorization
+	// response without it.
 	IssuerProvider output.IssuerProvider
 
 	// CORSConfigProvider resolves the CORS allowed-origins allowlist per
@@ -173,6 +180,19 @@ func NewServer(ctx context.Context, cfg config.ServerConfig, deps Deps, obs *obs
 	}
 	if deps.SessionConfigProvider == nil {
 		panic("public.NewServer: Deps.SessionConfigProvider (output.SessionConfigProvider) is required")
+	}
+	// Required whenever the authorize or consent routes are wired. Since RFC
+	// 9207 those endpoints stamp the issuer into every authorization response
+	// as the iss parameter, and they fail closed rather than emit a response
+	// without it — so a nil provider 500s every /oauth/authorize request. Better
+	// to refuse at construction than to serve a server that cannot authorize
+	// anyone.
+	//
+	// Conditional rather than unconditional because a server wired without
+	// those providers (the discovery-only and admin-only shapes, and most of
+	// this package's own tests) never reaches the code that needs an issuer.
+	if (deps.Authorize != nil || deps.Consent != nil) && deps.IssuerProvider == nil {
+		panic("public.NewServer: Deps.IssuerProvider (output.IssuerProvider) is required when Deps.Authorize or Deps.Consent is set")
 	}
 	cookieName := deps.SessionCookie.Name
 	if cookieName == "" {
@@ -262,6 +282,7 @@ func NewServer(ctx context.Context, cfg config.ServerConfig, deps Deps, obs *obs
 	wellknown.RegisterRoutes(mux, wellknown.Deps{
 		JWKS:       deps.JWKS,
 		ASMetadata: deps.ASMetadata,
+		PRMetadata: deps.PRMetadata,
 		Health:     deps.Health,
 	}, obs)
 
@@ -295,8 +316,9 @@ func NewServer(ctx context.Context, cfg config.ServerConfig, deps Deps, obs *obs
 
 	// Register consent routes.
 	oauth.RegisterConsentRoutes(mux, oauth.ConsentDeps{
-		Consent: deps.Consent,
-		URLs:    urls,
+		Consent:        deps.Consent,
+		URLs:           urls,
+		IssuerProvider: deps.IssuerProvider,
 	}, sessMW, obs)
 
 	// Register OIDC upstream federation routes.

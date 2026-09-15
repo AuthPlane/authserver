@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/authplane/authserver/e2e"
@@ -27,7 +28,7 @@ func TestE2E_CIMD_FullAuthFlow(t *testing.T) {
 	redirectURI := "http://localhost:9999/callback"
 	cimdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD E2E Client",
 			RedirectURIs: []string{redirectURI},
 		}
@@ -36,7 +37,7 @@ func TestE2E_CIMD_FullAuthFlow(t *testing.T) {
 	}))
 	defer cimdServer.Close()
 
-	clientID := cimdServer.URL // URL-based client_id
+	clientID := cimdServer.URL + "/client.json" // URL-based client_id
 
 	// Create MCP client with URL-based client_id.
 	client := e2e.NewMCPClient(t, h, rs, clientID, redirectURI)
@@ -71,7 +72,7 @@ func TestE2E_CIMD_FetchFailure(t *testing.T) {
 
 	httpClient := h.NewClient()
 	authURL := h.Issuer + "/oauth/authorize?" + url.Values{
-		"client_id":             {cimdServer.URL},
+		"client_id":             {cimdServer.URL + "/client.json"},
 		"redirect_uri":          {"http://localhost:9999/callback"},
 		"response_type":         {"code"},
 		"scope":                 {"tools/echo"},
@@ -100,7 +101,7 @@ func TestE2E_CIMD_WrongRedirectURI(t *testing.T) {
 
 	cimdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Redirect Test",
 			RedirectURIs: []string{"https://legit.example.com/callback"},
 		}
@@ -111,7 +112,7 @@ func TestE2E_CIMD_WrongRedirectURI(t *testing.T) {
 
 	httpClient := h.NewClient()
 	authURL := h.Issuer + "/oauth/authorize?" + url.Values{
-		"client_id":             {cimdServer.URL},
+		"client_id":             {cimdServer.URL + "/client.json"},
 		"redirect_uri":          {"https://evil.example.com/steal"}, // Not in CIMD document
 		"response_type":         {"code"},
 		"scope":                 {"tools/echo"},
@@ -145,7 +146,7 @@ func TestE2E_CIMD_SuspendedClient(t *testing.T) {
 	redirectURI := "http://localhost:9999/callback"
 	cimdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Suspend Test",
 			RedirectURIs: []string{redirectURI},
 		}
@@ -154,7 +155,7 @@ func TestE2E_CIMD_SuspendedClient(t *testing.T) {
 	}))
 	defer cimdServer.Close()
 
-	clientID := cimdServer.URL
+	clientID := cimdServer.URL + "/client.json"
 	client := e2e.NewMCPClient(t, h, rs, clientID, redirectURI)
 
 	// First flow — succeeds, client gets auto-registered.
@@ -197,5 +198,55 @@ func TestE2E_CIMD_SuspendedClient(t *testing.T) {
 		// Redirect to error page is acceptable.
 	} else if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 403 or 400 for suspended client, got %d", resp.StatusCode)
+	}
+}
+
+// TestE2E_CIMD_UnauthenticatedFetchAmplification pins the end-to-end shape of
+// the amplification the CIMD path used to allow.
+//
+// GET /oauth/authorize takes no session, and resolving a URL-shaped client_id
+// fetches that URL, so an unauthenticated request makes the server issue an
+// outbound HTTP request to a host the caller names. Nothing on the failure path
+// was cached, so every repeat produced another outbound request — measured at
+// the adapter before the fix: 50 inbound, 50 outbound.
+//
+// The client here carries no session cookie and no credentials of any kind:
+// that is the point.
+func TestE2E_CIMD_UnauthenticatedFetchAmplification(t *testing.T) {
+	scopes := []string{"tools/echo"}
+	h, _ := e2e.SetupE2E(t, e2e.HarnessConfig{}, scopes)
+
+	var outbound atomic.Int64
+	cimdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		outbound.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer cimdServer.Close()
+
+	httpClient := h.NewClient()
+	authURL := h.Issuer + "/oauth/authorize?" + url.Values{
+		"client_id":             {cimdServer.URL + "/client.json"},
+		"redirect_uri":          {"http://localhost:9999/callback"},
+		"response_type":         {"code"},
+		"scope":                 {"tools/echo"},
+		"state":                 {"test-state"},
+		"code_challenge":        {"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"},
+		"code_challenge_method": {"S256"},
+	}.Encode()
+
+	const inbound = 20
+	for i := 0; i < inbound; i++ {
+		resp, err := httpClient.Get(authURL)
+		if err != nil {
+			t.Fatalf("GET authorize %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("request %d: expected 400 for failed CIMD fetch, got %d", i, resp.StatusCode)
+		}
+	}
+
+	if got := outbound.Load(); got != 1 {
+		t.Errorf("%d unauthenticated authorize requests produced %d outbound CIMD fetches, want 1", inbound, got)
 	}
 }

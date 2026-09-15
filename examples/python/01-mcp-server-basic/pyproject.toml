@@ -15,8 +15,8 @@ dependencies = [
   "fastmcp>=3.2,<4",
   # Authplane SDK + FastMCP adapter (PyPI). Pinned to the exact version the
   # example was developed and verified against; bump together with the SDK.
-  "authplane-sdk==0.3.0",
-  "authplane-fastmcp==0.3.0",
+  "authplane-sdk==0.4.0",
+  "authplane-fastmcp==0.4.0",
 ]
 
 [tool.setuptools]

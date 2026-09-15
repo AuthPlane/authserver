@@ -413,11 +413,6 @@ func TestResourceRegistry_List_ReturnsResourceInfo(t *testing.T) {
 	if got.ScopeDescriptions["read"] != "Read access" || got.ScopeDescriptions["write"] != "Write access" {
 		t.Errorf("ScopeDescriptions = %v, want read/write descriptions populated", got.ScopeDescriptions)
 	}
-	// ClientID stays empty until a follow-up wires it to read
-	// Policy.Exchange.AllowedClientIDs.
-	if got.ClientID != "" {
-		t.Errorf("ClientID = %q, want \"\" (v4 has no may_act seam on Resource)", got.ClientID)
-	}
 }
 
 func TestResourceRegistry_List_BackendKindFilteredCorrectly(t *testing.T) {

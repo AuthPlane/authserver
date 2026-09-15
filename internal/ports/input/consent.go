@@ -33,6 +33,12 @@ type ConsentView struct {
 	ResourceDisplayName string
 	ResourceSlug        string
 	Scopes              []ScopeInfo
+	// RedirectURI is where an approval will send the authorization code. The
+	// consent screen must show its host: it is the only element of the request
+	// the server has verified, and the specification makes displaying it a MUST
+	// precisely because a Client ID Metadata Document cannot stop a local
+	// process claiming someone else's client name.
+	RedirectURI string
 }
 
 // ScopeInfo describes a single scope for the consent screen.

@@ -18,22 +18,31 @@
  */
 
 // === transport / HTTP client boilerplate =====================================
-const MCP_URL = process.env.MCP_URL ?? "http://mcp-server:8080/mcp";
+const MCP_URL = process.env.MCP_URL ?? "http://localhost:8080/mcp";
 const ECHO_TEXT = process.env.ECHO_TEXT ?? "hello from tier 02";
 
-async function mcpCall(accessToken: string, method: string, params: unknown, id: number): Promise<unknown> {
+// Streamable HTTP needs the 3-step handshake before a tool call is legal:
+// `initialize` (the response carries `Mcp-Session-Id`), the one-way
+// `notifications/initialized`, then `tools/call` — every request after the
+// first carrying the session id. See docs/reference/mcp-streamable-http.md.
+let sessionId: string | undefined;
+
+async function mcpCall(accessToken: string, method: string, params: unknown, id?: number): Promise<unknown> {
   const res = await fetch(MCP_URL, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${accessToken}`,
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
+      ...(sessionId ? { "Mcp-Session-Id": sessionId } : {}),
     },
-    body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+    body: JSON.stringify(id === undefined ? { jsonrpc: "2.0", method, params } : { jsonrpc: "2.0", id, method, params }),
   });
   if (!res.ok) {
     throw new Error(`MCP ${method} returned HTTP ${res.status}: ${await res.text()}`);
   }
+  sessionId = res.headers.get("mcp-session-id") ?? sessionId;
+  if (id === undefined) return undefined; // notification: no response body
   // The streamable-http transport may reply as SSE; pull the first `data:` line.
   const body = await res.text();
   const dataLine = body.split("\n").find((l) => l.startsWith("data: "));
@@ -47,6 +56,7 @@ import { AuthplaneClient } from "@authplane/sdk/core";
 const ap = await AuthplaneClient.create({
   issuer: process.env.AUTHPLANE_ISSUER!,
   auth: { clientId: process.env.AUTHPLANE_CLIENT_ID!, clientSecret: process.env.AUTHPLANE_CLIENT_SECRET! },
+  devMode: true, // local http:// issuer only — production issuers must be https:// with this unset
 });
 const token = await ap.clientCredentials(["mcp:echo"], [process.env.AUTHPLANE_RESOURCE!]);
 // authplane:end
@@ -58,6 +68,7 @@ const initResult = await mcpCall(token.accessToken, "initialize", {
   clientInfo: { name: "tier-02-agent", version: "1.0" },
 }, 1);
 console.log(`[agent] initialize OK: ${JSON.stringify(initResult)}`);
+await mcpCall(token.accessToken, "notifications/initialized", {});
 
 const echoResult = await mcpCall(token.accessToken, "tools/call", {
   name: "echo",

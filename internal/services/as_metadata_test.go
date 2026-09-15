@@ -105,6 +105,12 @@ func TestASMetadataService_FullAssembly(t *testing.T) {
 	if !md.AgentIdentitySupported {
 		t.Error("agent identity should be advertised")
 	}
+	if !md.AuthorizationResponseIssParameterSupported {
+		t.Error("authorization_response_iss_parameter_supported must be true (RFC 9207 §2.3)")
+	}
+	if !slices.Equal(md.AuthorizationGrantProfilesSupported, []string{"urn:ietf:params:oauth:grant-profile:id-jag"}) {
+		t.Errorf("authorization_grant_profiles_supported = %v, want the ID-JAG profile URN", md.AuthorizationGrantProfilesSupported)
+	}
 	if !md.IdentityAssertionSupported {
 		t.Error("identity_assertion should be true when jwt-bearer is enabled")
 	}
@@ -147,6 +153,15 @@ func TestASMetadataService_AllDisabled(t *testing.T) {
 	}
 	if md.AgentIdentitySupported {
 		t.Error("agent identity should not be advertised")
+	}
+	// Not a capability toggle: the authorization endpoint always stamps iss, so
+	// this stays true even with every optional capability off. Advertising false
+	// while emitting iss would violate RFC 9207 §2.3.
+	if !md.AuthorizationResponseIssParameterSupported {
+		t.Error("authorization_response_iss_parameter_supported must be true even with all capabilities disabled")
+	}
+	if md.AuthorizationGrantProfilesSupported != nil {
+		t.Errorf("authorization_grant_profiles_supported should be nil without jwt-bearer, got %v", md.AuthorizationGrantProfilesSupported)
 	}
 	if md.IdentityAssertionSupported {
 		t.Error("identity_assertion should be false without jwt-bearer")

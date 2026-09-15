@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -220,6 +221,22 @@ func (s *TokenService) exchangeCode(ctx context.Context, req input.ExchangeCodeR
 		span.RecordError(domain.ErrInvalidPKCE)
 		span.SetStatus(codes.Error, "PKCE verification failed")
 		return nil, domain.ErrInvalidPKCE
+	}
+
+	// 6.4. RFC 8707 §2.2: a resource named in the token request must be one
+	// this grant covers. After PKCE for the same reason step 6.5 is: the
+	// refusal is observable, and whether a given resource is registered — and
+	// whether it is the one this code was authorized for — must not be
+	// readable by a caller who has not proved it holds the code. A public
+	// client presents no secret, so PKCE is that proof.
+	//
+	// Placing it earlier costs nothing to move: the code is consumed at step 1
+	// either way, so a late refusal does not spend anything a caller would
+	// otherwise keep.
+	if resErr := s.validateRequestedResource(ctx, req.Resource, sess.Resource); resErr != nil {
+		span.RecordError(resErr)
+		span.SetStatus(codes.Error, "requested resource not authorized by this grant")
+		return nil, resErr
 	}
 
 	// 6.5. Check the subject is still active, matching RefreshToken. After
@@ -469,6 +486,15 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 		return nil, authErr
 	}
 
+	// RFC 8707 §2.2, same rule as the authorization-code path. Placed before
+	// the consume below so a refused resource does not also spend the refresh
+	// token.
+	if resErr := s.validateRequestedResource(ctx, req.Resource, family.Resource); resErr != nil {
+		span.RecordError(resErr)
+		span.SetStatus(codes.Error, "requested resource not authorized by this family")
+		return nil, resErr
+	}
+
 	// Resolve the token lifetimes before the refresh token is consumed below:
 	// a config-resolution error must not burn the old refresh token
 	// (ConsumeRefreshToken is irreversible). Mirrors ExchangeCode.
@@ -673,6 +699,71 @@ type mintParams struct {
 	Scope    string
 	Resource string
 	DPoPJKT  string // JWK thumbprint for DPoP binding (RFC 9449); empty = standard Bearer
+}
+
+// validateRequestedResource enforces RFC 8707 §2.2 at the token endpoint: a
+// resource named in the token request must be one the authorization grant
+// already covers.
+//
+// Silently ignoring it — which is what happened before this existed — hands the
+// client a token audienced somewhere else and no error. The client only learns
+// at the resource server, as a 401 with nothing in it pointing back at the
+// resource parameter it sent.
+//
+// The comparison is on resource identity, not on the string the client happened
+// to send. Both sides go through the registry first, because the authorize step
+// stores the resolved identifier: a client that echoes back its own original
+// spelling (a trailing slash, say, which resolution drops) is asking for the
+// same resource and must not be refused for it.
+//
+// An empty requested value means the client omitted the parameter, which RFC
+// 8707 permits; the grant's own resource still applies.
+func (s *TokenService) validateRequestedResource(ctx context.Context, requested, authorized string) error {
+	if requested == "" || requested == authorized {
+		return nil
+	}
+
+	// MCP-CORE-031 asks implementations to accept a resource whose scheme or
+	// host differs only in case, so the comparison folds those two components
+	// and nothing else. Path, query and fragment stay byte-exact: a trailing
+	// slash is a different path, and the compliance statement says so.
+	if resourceIdentityEqual(requested, authorized) {
+		return nil
+	}
+
+	if s.resourceRegistry != nil {
+		requestedRes, err := s.resourceRegistry.Resolve(ctx, requested)
+		if err != nil || requestedRes == nil {
+			return fmt.Errorf("%w: resource %q is not a registered resource", domain.ErrInvalidTarget, requested)
+		}
+		if authorized != "" {
+			if authorizedRes, aErr := s.resourceRegistry.Resolve(ctx, authorized); aErr == nil &&
+				authorizedRes != nil && authorizedRes.ID == requestedRes.ID {
+				return nil
+			}
+		}
+	}
+
+	return fmt.Errorf("%w: resource %q was not authorized by this grant", domain.ErrInvalidTarget, requested)
+}
+
+// resourceIdentityEqual reports whether two resource identifiers name the same
+// resource once case is folded in the two components where RFC 3986 §6.2.2.1
+// makes case insignificant — the scheme and the host. Everything else is
+// compared byte for byte.
+//
+// It exists so that MCP-CORE-031 ("SHOULD accept uppercase scheme and host for
+// interoperability") does not turn into a refusal, without also swallowing a
+// path difference that names a genuinely different resource.
+func resourceIdentityEqual(a, b string) bool {
+	au, aErr := url.Parse(a)
+	bu, bErr := url.Parse(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	au.Scheme, bu.Scheme = strings.ToLower(au.Scheme), strings.ToLower(bu.Scheme)
+	au.Host, bu.Host = strings.ToLower(au.Host), strings.ToLower(bu.Host)
+	return au.String() == bu.String()
 }
 
 // buildMintRequest constructs the IssueRequest fed to MintIssuer.Issue.

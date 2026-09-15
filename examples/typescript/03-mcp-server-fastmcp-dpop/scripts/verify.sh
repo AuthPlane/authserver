@@ -149,7 +149,7 @@ log "running agent (acquires DPoP-bound token + calls echo and add_numbers)"
 agent_log=$(mktemp)
 trap 'rm -f "$agent_log"' EXIT
 
-if ! docker compose run --rm \
+if ! docker compose --progress quiet run --build --rm \
   -e AUTHPLANE_ISSUER="${agent_issuer}" \
   -e AUTHPLANE_RESOURCE="${agent_resource}" \
   -e AUTHPLANE_CLIENT_ID="${CLIENT_ID}" \

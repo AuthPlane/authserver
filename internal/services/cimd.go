@@ -133,13 +133,17 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 		return nil, domain.ErrRegistrationDisabled
 	}
 
-	start := time.Now()
+	// The fetch duration is recorded by the fetcher, around the outbound round
+	// trip itself, so the histogram measures what a slow target costs. Timing
+	// the call from here would fold in cache hits, suppressed re-fetches and
+	// waits on another caller's in-flight fetch as near-zero samples — which
+	// would make the metric look best exactly when fetches are being driven.
 	doc, err := s.cimd.Fetch(ctx, clientID, output.CIMDFetchConfig{
-		RequireHTTPS: cfg.RequireHTTPS,
-		CacheTTL:     cfg.CacheTTL,
-		FetchTimeout: cfg.FetchTimeout,
+		RequireHTTPS:          cfg.RequireHTTPS,
+		AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+		CacheTTL:              cfg.CacheTTL,
+		FetchTimeout:          cfg.FetchTimeout,
 	})
-	s.metrics.CIMDFetchDuration.Record(ctx, time.Since(start).Seconds())
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

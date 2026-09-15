@@ -89,7 +89,17 @@ type ASMetadata struct {
 	RevocationEndpoint    string   `json:"revocation_endpoint"`
 	JWKSURI               string   `json:"jwks_uri"`
 	ScopesSupported       []string `json:"scopes_supported"`
-	GrantTypesSupported   []string `json:"grant_types_supported"`
+
+	// AuthorizationResponseIssParameterSupported is RFC 9207 Section 2.3. A
+	// client that reads true here must reject an authorization response with no
+	// iss, so the advertisement and the redirect have to agree.
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported"`
+
+	GrantTypesSupported []string `json:"grant_types_supported"`
+
+	// AuthorizationGrantProfilesSupported is how the stable MCP
+	// Enterprise-Managed Authorization extension advertises the ID-JAG flow.
+	AuthorizationGrantProfilesSupported []string `json:"authorization_grant_profiles_supported"`
 }
 
 // GeneratePKCE generates a PKCE verifier and S256 challenge.

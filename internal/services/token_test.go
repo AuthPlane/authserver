@@ -1479,7 +1479,6 @@ func TestToken_ExchangeCode_JWTHasNbfClaim(t *testing.T) {
 }
 
 // newTokenTestSetupWithResources creates a token test setup with resource configuration.
-// Used for testing may_act claim population (RFC 8693 §5).
 func newTokenTestSetupWithResources(t *testing.T, resources []services.ResourceInfo) *tokenTestSetup {
 	t.Helper()
 	stores := testdata.SetupTestStores(t)
@@ -1530,9 +1529,9 @@ func newTokenTestSetupWithResources(t *testing.T, resources []services.ResourceI
 	}
 }
 
-// ( retired may_act emission; Resource.Policy.Exchange.AllowedClientIDs
-// replaces the single-actor mode. TestExchangeCode_*MayAct* tests were deleted
-// in the review-pass refinements.)
+// Inc 71 retired may_act emission and the TestExchangeCode_*MayAct* tests went
+// with it. Exchange authorization is Resource.Policy.Exchange.AllowedClientIDs
+// and Policy.Runtime.ClientIDs; the claim itself is no longer issued or read.
 
 // ============================================================================
 // Refresh-token ordering adversarial tests (ADV6) — 2026-05-18 audit MEDIUM.
@@ -2221,5 +2220,170 @@ func TestToken_RefreshToken_UserNotFound_IsInvalidGrant(t *testing.T) {
 	}
 	if resp != nil {
 		t.Fatalf("resp = %+v, want nil", resp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8707 §2.2 — a resource named at the token endpoint must be one the grant
+// covers. Before this was enforced the parameter was read from the form and
+// then dropped: the audience came from the session, so a client that asked for
+// a different resource got a token for the one it had authorized and no error.
+// It found out at the resource server, as a 401 naming nothing.
+// ---------------------------------------------------------------------------
+
+// The session these helpers build carries Resource "https://mcp.example.com".
+const testSessionResource = "https://mcp.example.com"
+
+func TestToken_ExchangeCode_ResourceOmitted_Succeeds(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	// Omitting the parameter is permitted; the grant's own resource applies.
+	if _, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	}); err != nil {
+		t.Fatalf("exchange without a resource parameter: %v", err)
+	}
+}
+
+func TestToken_ExchangeCode_ResourceMatchesGrant_Succeeds(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	if _, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+		Resource:     testSessionResource,
+	}); err != nil {
+		t.Fatalf("exchange naming the authorized resource: %v", err)
+	}
+}
+
+// MCP-CORE-031 asks implementations to accept a scheme and host that differ
+// only in case. Refusing that would turn an interoperability SHOULD into a
+// hard failure for a client that upper-cased its own hostname.
+func TestToken_ExchangeCode_ResourceCaseVariation_Succeeds(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	if _, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+		Resource:     "HTTPS://MCP.EXAMPLE.COM",
+	}); err != nil {
+		t.Fatalf("exchange naming the authorized resource in a different case: %v", err)
+	}
+}
+
+// The path is compared byte for byte, so a trailing slash is a different
+// resource. docs/reference/compliance.md says exactly that — "trailing slashes
+// matter" — and until this gate existed the claim was not true of the wire.
+func TestToken_ExchangeCode_ResourceTrailingSlash_Refused(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	_, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+		Resource:     testSessionResource + "/",
+	})
+	if !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("err = %v, want ErrInvalidTarget", err)
+	}
+}
+
+func TestToken_ExchangeCode_UnauthorizedResource_Refused(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	_, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+		Resource:     "https://not-registered.example/mcp",
+	})
+	if !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("err = %v, want ErrInvalidTarget", err)
+	}
+}
+
+// The refresh path checks before the consume, so a refused resource costs the
+// client the request but not its refresh token. Asserted by refreshing again
+// with the same token and expecting it to still work.
+func TestRefresh_UnauthorizedResource_RefusedWithoutConsumingToken(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+
+	_, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		Resource:     "https://not-registered.example/mcp",
+	})
+	if !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("err = %v, want ErrInvalidTarget", err)
+	}
+
+	if _, retryErr := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	}); retryErr != nil {
+		t.Fatalf("the refused request consumed the refresh token: %v", retryErr)
+	}
+}
+
+// The resource check must sit behind PKCE, for the same reason the
+// subject-active check does: its refusal is observable, so a caller who has not
+// proved it holds the code must not be able to read which resources exist or
+// which one this grant was authorized for. A wrong verifier has to fail as a
+// PKCE error, never as invalid_target — otherwise the two responses form a
+// resource-enumeration oracle usable by anyone holding a code but no secret.
+func TestToken_ExchangeCode_BadResourceIsNotAnOracleWithoutPKCE(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, _ := setup.createSessionWithCode(t, true)
+
+	_, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: "wrong-verifier",
+		Resource:     "https://not-registered.example/mcp",
+	})
+	if errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatal("a caller with a wrong PKCE verifier learned the resource was unauthorized; " +
+			"the resource check must run behind PKCE")
+	}
+	if !errors.Is(err, domain.ErrInvalidPKCE) {
+		t.Fatalf("err = %v, want ErrInvalidPKCE", err)
+	}
+}
+
+// Same rule for a caller presenting someone else's client_id: the client_id
+// mismatch must be what refuses it, not the resource.
+func TestToken_ExchangeCode_BadResourceIsNotAnOracleForAnotherClient(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	_, _, code, verifier := setup.createSessionWithCode(t, true)
+
+	_, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     "some-other-client",
+		CodeVerifier: verifier,
+		Resource:     "https://not-registered.example/mcp",
+	})
+	if errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatal("a caller using another client's id learned the resource was unauthorized")
+	}
+	if !errors.Is(err, domain.ErrInvalidClient) {
+		t.Fatalf("err = %v, want ErrInvalidClient", err)
 	}
 }

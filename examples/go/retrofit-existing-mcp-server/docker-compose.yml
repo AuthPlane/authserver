@@ -8,7 +8,7 @@
 # relative to the included file).
 services:
   authserver:
-    image: authplane/authserver:latest
+    image: ${AUTHSERVER_IMAGE:-authplane/authserver:latest}
     env_file:
       - .env
     ports:

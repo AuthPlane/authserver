@@ -52,9 +52,14 @@ type AgentsConfig struct {
 
 // OAuthConfig controls OAuth authorization server behavior.
 type OAuthConfig struct {
-	// RequireScope rejects authorize requests missing the scope parameter
-	// with invalid_scope (RFC 6749 §3.3 compliant). When false, missing scope
-	// defaults to all registered scopes for the resource (ADR-012).
+	// RequireScope rejects authorize requests missing the scope parameter with
+	// invalid_scope. When false, missing scope is processed using a pre-defined
+	// default value: all scopes registered for the resource.
+	//
+	// RFC 6749 §3.3 requires the server to do one or the other — "either
+	// process the request using a pre-defined default value or fail the request
+	// indicating an invalid scope" — so both settings are conformant and this
+	// flag picks between them. Defaults to true.
 	RequireScope bool `yaml:"require_scope"`
 
 	// StateMaxAge bounds the OIDC state cookie's lifetime: both the cookie's
@@ -160,10 +165,16 @@ type DCRConfig struct {
 
 // CIMDConfig controls Client ID Metadata Document handling.
 type CIMDConfig struct {
-	Enabled      bool          `yaml:"enabled"`
-	RequireHTTPS bool          `yaml:"require_https"`
-	CacheTTL     time.Duration `yaml:"cache_ttl"`
-	FetchTimeout time.Duration `yaml:"fetch_timeout"`
+	Enabled      bool `yaml:"enabled"`
+	RequireHTTPS bool `yaml:"require_https"`
+	// AllowPrivateAddresses turns off SSRF address filtering for CIMD document
+	// fetches, at both the URL check and the dial. Local development only: with
+	// it set, a document URL may resolve to loopback, RFC 1918 space or the
+	// cloud metadata endpoint. Validate refuses it unless server.issuer is
+	// localhost, so it cannot be left on in a deployment.
+	AllowPrivateAddresses bool          `yaml:"allow_private_addresses"`
+	CacheTTL              time.Duration `yaml:"cache_ttl"`
+	FetchTimeout          time.Duration `yaml:"fetch_timeout"`
 }
 
 // SessionConfig controls user session cookies.
@@ -373,7 +384,7 @@ type ClientCredentialsConfig struct {
 
 // DPoPConfig controls DPoP proof-of-possession (RFC 9449).
 type DPoPConfig struct {
-	Enabled       bool          `yaml:"enabled"`        // enable DPoP support (default: false)
+	Enabled       bool          `yaml:"enabled"`        // enable DPoP support (default: true; support only — a client that sends no proof still receives a bearer token)
 	NonceTTL      time.Duration `yaml:"nonce_ttl"`      // TTL for server-issued nonces (default: 60s)
 	ProofLifetime time.Duration `yaml:"proof_lifetime"` // max |now - iat| for proof freshness (default: 60s)
 	RequireNonce  bool          `yaml:"require_nonce"`  // when true, all DPoP proofs must include server nonce (default: false)

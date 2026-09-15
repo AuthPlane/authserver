@@ -105,7 +105,7 @@ spec:
         fsGroup: 65534
       containers:
         - name: authserver
-          image: authplane/authserver:latest   # pin to a released tag (e.g. :0.1.2) in production
+          image: authplane/authserver:latest   # pin to a released tag (e.g. :0.2.0) in production
           args: ["serve", "--config", "/config/config.yaml"]
           ports:
             - { name: http,  containerPort: 9000 }

@@ -18,7 +18,9 @@ authserver implements the following standards. Each section lists the RFC, the r
 - Client authentication: `none`, `client_secret_basic`, `client_secret_post`
 - Error responses per §5.2
 
-**Intentional deviation** (ADR-012): When `oauth.require_scope: false`, missing scope in authorize requests defaults to all registered scopes for the resource instead of rejecting. This deviates from §3.3 which states the AS "MUST NOT assume a default scope." The deviation is opt-in and disabled by default.
+**Scope requirements and default value** (§3.3 asks servers to document both): when an authorize request omits `scope`, the behavior is configurable. With `oauth.require_scope: true` — the shipped default — the request is rejected with `invalid_scope`. With `oauth.require_scope: false`, the request is processed using a pre-defined default value: all scopes registered for the target resource.
+
+Both are conformant. §3.3 requires the authorization server to "either process the request using a pre-defined default value or fail the request indicating an invalid scope", so the two settings select between the two permitted behaviors rather than opting into a deviation.
 
 **Not implemented**: Implicit grant (§4.2), Resource Owner Password Credentials (§4.3). Only Authorization Code and Client Credentials are supported per OAuth 2.1 security requirements.
 
@@ -26,13 +28,17 @@ authserver implements the following standards. Each section lists the RFC, the r
 
 **Implemented**: Machine-to-machine token issuance via `grant_type=client_credentials`. Requires `client_secret_post` or `client_secret_basic` authentication. Supports scope validation and resource audience binding.
 
-**Configuration**: `client_credentials.enabled: true` to activate. Disabled by default. Only confidential clients with `client_credentials` in their `grant_types` are authorized.
+**Configuration**: `client_credentials.enabled` — `true` by default as of v0.2.0; set `false` to turn the grant off. Only confidential clients with `client_credentials` in their `grant_types` are authorized.
 
 **Token format**: RFC 9068 JWT access tokens with `typ: at+jwt`, `sub` set to `client_id` (no user context), `aud` bound to resource URI when resource indicators are configured.
 
 **Introspection + Revocation**: Machine tokens support RFC 7662 introspection and RFC 7009 revocation via the same endpoints as user tokens.
 
 **No deviations.**
+
+### RFC 9207 — OAuth 2.0 Authorization Server Issuer Identification
+
+**Implemented**: every authorization response — success and error alike — carries `iss` set to the AS issuer identifier (§2). AS metadata emits `authorization_response_iss_parameter_supported: true` explicitly rather than omitting it, so a client applying §2.4's strict policy can reject a response that arrives without `iss`. The MCP 2026-07-28 specification lists this as SHOULD, announced to become MUST.
 
 ### RFC 7636 — PKCE
 
@@ -62,25 +68,35 @@ authserver implements the following standards. Each section lists the RFC, the r
 
 **Implemented**: Full AS metadata at `/.well-known/oauth-authorization-server`.
 
-**Fields returned**: `issuer`, `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `introspection_endpoint` (conditional), `jwks_uri`, `response_types_supported`, `grant_types_supported`, `token_endpoint_auth_methods_supported`, `code_challenge_methods_supported`, `scopes_supported`, `resource_indicators_supported`.
+**Fields returned**: `issuer`, `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `introspection_endpoint` (conditional), `jwks_uri`, `response_types_supported`, `grant_types_supported`, `token_endpoint_auth_methods_supported`, `code_challenge_methods_supported`, `scopes_supported`, `resource_indicators_supported`, `client_id_metadata_document_supported`, `authorization_response_iss_parameter_supported` (always emitted, never omitted — see RFC 9207 below), `dpop_signing_alg_values_supported`, `authorization_grant_profiles_supported` (see Enterprise-Managed Authorization below). The same document is aliased at `/.well-known/openid-configuration`.
 
 ### RFC 9728 — OAuth 2.0 Protected Resource Metadata
 
-**Implemented by the Authplane SDK on the resource server, not by authserver itself.** PRM is the resource server's contract — it tells a calling client "this resource is protected by AS at *X*" — so the document is served by the MCP server's process, not by the AS. The Go / Python / TypeScript adapters in [`go-sdk`](https://github.com/authplane/go-sdk), [`python-sdk`](https://github.com/authplane/python-sdk), and [`ts-sdk`](https://github.com/authplane/ts-sdk) each register a handler at `/.well-known/oauth-protected-resource/<mcp-path>` (RFC 9728 path-scoped form) returning the resource URI, the list of authorization servers, and the supported scopes.
+**Implemented on both sides.** PRM is the resource server's contract — it tells a calling client "this resource is protected by AS at *X*" — so the Authplane SDK adapters in [`go-sdk`](https://github.com/authplane/go-sdk), [`python-sdk`](https://github.com/authplane/python-sdk), and [`ts-sdk`](https://github.com/authplane/ts-sdk) each serve it from the MCP server's own process at `/.well-known/oauth-protected-resource/<mcp-path>` (§3.1 path-insertion form).
 
-The AS itself does **not** serve PRM (it is not a protected resource); the AS's discovery surface is RFC 8414 (`/.well-known/oauth-authorization-server`) only. See [`docs/reference/mcp-streamable-http.md`](./mcp-streamable-http.md) for the wire-level flow showing how a 401 from the resource points the client at its PRM, which in turn points at the AS.
+As of v0.2.0 the AS also serves the document for every registered Resource, so a resource server that cannot host well-known paths itself — a hosted function, a proxy-fronted service, a server on a different origin from its identifier — still has a conformant PRM a client can discover. Two shapes: `GET /.well-known/oauth-protected-resource` for a Resource whose identifier is the AS origin, and `GET /.well-known/oauth-protected-resource/{ref}` where `ref` is either the §3.1 path suffix of the Resource URI or the Resource's slug. The document carries `resource` (the registered URI, byte for byte — a Resource registered without a URI is answered 404 rather than with an empty `resource`, which §2 makes REQUIRED), `authorization_servers`, and `scopes_supported`. Multi-segment paths are supported.
+
+Reaching the AS-hosted form requires the resource server's 401 to carry `WWW-Authenticate: Bearer resource_metadata="<that URL>"` (§5.1). The SDK adapters emit the challenge for the document they serve themselves; pointing it at the AS-hosted copy is a configuration choice on the resource side. See [`docs/reference/mcp-streamable-http.md`](./mcp-streamable-http.md) for the wire-level flow.
 
 ## Client Registration
 
 ### RFC 7591 — Dynamic Client Registration
 
-**Implemented**: Three modes (`open`, `approved_redirects`, `admin_only`). Supports `redirect_uris`, `client_name`, `token_endpoint_auth_method`.
+**Implemented**: Three modes (`open`, `approved_redirects`, `admin_only`). Supports `redirect_uris`, `client_name`, `token_endpoint_auth_method`, and `application_type` (`web` or `native`, per OIDC Registration §2; the MCP specification requires clients to send it, and a client that omits it is defaulted to `web` and told so in the response — under OIDC that default refuses the loopback redirect URIs native clients need).
+
+The MCP 2026-07-28 specification deprecates DCR in favour of CIMD for clients with no prior relationship to the AS. DCR remains supported; `dcr.mode: open` is still the default so that clients which have not adopted CIMD keep working, and the server logs a warning at boot while it is open. Deployments whose clients use CIMD or are pre-provisioned should set `admin_only` or `approved_redirects`.
 
 ### draft-ietf-oauth-client-id-metadata-document
 
-**Implemented**: CIMD fetch, validation, and caching. When `client_id` is a URL, authserver fetches the metadata document, validates fields, and uses it for registration.
+**Implemented**: CIMD fetch, validation, and caching, enabled by default and advertised as `client_id_metadata_document_supported: true`. When `client_id` is a URL, authserver fetches the metadata document, validates it, and uses it for registration.
 
-**Configuration**: `cimd.require_https: true` (default) requires HTTPS URLs for CIMD documents in production.
+**Identifier rules** (draft §3, MCP client-registration §CIMD): the `client_id` URL must use `https` and must carry a path component — an origin-only identifier such as `https://example.com` is refused with `invalid_client`, because it would collapse every client hosted on that origin into one identity and one consent record. A dot-segment or an empty segment does not count as a path.
+
+**Document validation**: `client_id` in the document must equal the fetch URL exactly; `client_name` and `redirect_uris` are required; the response must be JSON, at most 1 MB, served without following redirects, over an SSRF-filtered transport.
+
+**Caching**: documents are cached according to their own `Cache-Control` / `Expires` headers, bounded above by `cimd.cache_ttl` and below by a short floor; `no-store` is honoured. The cache is bounded in entries. Failed fetches are negatively cached and concurrent fetches of one document are collapsed, so an unauthenticated `/oauth/authorize` cannot drive outbound traffic at will.
+
+**Configuration**: `cimd.require_https` (default `true`) governs the document URL's scheme and nothing else; `cimd.allow_private_addresses` (default `false`) governs whether the fetch may reach loopback, RFC 1918 or link-local addresses. Both are local-development escape hatches: the server refuses to boot with either relaxed unless `server.issuer` is localhost.
 
 ## Resource Indicators
 
@@ -88,7 +104,9 @@ The AS itself does **not** serve PRM (it is not a protected resource); the AS's 
 
 **Implemented**: The `resource` parameter in authorize requests binds tokens to a specific resource server. Access tokens include the resource as the `aud` claim.
 
-**Strict matching**: Resource URIs use exact string matching. Trailing slashes matter.
+**At the token endpoint**: `resource` is optional, and when present it must name the resource the grant already covers. Anything else is refused with `invalid_target` (§2.2) rather than ignored — a request that named one audience and received a token for another would only fail later, at the resource server, with nothing pointing back at the parameter that caused it.
+
+**Strict matching**: Resource URIs use exact string matching. Trailing slashes matter. The one exception is case in the scheme and host, which is folded when comparing, because [MCP client compatibility](mcp-client-compatibility.md) asks servers to accept that variation.
 
 ## Token Lifecycle
 
@@ -136,7 +154,7 @@ Refresh tokens rotate on every use (new token issued, old consumed). Reuse of a 
 - Introspection returns `cnf.jkt` for DPoP-bound tokens
 - AS metadata: `dpop_signing_alg_values_supported`
 
-**Configuration**: `dpop.enabled: true` to activate. Disabled by default.
+**Configuration**: `dpop.enabled` — `true` by default as of v0.2.0. Enabled means *supported*, not required: a client that presents no proof still receives a bearer token, and `dpop.require_nonce` stays `false`. Set `false` to stop advertising and accepting DPoP.
 
 **No deviations.**
 
@@ -155,11 +173,11 @@ Refresh tokens rotate on every use (new token issued, old consumed). Reuse of a 
 - Multi-hop delegation: correct chain nesting
 - Scope narrowing: requested scope must be subset of subject token scope
 - Configurable chain depth limit (1-10, default 5)
-- Policy enforcement: self-exchange, `may_act` claim, config allowlist
+- Policy enforcement: self-exchange, per-resource `policy.exchange.allowed_client_ids` and `policy.runtime.client_ids`
 - DPoP binding propagation on exchanged tokens
 - AS metadata: `grant_types_supported` includes token exchange URN
 
-**Configuration**: `token_exchange.enabled: true` to activate. Disabled by default.
+**Configuration**: `token_exchange.enabled` — `true` by default as of v0.2.0; set `false` to turn the grant off. A cross-client exchange against a Mint resource — the acting client presenting a token minted for a different client — additionally requires the acting `client_id` to be named on the target Resource, in `policy.exchange.allowed_client_ids` or `policy.runtime.client_ids`; otherwise it is denied with `access_denied`. An exchange by the token's own client is unaffected.
 
 **No deviations.**
 
@@ -180,9 +198,9 @@ Refresh tokens rotate on every use (new token issued, old consumed). Reuse of a 
 - Resource binding: `resource` parameter flows to token `aud` claim
 - DPoP binding: XAA tokens support `cnf.jkt` proof-of-possession
 - Machine token storage: XAA tokens tracked in machine token store for revocation/introspection
-- AS metadata: `grant_types_supported` includes jwt-bearer URN when enabled
+- AS metadata: `grant_types_supported` includes the jwt-bearer URN, and `authorization_grant_profiles_supported` lists `urn:ietf:params:oauth:grant-profile:id-jag` — the field the stable MCP Enterprise-Managed Authorization extension tells clients to check. The pre-standard `identity_assertion_supported: true` is still emitted for one release and is deprecated: no conformant client reads it, and it is scheduled for removal in v0.3.0.
 
-**Configuration**: `xaa.enabled: true` to activate. Disabled by default.
+**Configuration**: `xaa.enabled` — `true` by default as of v0.2.0. The grant validates nothing until an operator registers a trusted IdP, because the registry starts empty; set `false` to stop advertising it.
 
 **No deviations from RFC 7523 §2.1 (JWT assertion profile).**
 
@@ -199,10 +217,25 @@ Refresh tokens rotate on every use (new token issued, old consumed). Reuse of a 
 
 ## MCP-Specific
 
-### MCP Authorization Specification (2025-11-25)
+### MCP Authorization Specification (2026-07-28)
 
-**Implemented**: Full discovery flow (PRM → AS Metadata → DCR → Authorize → Token), CIMD support, resource indicators. The MCP Authorization spec targets OAuth 2.1 (see the note at the top of this page on OAuth 2.1's IETF-draft status).
+**Implemented**: the full authorization-server side of the 2026-07-28 revision, and the stable Enterprise-Managed Authorization extension.
 
-**Tested against**: Claude Code, Claude Desktop, MCP Inspector.
+| Requirement | Level | Where |
+|---|---|---|
+| Protected Resource Metadata (RFC 9728), served by the resource server and, as of v0.2.0, by the AS for any registered Resource | MUST | RFC 9728 above |
+| AS metadata discovery (RFC 8414), aliased at `/.well-known/openid-configuration` | MUST | RFC 8414 above |
+| Client ID Metadata Documents, enabled by default, `https` + path component required, documents cached per their own headers | MUST | CIMD above |
+| Dynamic Client Registration with `application_type` | Deprecated by the spec, retained | RFC 7591 above |
+| Authorization code + PKCE (S256), `resource` indicator (RFC 8707) bound to `aud`, enforced at both endpoints | MUST | RFC 7636 / RFC 8707 above |
+| `iss` on authorization responses (RFC 9207) | SHOULD → MUST | RFC 9207 above |
+| DPoP (RFC 9449), advertised and accepted by default | — | RFC 9449 above |
+| Enterprise-Managed Authorization: ID-JAG via `jwt-bearer`, `authorization_grant_profiles_supported` | Extension (stable) | XAA above |
 
-**Spec reference**: [modelcontextprotocol.io/specification/2025-11-25/basic/authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
+**Out of scope on this side**: the non-auth bulk of 2026-07-28 (stateless core, `server/discover`, subscriptions, cache hints) is MCP server and SDK territory; acting as the enterprise IdP that mints ID-JAGs is the identity provider's role — authserver is the MCP authorization server in that three-party model; the OAuth Client Credentials ext-auth extension is still draft and is not committed to.
+
+**Evidence**: every change to this server is gated on a wire-level conformance journey that starts from a bare resource URL and derives every hop from what the server actually returns — PRM, AS metadata, CIMD registration, authorization, token, and an authenticated call. The per-requirement probe suite that produced the table above runs alongside it.
+
+**Tested against** (0.2.0, by hand, full flow through `tools/call`): Claude Desktop 1.46388.4 (CIMD, hosted callback), Claude Code 2.1.270 (CIMD, loopback callback), MCP Inspector 2.6.0 (DCR; its opt-in CIMD mode not exercised). See [MCP client compatibility](mcp-client-compatibility.md) for what each client sent.
+
+**Spec reference**: [modelcontextprotocol.io/specification/2026-07-28/basic/authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization).

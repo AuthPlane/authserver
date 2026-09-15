@@ -193,10 +193,12 @@ func (r *ResourceRegistry) List(ctx context.Context) ([]ResourceInfo, error) {
 }
 
 // resourceToInfo converts the unified Resource shape into the legacy flat
-// ResourceInfo shape consumed by -era services (token, authorize,
-// consent, jwt_bearer, client_credentials, token_exchange). ClientID is
-// empty: the v3 may_act seam moved to Policy.Exchange.AllowedClientIDs and
-// is rewired in .
+// ResourceInfo shape consumed by the older services (token, authorize,
+// consent, jwt_bearer, client_credentials, token_exchange).
+//
+// The v3 may_act seam that ResourceInfo once carried is gone, not merely
+// moved: exchange authorization lives in Policy.Exchange.AllowedClientIDs and
+// Policy.Runtime.ClientIDs, read from the Resource row on the unified path.
 func resourceToInfo(r *resource.Resource) ResourceInfo {
 	names := make([]string, len(r.Scopes))
 	descs := make(map[string]string, len(r.Scopes))

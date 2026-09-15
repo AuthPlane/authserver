@@ -93,8 +93,8 @@ resource_resp=$(curl -sS -X POST "${ADMIN_URL}/admin/resources" \
 EOF
 )
 
-if [[ -z "$resource_resp" ]] || echo "$resource_resp" | grep -q '"error"'; then
-  log "resource create returned error or empty body — assuming it already exists from tier 01, continuing"
+if [[ -z "$resource_resp" ]] || echo "$resource_resp" | grep -qE '"status":409|"error"'; then
+  log "resource already exists from tier 01 — continuing"
 else
   echo "$resource_resp" | jq -e '.id' >/dev/null || { red "resource create failed: $resource_resp"; exit 1; }
   green "resource registered"
@@ -121,19 +121,17 @@ green "client created: ${CLIENT_ID}"
 
 # --- step 5: run agent.py ---------------------------------------------------
 # agent.py reads CLIENT_ID / CLIENT_SECRET / AUTHPLANE_ISSUER / RESOURCE_URI
-# / MCP_URL from the environment. The .env we loaded above provides the
-# AS-side values; the credentials minted in this run are injected
-# transiently via `docker compose run -e`. Inside the tier-01 compose
-# network the agent reaches the AS at `authserver:9000` and the MCP server
-# at `mcp-server:8080`.
-log "running agent.py inside the tier-01 compose network"
-agent_out=$(docker compose run --rm --no-TTY \
-  -e CLIENT_ID="${CLIENT_ID}" \
-  -e CLIENT_SECRET="${CLIENT_SECRET}" \
-  -e AUTHPLANE_ISSUER="http://authserver:9000" \
-  -e RESOURCE_URI="${RESOURCE_URI}" \
-  -e MCP_URL="http://mcp-server:8080/mcp" \
-  agent 2>&1) || agent_rc=$?
+# / MCP_URL from the environment. It runs natively in the virtualenv `make
+# run` prepared, on the host network, so it reaches the AS and the tier-01
+# MCP server at their localhost ports — the same host the AS announces as
+# its issuer, which the SDK's byte-for-byte issuer check requires.
+log "running agent.py (natively, from .run/.venv)"
+agent_out=$(CLIENT_ID="${CLIENT_ID}" \
+  CLIENT_SECRET="${CLIENT_SECRET}" \
+  AUTHPLANE_ISSUER="${ISSUER_URL}" \
+  RESOURCE_URI="${RESOURCE_URI}" \
+  MCP_URL="${MCP_URL}" \
+  .run/.venv/bin/python agent.py 2>&1) || agent_rc=$?
 agent_rc="${agent_rc:-0}"
 
 if [[ "$agent_rc" -ne 0 ]]; then

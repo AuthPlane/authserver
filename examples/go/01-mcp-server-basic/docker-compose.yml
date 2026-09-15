@@ -8,7 +8,7 @@
 # `../../_shared/docker-compose.authserver.yml` when that file changes.
 services:
   authserver:
-    image: authplane/authserver:latest
+    image: ${AUTHSERVER_IMAGE:-authplane/authserver:latest}
     # ---------------------------------------------------------------------
     # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
     # ---------------------------------------------------------------------

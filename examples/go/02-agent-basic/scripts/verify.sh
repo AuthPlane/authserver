@@ -69,7 +69,7 @@ resource_resp=$(curl -sS -X POST "${ADMIN_URL}/admin/resources" \
 }
 EOF
 )
-if [[ -z "$resource_resp" ]] || echo "$resource_resp" | grep -q '"code":"conflict"'; then
+if [[ -z "$resource_resp" ]] || echo "$resource_resp" | grep -qE '"code":"conflict"|"status":409'; then
   log "resource already exists — continuing"
 else
   echo "$resource_resp" | jq -e '.id' >/dev/null || { red "resource create failed: $resource_resp"; exit 1; }

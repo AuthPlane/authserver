@@ -178,7 +178,11 @@ func newTestServerDeps(secure bool, buildChain ChainBuilder) Deps {
 		SessionConfigProvider: static.NewSessionConfigProvider(output.SessionConfig{MaxAge: 24 * time.Hour, SameSite: http.SameSiteLaxMode}),
 		URLs:                  static.NewURLBuilder(),
 		CORSConfigProvider:    static.NewCORSConfigProvider([]string{testOrigin}),
-		BuildChain:            buildChain,
+		// Required since RFC 9207: NewServer panics without it, because the
+		// authorize and consent endpoints refuse to emit an authorization
+		// response that carries no iss.
+		IssuerProvider: static.NewIssuerProvider("https://auth.example.com"),
+		BuildChain:     buildChain,
 	}
 	d.SessionCookie.Secure = secure
 	return d

@@ -41,14 +41,12 @@ type ResourceInfo struct {
 	URI               string
 	Scopes            []string          // advertised scope names
 	ScopeDescriptions map[string]string // name → human-readable description (consent UI)
-	ClientID          string            // client authorized to exchange tokens for this resource (populates may_act claim)
 	Audience          string            // audience value for tokens targeting this resource
 }
 
 // NewAuthorizeService creates a new authorize service.
 // oauthConfig supplies per-request OAuth behavior (e.g. RequireScope). Use
-// static.NewOAuthConfigProvider to wrap a boot-time bool (RFC 6749 §3.3 /
-// ADR-012).
+// static.NewOAuthConfigProvider to wrap a boot-time bool (RFC 6749 §3.3).
 func NewAuthorizeService(
 	clients output.ClientStore,
 	sessions output.SessionStore,
@@ -168,7 +166,9 @@ func (s *AuthorizeService) StartAuthorization(ctx context.Context, req input.Aut
 			span.SetStatus(codes.Error, err.Error())
 			return nil, err
 		}
-		// ADR-012 (oauth.require_scope=false): default to registered scopes.
+		// oauth.require_scope=false: process the request using a pre-defined
+		// default value, which RFC 6749 §3.3 permits as one of the two allowed
+		// responses to an omitted scope.
 		// MCP clients (notably Claude Code) omit scope from authorize requests.
 		// Rather than issuing a zero-scope token (which causes opaque 403s on
 		// every tool call), substitute all registered scopes for the resource.
@@ -325,8 +325,9 @@ func (s *AuthorizeService) lookupClient(ctx context.Context, clientID string) (*
 }
 
 // collectDefaultScopes returns all registered scopes for a resource (or all scopes
-// globally if resource is empty) as a space-separated string. Used by ADR-012 to
-// substitute a default scope when the client omits it from the authorize request.
+// globally if resource is empty) as a space-separated string. It supplies the
+// pre-defined default value used when oauth.require_scope is false and the client
+// omits scope from the authorize request.
 func (s *AuthorizeService) collectDefaultScopes(ctx context.Context, resourceURI string) string {
 	resources, err := s.registry.List(ctx)
 	if err != nil {

@@ -31,9 +31,21 @@ type Metrics struct {
 	// what the server did — alert on it.
 	AuditEventsDropped metric.Int64Counter
 	ClientsRegistered  metric.Int64Counter
-	ConsentDecisions   metric.Int64Counter
-	LoginAttempts      metric.Int64Counter
-	RefreshTokenReuse  metric.Int64Counter
+	// CIMDFetchSuppressed counts outbound CIMD fetches that did NOT happen,
+	// by the control that stopped them. reason="negative_cache" — a recently
+	// failed target was not re-fetched; "single_flight" — a concurrent request
+	// for the same URL rode an in-progress fetch; "capacity" — the global
+	// in-flight limit was full and the request was shed.
+	//
+	// The CIMD fetch path is reachable from an unauthenticated
+	// GET /oauth/authorize with an attacker-chosen URL, so this counter is the
+	// signal that someone is pointing the server at a third party: a sustained
+	// negative_cache or capacity rate means fetches are being driven, not that
+	// clients are registering.
+	CIMDFetchSuppressed metric.Int64Counter
+	ConsentDecisions    metric.Int64Counter
+	LoginAttempts       metric.Int64Counter
+	RefreshTokenReuse   metric.Int64Counter
 	// AuthCodeReuse counts authorization-code replays. verifier="valid" means
 	// the replayer proved PKCE AND presented the original client_id, so
 	// revocation was attempted; "invalid" covers every other case — a wrong
@@ -149,6 +161,11 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 	if m.ClientsRegistered, err = meter.Int64Counter("authserver_clients_registered_total",
 		metric.WithDescription("Total clients registered"),
+	); err != nil {
+		return nil, err
+	}
+	if m.CIMDFetchSuppressed, err = meter.Int64Counter("authserver_cimd_fetch_suppressed_total",
+		metric.WithDescription("Outbound CIMD fetches avoided or shed, by the control that stopped them"),
 	); err != nil {
 		return nil, err
 	}

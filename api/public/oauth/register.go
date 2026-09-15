@@ -22,13 +22,22 @@ const maxJSONBody = 1 << 20
 
 func (h *registerHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
-	var req input.RegisterClientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var body registerRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		shared.WriteOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
 		return
 	}
 
-	resp, err := h.dcr.RegisterClient(r.Context(), req)
+	resp, err := h.dcr.RegisterClient(r.Context(), input.RegisterClientRequest{
+		RedirectURIs:            body.RedirectURIs,
+		ClientName:              body.ClientName,
+		GrantTypes:              body.GrantTypes,
+		ResponseTypes:           body.ResponseTypes,
+		TokenEndpointAuthMethod: body.TokenEndpointAuthMethod,
+		ApplicationType:         body.ApplicationType,
+		Agent:                   body.Agent,
+		AgentDescription:        body.AgentDescription,
+	})
 	if err != nil {
 		h.writeRegisterError(w, r, err)
 		return
@@ -37,7 +46,20 @@ func (h *registerHandler) handleRegister(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(registerResponse{
+		ClientID:                resp.ClientID,
+		ClientSecret:            resp.ClientSecret,
+		ClientIDIssuedAt:        resp.ClientIDIssuedAt,
+		ClientSecretExpiresAt:   resp.ClientSecretExpiresAt,
+		RedirectURIs:            resp.RedirectURIs,
+		ClientName:              resp.ClientName,
+		GrantTypes:              resp.GrantTypes,
+		ResponseTypes:           resp.ResponseTypes,
+		TokenEndpointAuthMethod: resp.TokenEndpointAuthMethod,
+		ApplicationType:         resp.ApplicationType,
+		Agent:                   resp.Agent,
+		AgentDescription:        resp.AgentDescription,
+	})
 }
 
 func (h *registerHandler) writeRegisterError(w http.ResponseWriter, r *http.Request, err error) {

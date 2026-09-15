@@ -1,7 +1,7 @@
 # Tier 04 — MCP server fronting a Broker (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 21 lines · Total example: 59 lines · SDK: ts-sdk 0.3.0**
+**Auth-specific code: 21 lines · Total example: 59 lines · SDK: ts-sdk 0.4.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call a third-party API on the user's
@@ -51,7 +51,7 @@ has the end-to-end sequence diagram.
 |---|---|
 | **Time to run** | ~2 minutes (first build is ~90s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, Node.js 22+ (only if you run outside Docker) |
-| **SDK** | `@authplane/sdk` 0.3.0 (npm) |
+| **SDK** | `@authplane/sdk` 0.4.0 (npm) |
 | **Wire grant** | `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693) |
 | **Stops at** | the agent catching `ConsentRequiredError` and printing the `consentUrl` — there is no real upstream provider in this example |
 

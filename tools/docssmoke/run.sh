@@ -37,6 +37,10 @@ REQUIRED_PORTS=(9000 9001)
 
 : "${SMOKE_AUTHSERVER_IMAGE:=authplane/authserver:latest}"
 export SMOKE_AUTHSERVER_IMAGE
+# The example compose files interpolate `${AUTHSERVER_IMAGE:-authplane/authserver:latest}`
+# for the authserver service; export under that name so the stacks actually
+# run the image this smoke was asked to test.
+export AUTHSERVER_IMAGE="$SMOKE_AUTHSERVER_IMAGE"
 
 FILTER=""
 BAIL=0

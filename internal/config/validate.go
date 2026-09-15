@@ -109,6 +109,50 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("session.secure must be true when server.issuer is not localhost"))
 	}
 
+	// XAA subject mode — an enforcement switch that fails OPEN if misspelled.
+	//
+	// SubjectMappingService compares this against "strict" and treats every
+	// other value as "auto_map", which auto-provisions an identity for an
+	// unmapped assertion subject. So AUTHPLANE_XAA_SUBJECT_MODE=Strict — or any
+	// typo — silently downgrades deny-unmapped to auto-provision, with nothing
+	// in the logs to say so. Validate it here rather than let the comparison
+	// swallow the mistake.
+	switch c.XAA.SubjectMode {
+	case "", "auto_map", "strict":
+		// recognized; empty means the default is applied downstream
+	default:
+		errs = append(errs, fmt.Errorf("xaa.subject_mode must be auto_map or strict, got %q", c.XAA.SubjectMode))
+	}
+
+	// CIMD over plaintext — a development-only escape hatch.
+	//
+	// A CIMD client_id is fetched over the network to decide who the client is
+	// and which redirect URIs it may use. Over http that document is
+	// attacker-modifiable in transit, so anyone on the path can rewrite
+	// redirect_uris and redirect authorization codes to themselves. The spec
+	// requires https for exactly this reason; the knob exists so the demo compose
+	// stack can serve metadata over http on loopback.
+	//
+	// Same shape as the session.secure rule directly above: permitted on
+	// localhost, refused anywhere else.
+	if !c.CIMD.RequireHTTPS && !isLocalhostIssuer(c.Server.Issuer) {
+		errs = append(errs, errors.New("cimd.require_https must be true when server.issuer is not localhost"))
+	}
+
+	// CIMD address filtering off — the same escape hatch for the other control.
+	//
+	// The fetch this disables the filter on is driven by an unauthenticated
+	// caller: /oauth/authorize resolves the client, and so the document, before
+	// it decides whether a login is required, and dcr.mode defaults to open. So
+	// the caller picks the destination, and with filtering off that may be
+	// loopback, RFC 1918 space or the cloud metadata endpoint.
+	//
+	// Permitted on localhost, refused anywhere else. Skipped when CIMD is off:
+	// no fetch happens, so there is nothing to refuse to boot over.
+	if c.CIMD.Enabled && c.CIMD.AllowPrivateAddresses && !isLocalhostIssuer(c.Server.Issuer) {
+		errs = append(errs, errors.New("cimd.allow_private_addresses must be false when server.issuer is not localhost"))
+	}
+
 	// NOTE: the admin API-key policy (required/strong in production) is NOT
 	// validated here — it is enforced by the OSS binary via ValidateAdminAPIKey.
 	// A deployment that fronts the admin API with external authentication does

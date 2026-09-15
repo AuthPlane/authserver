@@ -10,7 +10,7 @@
 
 SHARED       := ../../_shared
 AS_CONTAINER ?= authplane-retrofit-as
-AS_IMAGE     ?= authplane/authserver:latest
+AS_IMAGE     ?= $(or $(AUTHSERVER_IMAGE),authplane/authserver:latest)
 BEFORE_PORT  ?= 8080
 AFTER_PORT   ?= 8090
 

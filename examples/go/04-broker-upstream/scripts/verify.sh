@@ -116,7 +116,7 @@ provider_resp=$(curl -sS -X POST "${ADMIN_URL}/admin/broker-providers" \
 }
 EOF
 )
-if [[ -z "$provider_resp" ]] || echo "$provider_resp" | grep -q '"code":"conflict"'; then
+if [[ -z "$provider_resp" ]] || echo "$provider_resp" | grep -qE '"code":"conflict"|"status":409'; then
   log "broker provider already exists — continuing"
 else
   echo "$provider_resp" | jq -e '.id' >/dev/null || { red "provider create failed: $provider_resp"; exit 1; }
@@ -145,7 +145,7 @@ actor_resp=$(curl -sS -X POST "${ADMIN_URL}/admin/resources" \
 }
 EOF
 )
-if [[ -z "$actor_resp" ]] || echo "$actor_resp" | grep -q '"code":"conflict"'; then
+if [[ -z "$actor_resp" ]] || echo "$actor_resp" | grep -qE '"code":"conflict"|"status":409'; then
   log "actor MCP resource already exists — continuing"
 else
   echo "$actor_resp" | jq -e '.id' >/dev/null || { red "actor resource create failed: $actor_resp"; exit 1; }
@@ -174,7 +174,7 @@ resource_resp=$(curl -sS -X POST "${ADMIN_URL}/admin/resources" \
 }
 EOF
 )
-if [[ -z "$resource_resp" ]] || echo "$resource_resp" | grep -q '"code":"conflict"'; then
+if [[ -z "$resource_resp" ]] || echo "$resource_resp" | grep -qE '"code":"conflict"|"status":409'; then
   log "broker resource already exists — continuing"
 else
   echo "$resource_resp" | jq -e '.id' >/dev/null || { red "resource create failed: $resource_resp"; exit 1; }
@@ -236,12 +236,16 @@ green "client allowed for exchange"
 # in a real deployment. We mint it here so the verify pipeline is fully
 # self-contained — no interactive browser dance required. Anchor:
 # docs/reference/http-api.md#http-public-oauth-token
+# The subject token must already carry the scope the exchange asks for: a
+# scoped subject can only be narrowed, never widened (RFC 8693 §2.1, ADR-002).
+# Minting it with `mcp:tools` and exchanging for `repo` is an escalation the
+# AS refuses with invalid_scope.
 log "minting base subject_token via client_credentials"
 token_resp=$(curl -fsS -X POST "${ISSUER_URL}/oauth/token" \
   -u "${CLIENT_ID}:${CLIENT_SECRET}" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "grant_type=client_credentials" \
-  --data-urlencode "scope=mcp:tools" \
+  --data-urlencode "scope=repo" \
   --data-urlencode "resource=${BROKER_RESOURCE_URI}")
 USER_ACCESS_TOKEN=$(echo "$token_resp" | jq -er '.access_token')
 green "subject_token minted (length=${#USER_ACCESS_TOKEN})"

@@ -128,7 +128,7 @@ green "mcp-server is up (unauthenticated probe returned HTTP ${code})"
 # and the MCP server at `mcp-server:8080`. We inject CLIENT_ID/SECRET
 # transiently via `docker compose run -e`.
 log "running agent.py (DPoP-bound token, both scopes)"
-agent_out=$(docker compose run --rm --no-TTY \
+agent_out=$(docker compose --progress quiet run --build --rm --no-TTY \
   -e CLIENT_ID="${CLIENT_ID}" \
   -e CLIENT_SECRET="${CLIENT_SECRET}" \
   -e AUTHPLANE_ISSUER="http://authserver" \
@@ -157,7 +157,7 @@ green "agent completed; happy-path DPoP + scope calls OK"
 if [[ "${SKIP_DPOP_NEG:-0}" != "1" ]]; then
   log "running agent.py with DPoP proof stripped — expect 401 from MCP server"
   set +e
-  neg_out=$(docker compose run --rm --no-TTY \
+  neg_out=$(docker compose --progress quiet run --build --rm --no-TTY \
     -e CLIENT_ID="${CLIENT_ID}" \
     -e CLIENT_SECRET="${CLIENT_SECRET}" \
     -e AUTHPLANE_ISSUER="http://authserver" \

@@ -1,0 +1,22 @@
+-- OIDC application_type on the client record (SEP-837).
+--
+-- MCP clients must declare application_type at registration: under OpenID
+-- Connect Dynamic Client Registration, omitting it defaults to "web", and an
+-- OIDC-conformant authorization server refuses a "web" client the
+-- http://localhost and http://127.0.0.1 redirect URIs that desktop and CLI
+-- clients need. We previously discarded the field entirely, so a native client
+-- had no way to say what it was.
+--
+-- This column RECORDS that declaration; it does not yet enforce anything.
+-- ValidateRedirectURI permits loopback redirect URIs for every client
+-- regardless of type, and no authorization decision reads the value. Storing it
+-- is the prerequisite: enforcement cannot be turned on until existing clients
+-- have had a chance to declare themselves, or it would reject every native
+-- client registered before the field existed.
+--
+-- Nullable rather than DEFAULT 'web': a NULL records "this client registered
+-- before we asked", which is different from a client that actually declared
+-- itself a web app. The read path maps NULL to "web" (the OIDC default), so
+-- behavior is identical either way — but the distinction survives in the row
+-- for anyone auditing which clients ever stated an intent.
+ALTER TABLE clients ADD COLUMN application_type TEXT;

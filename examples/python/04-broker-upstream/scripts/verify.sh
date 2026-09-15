@@ -216,7 +216,7 @@ green "exchange policy installed"
 # --- step 8: run the agent — expect ConsentRequiredError --------------------
 # Inside the compose network the agent reaches the AS at `authserver:9000`.
 log "running agent.py — expect ConsentRequiredError with consent_url"
-agent_out=$(docker compose run --rm --no-TTY \
+agent_out=$(docker compose --progress quiet run --build --rm --no-TTY \
   -e CLIENT_ID="${CLIENT_ID}" \
   -e CLIENT_SECRET="${CLIENT_SECRET}" \
   -e AUTHPLANE_ISSUER="http://authserver:9000" \

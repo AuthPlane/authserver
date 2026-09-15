@@ -26,19 +26,26 @@ type ClientStore struct {
 
 var _ output.ClientStore = (*ClientStore)(nil)
 
-const clientColumns = `id, secret_hash, name, redirect_uris, grant_types, response_types, token_endpoint_auth_method, status, registration_source, cimd_url, scope, is_agent, agent_description, version, issued_at, updated_at`
+const clientColumns = `id, secret_hash, name, redirect_uris, grant_types, response_types, token_endpoint_auth_method, status, registration_source, cimd_url, scope, is_agent, agent_description, application_type, version, issued_at, updated_at`
 
 func scanClient(row interface{ Scan(...any) error }) (*client.Client, error) {
 	var c client.Client
 	var redirectURIs, grantTypes, responseTypes []byte
+	// Nullable: rows written before migration 004 have no value. NULL and ""
+	// both mean "never declared"; EffectiveApplicationType resolves either to
+	// the OIDC default on read.
+	var applicationType *string
 
 	if err := row.Scan(
 		&c.ID, &c.SecretHash, &c.Name,
 		&redirectURIs, &grantTypes, &responseTypes,
 		&c.TokenEndpointAuthMethod, &c.Status, &c.RegistrationSource,
-		&c.CIMDURL, &c.Scope, &c.IsAgent, &c.AgentDescription, &c.Version, &c.IssuedAt, &c.UpdatedAt,
+		&c.CIMDURL, &c.Scope, &c.IsAgent, &c.AgentDescription, &applicationType, &c.Version, &c.IssuedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
+	}
+	if applicationType != nil {
+		c.ApplicationType = *applicationType
 	}
 	c.IssuedAt = toUTC(c.IssuedAt)
 	c.UpdatedAt = toUTC(c.UpdatedAt)
@@ -69,13 +76,13 @@ func (s *ClientStore) Create(ctx context.Context, c *client.Client) error {
 		c.Version = 1
 	}
 	_, err := dbOrTx(ctx, s.pool).Exec(ctx,
-		`INSERT INTO clients (`+clientColumns+`) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		`INSERT INTO clients (`+clientColumns+`) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		c.ID, c.SecretHash, c.Name,
 		marshalStringSlice(c.RedirectURIs),
 		marshalStringSlice(c.GrantTypes),
 		marshalStringSlice(c.ResponseTypes),
 		c.TokenEndpointAuthMethod, c.Status, c.RegistrationSource,
-		c.CIMDURL, c.Scope, c.IsAgent, c.AgentDescription,
+		c.CIMDURL, c.Scope, c.IsAgent, c.AgentDescription, nullableText(c.ApplicationType),
 		c.Version, toUTC(c.IssuedAt), toUTC(c.UpdatedAt),
 	)
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("client_create"))
@@ -146,14 +153,15 @@ func (s *ClientStore) Update(ctx context.Context, c *client.Client) error {
 	res, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`UPDATE clients SET secret_hash=$1, name=$2, redirect_uris=$3::jsonb, grant_types=$4::jsonb,
 		 response_types=$5::jsonb, token_endpoint_auth_method=$6, status=$7, registration_source=$8,
-		 cimd_url=$9, scope=$10, is_agent=$11, agent_description=$12, version=version+1, updated_at=$13
-		 WHERE id=$14 AND version=$15`,
+		 cimd_url=$9, scope=$10, is_agent=$11, agent_description=$12, application_type=$13,
+		 version=version+1, updated_at=$14
+		 WHERE id=$15 AND version=$16`,
 		c.SecretHash, c.Name,
 		marshalStringSlice(c.RedirectURIs),
 		marshalStringSlice(c.GrantTypes),
 		marshalStringSlice(c.ResponseTypes),
 		c.TokenEndpointAuthMethod, c.Status, c.RegistrationSource,
-		c.CIMDURL, c.Scope, c.IsAgent, c.AgentDescription,
+		c.CIMDURL, c.Scope, c.IsAgent, c.AgentDescription, nullableText(c.ApplicationType),
 		toUTC(c.UpdatedAt), c.ID, c.Version,
 	)
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("client_update"))

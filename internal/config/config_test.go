@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1631,5 +1632,130 @@ func TestValidate_ThroughputLimitsIgnoredWhenDisabled(t *testing.T) {
 
 	if err := c.Validate(); err != nil {
 		t.Fatalf("rejected inert values on a disabled limiter: %v", err)
+	}
+}
+
+// cimd.require_https=false makes the metadata document attacker-modifiable in
+// transit, and that document decides the client's identity and its permitted
+// redirect URIs. It is a development affordance for the loopback demo stack, so
+// it is admissible only where session.secure=false is: a localhost issuer.
+func TestValidate_CIMDRequireHTTPS(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		issuer     string
+		requireTLS bool
+		wantErr    bool
+	}{
+		{"production issuer with require_https on", "https://auth.example.com", true, false},
+		{"production issuer with require_https off", "https://auth.example.com", false, true},
+		{"localhost issuer with require_https off", "http://localhost:9000", false, false},
+		{"localhost issuer with require_https on", "http://localhost:9000", true, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := DefaultConfig()
+			cfg.Server.Issuer = tc.issuer
+			cfg.CIMD.RequireHTTPS = tc.requireTLS
+			cfg.Session.Secret = "a-sufficiently-long-session-secret"
+			cfg.Session.Secure = !isLocalhostIssuer(tc.issuer)
+
+			err := cfg.Validate()
+			mentions := err != nil && strings.Contains(err.Error(), "cimd.require_https")
+
+			if tc.wantErr && !mentions {
+				t.Errorf("expected a cimd.require_https validation error, got: %v", err)
+			}
+			if !tc.wantErr && mentions {
+				t.Errorf("unexpected cimd.require_https validation error: %v", err)
+			}
+		})
+	}
+}
+
+// The v0.2.0 posture: a stock deployment speaks the spec surface it implements,
+// without an operator hunting for flags. Pinned as a test because the failure
+// mode is silent — with xaa.enabled false the AS simply omits the ID-JAG grant
+// profile from discovery and no client can tell EMA is supported.
+func TestDefaultConfig_SpecSurfaceFeaturesEnabled(t *testing.T) {
+	t.Parallel()
+
+	c := DefaultConfig()
+
+	for _, tc := range []struct {
+		name string
+		got  bool
+	}{
+		{"xaa.enabled", c.XAA.Enabled},
+		{"dpop.enabled", c.DPoP.Enabled},
+		{"client_credentials.enabled", c.ClientCredentials.Enabled},
+		{"token_exchange.enabled", c.TokenExchange.Enabled},
+		{"cimd.enabled", c.CIMD.Enabled},
+	} {
+		if !tc.got {
+			t.Errorf("%s must default to true", tc.name)
+		}
+	}
+
+	// Enabling DPoP must not make it mandatory, and enabling XAA must not
+	// tighten the resource rule — either would be a behavior change beyond
+	// turning the feature on.
+	if c.DPoP.RequireNonce {
+		t.Error("dpop.require_nonce must stay false: enabling DPoP means supported, not required")
+	}
+	if c.XAA.RequireResource {
+		t.Error("xaa.require_resource must stay false: enabling XAA must not also tighten the resource rule")
+	}
+
+	// XAA had no DefaultConfig entry at all, leaving these as zero values that
+	// serve.go re-defaulted at wiring time. They are declared here now.
+	if c.XAA.TokenExpiry != time.Hour {
+		t.Errorf("xaa.token_expiry = %v, want 1h", c.XAA.TokenExpiry)
+	}
+	if c.XAA.MaxAssertionAge != 5*time.Minute {
+		t.Errorf("xaa.max_assertion_age = %v, want 5m", c.XAA.MaxAssertionAge)
+	}
+	if c.XAA.SubjectMode != "auto_map" {
+		t.Errorf("xaa.subject_mode = %q, want auto_map", c.XAA.SubjectMode)
+	}
+
+	// The whole point: the jwt-bearer grant must be present, because the EMA
+	// discovery advertisement keys off it.
+	grants := EnabledGrantTypes(c)
+	for _, want := range []string{
+		"client_credentials",
+		"urn:ietf:params:oauth:grant-type:token-exchange",
+		"urn:ietf:params:oauth:grant-type:jwt-bearer",
+	} {
+		if !slices.Contains(grants, want) {
+			t.Errorf("default enabled grants missing %q: got %v", want, grants)
+		}
+	}
+}
+
+// XAA was the one feature block with no env-var path. Now that it ships
+// enabled, an env-only container deployment must be able to turn it off.
+func TestLoadXAAFromEnv(t *testing.T) {
+	t.Setenv("AUTHPLANE_XAA_ENABLED", "false")
+	t.Setenv("AUTHPLANE_XAA_SUBJECT_MODE", "strict")
+	t.Setenv("AUTHPLANE_XAA_MAX_ASSERTION_AGE", "30s")
+
+	cfg := DefaultConfig()
+	if err := loadFromEnv(cfg); err != nil {
+		t.Fatalf("loadFromEnv: %v", err)
+	}
+
+	if cfg.XAA.Enabled {
+		t.Error("AUTHPLANE_XAA_ENABLED=false must disable XAA")
+	}
+	if cfg.XAA.SubjectMode != "strict" {
+		t.Errorf("subject_mode = %q, want strict", cfg.XAA.SubjectMode)
+	}
+	if cfg.XAA.MaxAssertionAge != 30*time.Second {
+		t.Errorf("max_assertion_age = %v, want 30s", cfg.XAA.MaxAssertionAge)
 	}
 }

@@ -18,8 +18,14 @@ type RegisterClientRequest struct {
 	GrantTypes              []string `json:"grant_types"`
 	ResponseTypes           []string `json:"response_types"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-	Agent                   bool     `json:"agent,omitempty"`             // Authplane extension: mark as agent client
-	AgentDescription        string   `json:"agent_description,omitempty"` // Authplane extension: human-readable description
+	// ApplicationType is the OIDC application_type (SEP-837): "web" or
+	// "native". MCP clients are required to send it — omitting it defaults to
+	// "web" under OIDC, which conflicts with the localhost redirect URIs
+	// desktop and CLI clients need. Omitted values are stored as-is and read
+	// back through client.EffectiveApplicationType.
+	ApplicationType  string `json:"application_type,omitempty"`
+	Agent            bool   `json:"agent,omitempty"`             // Authplane extension: mark as agent client
+	AgentDescription string `json:"agent_description,omitempty"` // Authplane extension: human-readable description
 }
 
 // RegisterClientResponse is the RFC 7591 registration response.
@@ -33,6 +39,12 @@ type RegisterClientResponse struct {
 	GrantTypes              []string `json:"grant_types"`
 	ResponseTypes           []string `json:"response_types"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-	Agent                   bool     `json:"agent,omitempty"`             // Authplane extension
-	AgentDescription        string   `json:"agent_description,omitempty"` // Authplane extension
+	// ApplicationType echoes what the client registered with, resolved through
+	// client.EffectiveApplicationType so the response always states a concrete
+	// value. RFC 7591 §3.2.1 has the AS return the registered metadata, and a
+	// client that sent a field and got nothing back reasonably reads that as
+	// rejection.
+	ApplicationType  string `json:"application_type"`
+	Agent            bool   `json:"agent,omitempty"`             // Authplane extension
+	AgentDescription string `json:"agent_description,omitempty"` // Authplane extension
 }

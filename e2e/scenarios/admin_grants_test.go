@@ -604,6 +604,10 @@ func TestAdmin_RevokeBrokerGrant_NoCascade(t *testing.T) {
 		},
 		Policy: &e2e.AdminPolicy{
 			Runtime: e2e.AdminRuntimePolicy{ClientIDs: []string{mcpServerClientID}},
+			// The MCP server exchanges a token the user obtained through
+			// the web app, so it spends the web app's consent grant — a
+			// cross-client exchange the operator must authorize.
+			Exchange: e2e.AdminExchangePolicy{AllowedClientIDs: []string{mcpServerClientID}},
 		},
 	})
 	h.RunFlowC1Consent(

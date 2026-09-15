@@ -50,9 +50,8 @@ func TestTokenExchange_AgentDelegation_EndToEnd(t *testing.T) {
 		t.Fatal("expected non-empty actor access_token")
 	}
 
-	// 4. Update subject token to include may_act claim for the actor client.
-	// Since we can't easily add may_act to an existing token in the E2E,
-	// use self-exchange (subject client exchanges its own token, no actor → impersonation).
+	// 4. Self-exchange: the subject client exchanges its own token with no
+	// actor token, so the result is impersonation rather than delegation.
 	selfExchangeResp := h.TokenExchange(
 		subjectClientID, subjectSecret,
 		subjectTR.AccessToken, token.TokenTypeAccessToken,
@@ -413,17 +412,15 @@ func TestTokenExchange_CrossClient_EndToEnd(t *testing.T) {
 		"tools/echo tools/query",
 	)
 
-	// Configure cross-client allowlist: subject → actor.
-	// We need to update the harness config — but the harness is already set up.
-	// Instead, let's use self-exchange for subject, then cross-client via may_act.
-	// Actually, the E2E harness doesn't support dynamic allowlist.
-	// Let's use the may_act claim approach — it's the same cross-client path.
-	// Self-exchange is disabled, so without may_act, the exchange should fail.
+	// Self-exchange is disabled and no resource is named, so the request takes
+	// the resource-less path where cross-client exchange cannot be authorized
+	// at all: naming a resource is what routes it to the operator gate that
+	// could allow it.
 
 	// Subject client gets a machine token.
 	subjectTR := h.ClientCredentialsExchange(subjectClientID, subjectSecret, "tools/echo tools/query", "")
 
-	// Actor client tries to exchange subject's token — should fail (no may_act, no allowlist).
+	// Actor client tries to exchange the subject's token — refused.
 	oe := h.TokenExchangeExpectError(
 		actorClientID, actorSecret,
 		subjectTR.AccessToken, token.TokenTypeAccessToken,
@@ -432,6 +429,76 @@ func TestTokenExchange_CrossClient_EndToEnd(t *testing.T) {
 	)
 	if oe.Error != "access_denied" {
 		t.Errorf("error = %q, want access_denied", oe.Error)
+	}
+}
+
+// TestTokenExchange_RuntimeBoundClient_NeedsNoExchangeAllowlist drives the
+// shape that used to need configuration to do nothing: a service exchanging a
+// user's token, minted for a web app, for a token audienced to the service's
+// own resource.
+//
+// That exchange is cross-client — the service authenticates under its own
+// client_id, not the web app's — so the delegation gate applies. But the
+// service is already declared in the resource's policy.runtime.client_ids,
+// which says it *is* that resource, so there is no third party to name and no
+// policy.exchange.allowed_client_ids entry is added here. Contrast
+// TestAgentIdentity_MintIssuance_ClaimsInJWT_AndOnIssuance, which delegates to
+// a resource it does not act as and does need the exchange entry.
+func TestTokenExchange_RuntimeBoundClient_NeedsNoExchangeAllowlist(t *testing.T) {
+	scopes := []string{"tools/echo"}
+	h, servers := e2e.SetupE2E(t, e2e.HarnessConfig{
+		EnableAdminAPI:             true,
+		EnableTokenExchange:        true,
+		TokenExchangeMaxChainDepth: 5,
+	}, scopes, scopes)
+	rsA := servers[0]
+	rsB := servers[1]
+	h.RegisterScope(rsA.URI, "tools/echo", "Echo tool A")
+	h.RegisterScope(rsB.URI, "tools/echo", "Echo tool B")
+
+	const email = "alice-runtime-bound@example.com"
+	const password = "pass123"
+	h.CreateUser(email, password)
+
+	// The web app that faces alice and holds her token.
+	webAppID := h.AdminCreatePublicClient(
+		"runtime-bound webapp",
+		[]string{"authorization_code"},
+		"tools/echo",
+		nil,
+	)
+
+	// The service behind mcp-1, authenticating as itself.
+	svcID, svcSecret := h.RegisterAgentClient(
+		[]string{"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"tools/echo",
+		"Service that is mcp-1",
+	)
+
+	// The only declaration made: this client acts AS mcp-1. No entry is
+	// added to mcp-1's policy.exchange.allowed_client_ids.
+	h.AdminAddRuntimeClientID("mcp-1", svcID)
+
+	h.RunFlowC1Consent(email, password, webAppID, "http://localhost:9999/callback", "mcp-1", []string{"tools/echo"}, []string{"tools/echo"})
+
+	webAppClient := e2e.NewMCPClient(t, h, rsA, webAppID, "http://localhost:9999/callback")
+	userTokens := webAppClient.FullFlow(email, password, "tools/echo", false)
+
+	exch := h.TokenExchangeWithResource(
+		svcID, svcSecret,
+		userTokens.AccessToken, "urn:ietf:params:oauth:token-type:access_token",
+		"tools/echo",
+		"mcp-1",
+	)
+	if exch.AccessToken == "" {
+		t.Fatal("expected exchanged access token")
+	}
+
+	// The subject stays the human: the runtime binding decides who may hold
+	// the token, not who the token is about.
+	claims := parseJWTClaims(t, exch.AccessToken)
+	if claims["sub"] == webAppID || claims["sub"] == svcID {
+		t.Errorf("sub = %v, want alice's user id, not a client id", claims["sub"])
 	}
 }
 

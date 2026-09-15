@@ -489,7 +489,7 @@ func TestAuthorize_RequireScope_False_DefaultsScope(t *testing.T) {
 	c := createTestClient(t, h)
 
 	req := validAuthorizeRequest(c)
-	req.Scope = "" // missing scope — ADR-012 should default it
+	req.Scope = "" // missing scope — require_scope=false defaults it
 
 	result, err := svc.StartAuthorization(context.Background(), req)
 	if err != nil {
@@ -515,7 +515,6 @@ func newAuthorizeServiceWithCIMD(t *testing.T, cimdServer *httptest.Server) (*se
 	obs := testObs()
 
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	cimdSvc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	seedMintResource(t, stores, "mcp-cimd", "CIMD MCP", "https://mcp.example.com",
@@ -553,7 +552,7 @@ func TestAuthorize_URLClientID_CIMDAutoRegistration(t *testing.T) {
 	redirectURI := "https://app.example.com/callback"
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Auto-Reg Client",
 			RedirectURIs: []string{redirectURI},
 		}
@@ -564,7 +563,7 @@ func TestAuthorize_URLClientID_CIMDAutoRegistration(t *testing.T) {
 
 	svc, _ := newAuthorizeServiceWithCIMD(t, ts)
 
-	req := validCIMDAuthorizeRequest(ts.URL, redirectURI)
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, redirectURI)
 	result, err := svc.StartAuthorization(context.Background(), req)
 	if err != nil {
 		t.Fatalf("CIMD auto-registration should succeed: %v", err)
@@ -572,8 +571,8 @@ func TestAuthorize_URLClientID_CIMDAutoRegistration(t *testing.T) {
 	if result.Session == nil {
 		t.Fatal("session should have been created")
 	}
-	if result.Session.ClientID != ts.URL {
-		t.Errorf("client_id: got %q, want %q", result.Session.ClientID, ts.URL)
+	if result.Session.ClientID != ts.URL+cimdTestPath {
+		t.Errorf("client_id: got %q, want %q", result.Session.ClientID, ts.URL+cimdTestPath)
 	}
 }
 
@@ -585,7 +584,7 @@ func TestAuthorize_URLClientID_AlreadyRegistered(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCount++
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Pre-Registered",
 			RedirectURIs: []string{redirectURI},
 		}
@@ -598,7 +597,7 @@ func TestAuthorize_URLClientID_AlreadyRegistered(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-register the client via CIMD by doing a first authorize.
-	req := validCIMDAuthorizeRequest(ts.URL, redirectURI)
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, redirectURI)
 	_, err := svc.StartAuthorization(ctx, req)
 	if err != nil {
 		t.Fatalf("first authorize: %v", err)
@@ -612,8 +611,8 @@ func TestAuthorize_URLClientID_AlreadyRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second authorize: %v", err)
 	}
-	if result.Session.ClientID != ts.URL {
-		t.Errorf("client_id: got %q, want %q", result.Session.ClientID, ts.URL)
+	if result.Session.ClientID != ts.URL+cimdTestPath {
+		t.Errorf("client_id: got %q, want %q", result.Session.ClientID, ts.URL+cimdTestPath)
 	}
 	// The CIMD fetcher may or may not be called again (cache hit), but the client
 	// should already be in the DB. We just verify it works.
@@ -631,7 +630,7 @@ func TestAuthorize_URLClientID_CIMDFetchFails(t *testing.T) {
 
 	svc, _ := newAuthorizeServiceWithCIMD(t, ts)
 
-	req := validCIMDAuthorizeRequest(ts.URL, "https://app.example.com/callback")
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, "https://app.example.com/callback")
 	_, err := svc.StartAuthorization(context.Background(), req)
 	if !errors.Is(err, domain.ErrInvalidClient) {
 		t.Errorf("expected ErrInvalidClient when CIMD fetch fails, got: %v", err)
@@ -656,7 +655,7 @@ func TestAuthorize_URLClientID_CIMDDisabled(t *testing.T) {
 func TestAuthorize_URLClientID_WrongRedirectURI(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Redirect Test",
 			RedirectURIs: []string{"https://legit.example.com/callback"},
 		}
@@ -668,7 +667,7 @@ func TestAuthorize_URLClientID_WrongRedirectURI(t *testing.T) {
 	svc, _ := newAuthorizeServiceWithCIMD(t, ts)
 
 	// Request with a redirect_uri that doesn't match the CIMD document.
-	req := validCIMDAuthorizeRequest(ts.URL, "https://evil.example.com/steal")
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, "https://evil.example.com/steal")
 	_, err := svc.StartAuthorization(context.Background(), req)
 	if !errors.Is(err, domain.ErrInvalidRedirectURI) {
 		t.Errorf("expected ErrInvalidRedirectURI for mismatched redirect, got: %v", err)
@@ -700,7 +699,7 @@ func TestAuthorize_URLClientID_SuspendedCIMDClient(t *testing.T) {
 	redirectURI := "https://app.example.com/callback"
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Suspend Test",
 			RedirectURIs: []string{redirectURI},
 		}
@@ -713,14 +712,14 @@ func TestAuthorize_URLClientID_SuspendedCIMDClient(t *testing.T) {
 	ctx := context.Background()
 
 	// First authorize — succeeds, creates client.
-	req := validCIMDAuthorizeRequest(ts.URL, redirectURI)
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, redirectURI)
 	_, err := svc.StartAuthorization(ctx, req)
 	if err != nil {
 		t.Fatalf("first authorize: %v", err)
 	}
 
 	// Suspend the CIMD client.
-	c, err := h.Stores.Client.GetByCIMDURL(ctx, ts.URL)
+	c, err := h.Stores.Client.GetByCIMDURL(ctx, ts.URL+cimdTestPath)
 	if err != nil || c == nil {
 		t.Fatalf("get cimd client: %v", err)
 	}
@@ -745,7 +744,6 @@ func newAuthorizeServiceWithCIMDAndDCR(t *testing.T, cimdServer *httptest.Server
 	obs := testObs()
 
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	cimdSvc := services.NewCIMDService(stores.Client, fetcher, dcrMode, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	seedMintResource(t, stores, "mcp-cimd-dcr", "CIMD DCR MCP", "https://mcp.example.com",
@@ -767,7 +765,7 @@ func newAuthorizeServiceWithCIMDAndDCR(t *testing.T, cimdServer *httptest.Server
 func TestAuthorize_URLClientID_CIMDBlockedByAdminOnly(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Should Be Blocked",
 			RedirectURIs: []string{"https://evil.example.com/callback"},
 		}
@@ -778,7 +776,7 @@ func TestAuthorize_URLClientID_CIMDBlockedByAdminOnly(t *testing.T) {
 
 	svc := newAuthorizeServiceWithCIMDAndDCR(t, ts, staticDCRModeForTest{Mode: "admin_only"})
 
-	req := validCIMDAuthorizeRequest(ts.URL, "https://evil.example.com/callback")
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, "https://evil.example.com/callback")
 	_, err := svc.StartAuthorization(context.Background(), req)
 	if !errors.Is(err, domain.ErrInvalidClient) {
 		t.Errorf("err = %v, want ErrInvalidClient (CIMD should be blocked by admin_only)", err)
@@ -790,7 +788,7 @@ func TestAuthorize_URLClientID_CIMDBlockedByAdminOnly(t *testing.T) {
 func TestAuthorize_URLClientID_CIMDBlockedByApprovedRedirects(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Unapproved Redirects",
 			RedirectURIs: []string{"https://evil.example.com/callback"},
 		}
@@ -804,7 +802,7 @@ func TestAuthorize_URLClientID_CIMDBlockedByApprovedRedirects(t *testing.T) {
 		ApprovedRedirects: []string{"https://trusted.example.com/callback"},
 	})
 
-	req := validCIMDAuthorizeRequest(ts.URL, "https://evil.example.com/callback")
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, "https://evil.example.com/callback")
 	_, err := svc.StartAuthorization(context.Background(), req)
 	if !errors.Is(err, domain.ErrInvalidClient) {
 		t.Errorf("err = %v, want ErrInvalidClient (CIMD redirect not in approved list)", err)
@@ -817,7 +815,7 @@ func TestAuthorize_URLClientID_CIMDAllowedByApprovedRedirects(t *testing.T) {
 	redirectURI := "https://trusted.example.com/callback"
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Approved CIMD Client",
 			RedirectURIs: []string{redirectURI},
 		}
@@ -831,7 +829,7 @@ func TestAuthorize_URLClientID_CIMDAllowedByApprovedRedirects(t *testing.T) {
 		ApprovedRedirects: []string{redirectURI},
 	})
 
-	req := validCIMDAuthorizeRequest(ts.URL, redirectURI)
+	req := validCIMDAuthorizeRequest(ts.URL+cimdTestPath, redirectURI)
 	result, err := svc.StartAuthorization(context.Background(), req)
 	if err != nil {
 		t.Fatalf("authorize should succeed with approved redirect: %v", err)

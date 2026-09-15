@@ -1850,7 +1850,7 @@ func TestAuthorize_RequireScope_RejectsEmptyScope(t *testing.T) {
 	}
 }
 
-// --- ADR-012: Default scope when scope parameter is absent (require_scope=false) ---
+// --- Default scope when the scope parameter is absent (require_scope=false) ---
 
 // Matrix: 22.7 — missing scope defaults to registered scopes for the resource.
 func TestAuthorize_MissingScope_DefaultScopes(t *testing.T) {
@@ -1868,7 +1868,7 @@ func TestAuthorize_MissingScope_DefaultScopes(t *testing.T) {
 		}
 
 		// Create consent grant covering all registered scopes for the resource.
-		// ADR-012 defaults scope to "tools/query tools/create" for https://mcp.example.com.
+		// Defaults scope to "tools/query tools/create" for https://mcp.example.com.
 		now := time.Now().UTC()
 		grant := &resource.ConsentGrant{
 			ID:         crypto.GenerateRandomString(16),
@@ -1891,7 +1891,7 @@ func TestAuthorize_MissingScope_DefaultScopes(t *testing.T) {
 			"client_id":     {c.ID},
 			"redirect_uri":  {"https://app.example.com/callback"},
 			"response_type": {"code"},
-			// scope intentionally omitted — ADR-012.
+			// scope intentionally omitted — require_scope=false supplies the default.
 			"state":                 {"s1"},
 			"resource":              {"https://mcp.example.com"},
 			"code_challenge":        {challenge},

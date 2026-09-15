@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 8 lines · Total example: 58 lines · SDK: python-sdk 0.3.0**
+**Auth-specific code: 8 lines · Total example: 58 lines · SDK: python-sdk 0.4.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP
@@ -36,8 +36,8 @@ that needs to talk to the other resource.
 | | |
 |---|---|
 | **Time to run** | ~30 seconds (tier 01 must already be running) |
-| **Prereqs** | Tier 01 up (`make run` there), Docker 24+, `docker compose`, `curl`, `jq`, **Python 3.12+** (only if you run outside Docker — `pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` 0.3.0 (PyPI) |
+| **Prereqs** | Tier 01 up (`make run` there), `curl`, `jq`, **Python 3.12+** (`pyproject.toml` pins `requires-python = ">=3.12"`) |
+| **SDK** | `authplane-sdk` 0.4.0 (PyPI) |
 | **HTTP client** | `httpx >= 0.27, < 1` (matches `pyproject.toml`) |
 
 ## Run it in 3 commands
@@ -48,10 +48,11 @@ make run
 make verify
 ```
 
-`make run` builds the agent image. `make verify` registers the Resource
-and an OAuth client against tier 01's running authserver, then executes
-`agent.py` inside tier 01's compose network. `make clean` tears down the
-agent container and removes the `.env` file the run target created.
+`make run` prepares a virtualenv under `.run/` with the SDK installed.
+`make verify` registers the Resource and an OAuth client against tier 01's
+running authserver, then runs `agent.py` natively against the AS and the
+MCP server on their localhost ports. `make clean` removes the `.env` file;
+`make distclean` also removes the virtualenv.
 
 ## Step by step
 
@@ -105,7 +106,7 @@ describe what's happening so you can reproduce the flow by hand.
    [`docs/reference/cli.md#cli-admin-resource-create`](../../../docs/reference/cli.md#cli-admin-resource-create)):
 
    ```bash
-   ( cd ../01-mcp-server-basic && docker compose exec authserver /authserver admin resource create \
+   ( docker exec authplane-tier01-as /authserver admin resource create \
      --slug demo-mcp \
      --uri http://localhost:8080/mcp \
      --backend-kind mint \
@@ -148,11 +149,11 @@ describe what's happening so you can reproduce the flow by hand.
    token the same request returns HTTP 401 — proof that the integration
    is actually enforcing auth.
 
-   `make verify` runs the agent inside the tier-01 compose network so it
-   can reach the AS at `authserver:9000` and the MCP server at
-   `mcp-server:8080`. If you prefer to run it on the host, set
+   `make verify` runs the agent natively on the host, with
    `AUTHPLANE_ISSUER=http://localhost:9000` and
-   `MCP_URL=http://localhost:8080/mcp` instead.
+   `MCP_URL=http://localhost:8080/mcp` — the same host the tier-01 AS
+   announces as its issuer, which the SDK's byte-for-byte issuer check
+   requires.
 
 ## Before / After
 
@@ -221,10 +222,12 @@ upstream (GitHub) with `ConsentRequiredError` handling.
 
 ## Use a locally-built authserver image
 
-This example does NOT bring up its own authserver — tier 01 does. To
-build the AS from this checkout rather than pulling
-`authplane/authserver:latest`, follow the **LOCAL BUILD ESCAPE
-HATCH** comment block in
-[`../../_shared/docker-compose.authserver.yml`](../../_shared/docker-compose.authserver.yml)
-and mirror the change in
-[`../01-mcp-server-basic/docker-compose.yml`](../01-mcp-server-basic/docker-compose.yml).
+This example does NOT bring up its own authserver — tier 01 does. To run
+tier 01 against an image built from this checkout rather than
+`authplane/authserver:latest`, build it at the repo root and pass the tag
+through `AUTHSERVER_IMAGE`:
+
+```bash
+( cd ../../.. && docker build -t authserver:dev -f build/Dockerfile . )
+( cd ../01-mcp-server-basic && AUTHSERVER_IMAGE=authserver:dev make run )
+```

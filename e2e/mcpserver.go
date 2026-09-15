@@ -145,14 +145,41 @@ func (rs *MCPResourceServer) fetchJWKS() (*jose.JSONWebKeySet, error) {
 	return &jwks, nil
 }
 
+// PRMURL is where this server publishes its RFC 9728 metadata. It is the
+// value its challenges advertise under resource_metadata, and the only thing
+// a client holding nothing but this server's URL can follow to find the
+// authorization server.
+func (rs *MCPResourceServer) PRMURL() string {
+	return rs.URI + "/.well-known/oauth-protected-resource"
+}
+
+// challenge builds the WWW-Authenticate value for a refusal.
+//
+// resource_metadata is what makes the refusal actionable: it is the pointer
+// RFC 9728 Section 5.1 defines and the MCP specification's first hop, so a
+// client that arrives holding only a resource URL can discover the
+// authorization server from a 401 alone. scope names what would satisfy the
+// request, which is what a client needs to ask for the right thing on the
+// retry rather than guessing.
+func (rs *MCPResourceServer) challenge(errCode, desc, scope string) string {
+	v := fmt.Sprintf(`Bearer error=%q, error_description=%q, resource_metadata=%q`,
+		errCode, desc, rs.PRMURL())
+	if scope != "" {
+		v += fmt.Sprintf(", scope=%q", scope)
+	}
+	return v
+}
+
 func (rs *MCPResourceServer) writeUnauthorized(w http.ResponseWriter, err error) {
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_token", error_description="%s"`, err.Error()))
+	w.Header().Set("WWW-Authenticate",
+		rs.challenge("invalid_token", err.Error(), strings.Join(rs.Scopes, " ")))
 	w.WriteHeader(http.StatusUnauthorized)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 }
 
 func (rs *MCPResourceServer) writeForbidden(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", error_description="%s"`, msg))
+	w.Header().Set("WWW-Authenticate",
+		rs.challenge("insufficient_scope", msg, strings.Join(rs.Scopes, " ")))
 	w.WriteHeader(http.StatusForbidden)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

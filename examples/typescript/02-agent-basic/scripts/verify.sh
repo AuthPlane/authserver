@@ -120,38 +120,32 @@ CLIENT_ID=$(echo "$client_resp" | jq -er '.client_id')
 CLIENT_SECRET=$(echo "$client_resp" | jq -er '.client_secret')
 green "client created: ${CLIENT_ID}"
 
-# --- step 4: build the agent image ------------------------------------------
-log "building agent image"
-docker compose build agent >/dev/null
-green "agent image built"
-
-# --- step 5: run the agent --------------------------------------------------
+# --- step 4: run the agent --------------------------------------------------
 # The agent uses @authplane/sdk's AuthplaneClient to request a
 # client_credentials token at POST /oauth/token (anchor:
 # docs/reference/http-api.md#http-public-oauth-token), then calls the
 # tier-01 MCP server with the bearer token.
 #
-# The agent container joins tier-01's compose network, so it can resolve
-# the service hostnames directly. The SDK validates that the discovered
-# `metadata.issuer` matches the configured `issuer` — that means the
-# agent's issuer URL must be the same one tier-01's AS was configured
-# with (`http://authserver:9000` per tier-01 `.env.example`).
-agent_issuer="${AGENT_ISSUER:-http://authserver:9000}"
-agent_mcp="${AGENT_MCP_URL:-http://mcp-server:8080/mcp}"
+# The agent runs natively on the host (tsx), so it reaches the AS and the
+# tier-01 MCP server at their localhost ports. The SDK validates that the
+# discovered `metadata.issuer` matches the configured `issuer` byte for byte,
+# so the agent's issuer must be the one tier-01's AS announces —
+# `http://localhost:9000` per tier-01's shared config.
+agent_issuer="${AGENT_ISSUER:-${ISSUER_URL}}"
+agent_mcp="${AGENT_MCP_URL:-${MCP_URL}}"
 agent_resource="${RESOURCE_URI}"  # the audience binding; must match the registered resource URI
 
 log "running agent (acquires token + calls echo tool)"
 agent_log=$(mktemp)
 trap 'rm -f "$agent_log"' EXIT
 
-if ! docker compose run --rm \
-  -e AUTHPLANE_ISSUER="${agent_issuer}" \
-  -e AUTHPLANE_RESOURCE="${agent_resource}" \
-  -e AUTHPLANE_CLIENT_ID="${CLIENT_ID}" \
-  -e AUTHPLANE_CLIENT_SECRET="${CLIENT_SECRET}" \
-  -e MCP_URL="${agent_mcp}" \
-  -e ECHO_TEXT="hello from tier 02" \
-  agent | tee "$agent_log"; then
+if ! AUTHPLANE_ISSUER="${agent_issuer}" \
+  AUTHPLANE_RESOURCE="${agent_resource}" \
+  AUTHPLANE_CLIENT_ID="${CLIENT_ID}" \
+  AUTHPLANE_CLIENT_SECRET="${CLIENT_SECRET}" \
+  MCP_URL="${agent_mcp}" \
+  ECHO_TEXT="hello from tier 02" \
+  ./node_modules/.bin/tsx agent.ts | tee "$agent_log"; then
   red "agent exited non-zero"
   exit 1
 fi

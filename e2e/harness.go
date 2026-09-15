@@ -202,6 +202,34 @@ type HarnessConfig struct {
 	// on the assertion or the request (xaa.require_resource).
 	XAARequireResource bool
 
+	// DisableCIMD turns off Client ID Metadata Document support. CIMD is on
+	// by default here, matching the shipped default.
+	DisableCIMD bool
+	// CIMDRequireHTTPS sets cimd.require_https. The harness serves loopback
+	// httptest URLs, so this defaults to false; compliance probes flip it on
+	// to exercise the scheme gate. It governs the scheme and nothing else —
+	// address filtering is CIMDDisallowPrivateAddresses.
+	CIMDRequireHTTPS bool
+	// CIMDDisallowPrivateAddresses turns SSRF address filtering back on
+	// (cimd.allow_private_addresses: false). Negated so the zero value is the
+	// harness default, as DisableCIMD is: httptest servers listen on loopback,
+	// which the filter refuses, so every scenario needs it off. A probe
+	// exercising the dial-time gate flips this on.
+	CIMDDisallowPrivateAddresses bool
+	// CIMDCacheTTL sets cimd.cache_ttl, the ceiling on how long a fetched
+	// metadata document is cached. Zero means the harness default (5m).
+	CIMDCacheTTL time.Duration
+
+	// MountPath serves the authorization server under a path prefix (e.g.
+	// "/api/v2/auth") instead of at the origin root, and makes the issuer carry
+	// that path component. This is the reverse-proxy deployment shape
+	// output.URLBuilder is designed for; it is the only topology in which
+	// RFC 8414 Section 3.1 path-insertion discovery applies, so the compliance
+	// suite needs it to probe those requirements at all. Must start with "/"
+	// and must not end with one. Empty (the default) serves at the root and
+	// leaves every existing scenario byte-for-byte unchanged.
+	MountPath string
+
 	// EnableAdminAPI starts the admin HTTP server alongside
 	// the public AS so scenarios can drive /admin/resources,
 	// /admin/broker-providers, /admin/grants, /admin/issuances and
@@ -223,6 +251,10 @@ type ConnectorConfig struct {
 // NewTestHarness creates a fully-wired authserver httptest.Server.
 func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	t.Helper()
+
+	if hcfg.MountPath != "" && (!strings.HasPrefix(hcfg.MountPath, "/") || strings.HasSuffix(hcfg.MountPath, "/")) {
+		t.Fatalf("HarnessConfig.MountPath = %q: must start with %q and not end with one", hcfg.MountPath, "/")
+	}
 
 	obs := observability.NewNoop()
 	if os.Getenv("E2E_DEBUG") != "" {
@@ -266,7 +298,6 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	}
 
 	cimdFetcher := cimd.New(obs.WithComponent("cimd"))
-	cimdFetcher.SetAllowLoopback(true) // E2E tests use httptest servers on loopback.
 	dcrModeProvider := static.NewDCRModeProvider(dcrMode, hcfg.ApprovedRedirects)
 
 	// compute the runtime-enabled grant set so admin + DCR + CIMD
@@ -287,12 +318,20 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 
 	// Shared config providers consumed by both the feature services and the AS
 	// metadata discovery document (built into asMetadataSvc before srvReal).
-	// E2E uses loopback httptest servers, so RequireHTTPS=false.
+	// E2E uses loopback httptest servers, so both CIMD controls default to
+	// relaxed: RequireHTTPS=false for the http:// scheme, AllowPrivateAddresses
+	// =true so the address filter does not refuse 127.0.0.1. Each is
+	// independently switchable from HarnessConfig.
+	cimdCacheTTL := hcfg.CIMDCacheTTL
+	if cimdCacheTTL == 0 {
+		cimdCacheTTL = 5 * time.Minute
+	}
 	cimdConfigProvider := static.NewCIMDConfigProvider(output.CIMDConfig{
-		Enabled:      true,
-		RequireHTTPS: false,
-		CacheTTL:     5 * time.Minute,
-		FetchTimeout: 10 * time.Second,
+		Enabled:               !hcfg.DisableCIMD,
+		RequireHTTPS:          hcfg.CIMDRequireHTTPS,
+		AllowPrivateAddresses: !hcfg.CIMDDisallowPrivateAddresses,
+		CacheTTL:              cimdCacheTTL,
+		FetchTimeout:          10 * time.Second,
 	})
 	oauthConfigProvider := static.NewOAuthConfigProvider(output.OAuthConfig{
 		RequireScope:         false,
@@ -525,9 +564,15 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
+	// The issuer is the origin plus the mount, so a mounted deployment
+	// announces (and stamps) an issuer carrying a path component. With no
+	// mount — every scenario outside the compliance suite — this is exactly
+	// ts.URL and nothing downstream changes.
+	issuerURL := ts.URL + hcfg.MountPath
+
 	// 5. Now that we know the URL, re-create services with correct issuer.
 	// The token/introspection services use issuer for JWT claims. We need it to match.
-	mintIssuerReal := services.NewMintIssuer(jwksSvc, stores.Issuance, static.NewIssuerProvider(ts.URL), obs.WithComponent("mint-issuer"))
+	mintIssuerReal := services.NewMintIssuer(jwksSvc, stores.Issuance, static.NewIssuerProvider(issuerURL), obs.WithComponent("mint-issuer"))
 	tokenSvcReal := services.NewTokenService(
 		stores.Session, stores.Token, stores.Client, userStore,
 		jwksSvc, mintIssuerReal, tokenConfigProvider,
@@ -542,15 +587,21 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	tokenSvcReal.WithResourceRegistry(resourceRegistry)
 	introspectSvcReal := services.NewIntrospectionService(
 		jwksSvc, stores.Revocation, stores.MachineToken, stores.Client, userStore,
-		static.NewIssuerProvider(ts.URL), obs.WithComponent("introspect"), auditSvc,
+		static.NewIssuerProvider(issuerURL), obs.WithComponent("introspect"), auditSvc,
 	)
 	// mirror cmd/authserver/serve.go so a resource server may introspect a
 	// token minted for it.
 	introspectSvcReal.WithResourceRegistry(resourceRegistry)
-	revokeSvcReal := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, static.NewIssuerProvider(ts.URL), obs.WithComponent("revoke"), auditSvc, stores.Revocation)
-	serverCfg.Issuer = ts.URL
+	revokeSvcReal := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, static.NewIssuerProvider(issuerURL), obs.WithComponent("revoke"), auditSvc, stores.Revocation)
+	serverCfg.Issuer = issuerURL
 
 	// Rebuild with correct issuer.
+	if hcfg.MountPath != "" {
+		// Internal redirects (login, consent, OIDC start) and the session
+		// cookie's Path must carry the mount, or the browser leg of every
+		// interactive flow lands at the origin root where nothing is served.
+		deps.URLs = mountURLBuilder{mount: hcfg.MountPath}
+	}
 	deps.Token = tokenSvcReal
 	deps.Introspect = introspectSvcReal
 	deps.Revoke = revokeSvcReal
@@ -559,7 +610,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	if hcfg.EnableClientCredentials {
 		clientCredsSvcReal = services.NewClientCredentialsService(
 			stores.Client, stores.MachineToken, jwksSvc,
-			static.NewIssuerProvider(ts.URL), static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{TokenExpiry: 1 * time.Hour}),
+			static.NewIssuerProvider(issuerURL), static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{TokenExpiry: 1 * time.Hour}),
 			obs.WithComponent("client-credentials"), auditSvc,
 			resourceLister,
 		)
@@ -593,7 +644,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		}
 		tokenExchangeSvcReal = services.NewTokenExchangeService(
 			stores.Client, stores.MachineToken, jwksSvc, jwksSvc,
-			stores.Revocation, static.NewIssuerProvider(ts.URL),
+			stores.Revocation, static.NewIssuerProvider(issuerURL),
 			static.NewTokenExchangeConfigProvider(output.TokenExchangeConfig{
 				AllowSelfExchange: hcfg.TokenExchangeAllowSelfExchange,
 				MaxChainDepth:     maxDepth,
@@ -613,7 +664,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	// (/authorize?resource=<mcp_slug>&scope=<missing>) and the bound-D /
 	// bound-E broker upstream re-connect URL (/connect/<provider>). Without
 	// it those flows emit an empty consent_url.
-	deps.IssuerProvider = static.NewIssuerProvider(ts.URL)
+	deps.IssuerProvider = static.NewIssuerProvider(issuerURL)
 
 	// ConnectService — wired whenever the harness has a state secret + an
 	// encryptor (always true now since BrokerIssuer needs an
@@ -623,7 +674,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 			resourceRegistry, stores.Resource, stores.BrokerProvider, stores.BrokerGrant, stores.ConnectPendingState,
 			bpRegistry, encryptor,
 			static.NewConnectStateConfigProvider(testStateSecret),
-			static.NewIssuerProvider(ts.URL),
+			static.NewIssuerProvider(issuerURL),
 			static.NewConnectConfigProvider(output.ConnectConfig{RedirectBaseURL: ts.URL}),
 			obs.WithComponent("connect"), auditSvc,
 		)
@@ -660,7 +711,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 
 		xaaIDPSvc = services.NewXAAIDPService(
 			stores.IDP, xaaJWKSCache, idpjwks.DiscoverJWKSUri,
-			static.NewIssuerProvider(ts.URL), obs.WithComponent("xaa-idp"), auditSvc,
+			static.NewIssuerProvider(issuerURL), obs.WithComponent("xaa-idp"), auditSvc,
 		)
 
 		subjectMode := hcfg.XAASubjectMode
@@ -670,7 +721,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		jwtBearerSvc := services.NewJWTBearerService(
 			stores.IDP, xaaJWKSCache, stores.AssertionJTI,
 			stores.Client, stores.MachineToken, jwksSvc,
-			static.NewIssuerProvider(ts.URL),
+			static.NewIssuerProvider(issuerURL),
 			static.NewXAAConfigProvider(output.XAAConfig{
 				TokenExpiry:     1 * time.Hour,
 				MaxAssertionAge: 5 * time.Minute,
@@ -712,7 +763,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	// the shared static providers. Discovery routes are registered only on the
 	// real server below (deps.ASMetadata is non-nil here).
 	deps.ASMetadata = services.NewASMetadataService(
-		static.NewIssuerProvider(ts.URL),
+		static.NewIssuerProvider(issuerURL),
 		grantsProvider,
 		cimdConfigProvider,
 		dpopConfigProvider,
@@ -722,9 +773,27 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		obs.WithComponent("as-metadata"),
 	)
 
+	// Protected Resource Metadata (RFC 9728), over the same registry the token
+	// path validates resource= against. Wired here so the e2e suite exercises
+	// the real routes rather than a 404 from an unregistered handler.
+	deps.PRMetadata = services.NewPRMetadataService(
+		static.NewIssuerProvider(issuerURL),
+		resourceRegistry,
+		obs.WithComponent("prm-metadata"),
+	)
+
 	srvReal := apipublic.NewServer(context.Background(), serverCfg, deps, obs.WithComponent("http"))
-	// Replace handler on the test server.
-	ts.Config.Handler = srvReal.Handler()
+	// Replace handler on the test server. Under a mount the AS is served from
+	// a host-level mux that strips the prefix, which is what a reverse proxy
+	// does — and it means the origin root serves nothing, so a client probing
+	// the RFC 8414 path-insertion URL reaches this mux and not the AS.
+	if hcfg.MountPath == "" {
+		ts.Config.Handler = srvReal.Handler()
+	} else {
+		root := http.NewServeMux()
+		root.Handle(hcfg.MountPath+"/", http.StripPrefix(hcfg.MountPath, srvReal.Handler()))
+		ts.Config.Handler = root
+	}
 
 	// : optional admin HTTP server. Mirrors the wiring in
 	// cmd/authserver/serve.go so /admin/{resources,broker-providers,grants,issuances,audit}
@@ -769,7 +838,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	h := &TestHarness{
 		T:                    t,
 		AuthServer:           ts,
-		Issuer:               ts.URL,
+		Issuer:               issuerURL,
 		AdminSvc:             adminSvc,
 		ResourceAdminSvc:     resourceAdminSvc,
 		AdminAPI:             adminTS,
@@ -1100,14 +1169,14 @@ func (h *TestHarness) Authorize(client *http.Client, params url.Values) Authoriz
 	code := locURL.Query().Get("code")
 	state := locURL.Query().Get("state")
 	if code != "" {
-		return AuthorizeResult{Code: code, State: state, Location: loc}
+		return AuthorizeResult{Code: code, State: state, Location: loc, Iss: locURL.Query().Get("iss")}
 	}
 
 	// Error redirect.
 	errCode := locURL.Query().Get("error")
 	errDesc := locURL.Query().Get("error_description")
 	if errCode != "" {
-		return AuthorizeResult{Error: errCode, ErrorDescription: errDesc, Location: loc}
+		return AuthorizeResult{Error: errCode, ErrorDescription: errDesc, Location: loc, Iss: locURL.Query().Get("iss")}
 	}
 
 	h.T.Fatalf("unexpected authorize redirect: %s", loc)
@@ -1561,6 +1630,9 @@ type AuthorizeResult struct {
 	Error            string
 	ErrorDescription string
 	Location         string
+	// Iss is the RFC 9207 issuer identifier from the authorization response.
+	// Present on both the code and the error redirect.
+	Iss string
 }
 
 // TokenResponse mirrors the OAuth token response.

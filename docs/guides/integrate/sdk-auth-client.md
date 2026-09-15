@@ -4,7 +4,7 @@
 
 **Audience:** Builders writing an MCP **client** (agent or backend service) in Go, TypeScript, or Python that needs to acquire an Authplane access token and call a protected MCP tool.
 
-> The canonical SDKs are published packages: [go-sdk](https://github.com/authplane/go-sdk) on the Go module proxy, [ts-sdk](https://github.com/authplane/ts-sdk) as `@authplane/sdk` / `@authplane/mcp` / `@authplane/fastmcp` on npm, and [python-sdk](https://github.com/authplane/python-sdk) as `authplane-sdk` + `authplane-fastmcp` on PyPI.
+> The canonical SDKs are published packages: [go-sdk](https://github.com/authplane/go-sdk) on the Go module proxy, [ts-sdk](https://github.com/authplane/ts-sdk) as `@authplane/sdk` / `@authplane/mcp` / `@authplane/fastmcp` on npm, [python-sdk](https://github.com/authplane/python-sdk) as `authplane-sdk` + `authplane-fastmcp` on PyPI, [java-sdk](https://github.com/authplane/java-sdk) as `ai.authplane.sdk:authplane-sdk` + `:authplane-mcp` + `:authplane-spring` on Maven Central, and [cs-sdk](https://github.com/authplane/cs-sdk) as `Authplane.Sdk` + `Authplane.Mcp` on NuGet. The recipes below cover Go, TypeScript and Python; for Java and C# follow each repo's README.
 
 ## What you'll achieve in 10 minutes
 
@@ -37,7 +37,7 @@ For browser-based user login (authorization code flow), use the OAuth endpoints 
 
 ### 1. Install the SDK
 
-**Go:** `go get github.com/authplane/go-sdk`
+**Go:** `go get github.com/authplane/go-sdk/core`
 **TypeScript:** `npm install @authplane/sdk`
 **Python:** `pip install authplane-sdk`
 
@@ -46,7 +46,7 @@ For browser-based user login (authorization code flow), use the OAuth endpoints 
 **Go:**
 
 ```go
-import "github.com/authplane/go-sdk/authplane"
+import "github.com/authplane/go-sdk/core/authplane"
 
 client := authplane.NewClient(authplane.Config{
     IssuerURL:    "http://localhost:9000",
@@ -58,7 +58,7 @@ client := authplane.NewClient(authplane.Config{
 **TypeScript:**
 
 ```typescript
-import { AuthplaneClient } from "@authplane/sdk";
+import { AuthplaneClient } from "@authplane/sdk/core";
 
 const client = new AuthplaneClient({
   issuerUrl: "http://localhost:9000",

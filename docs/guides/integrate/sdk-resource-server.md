@@ -4,7 +4,7 @@
 
 **Audience:** Builders writing an MCP **server** (resource server) in Go, TypeScript, or Python who want drop-in JWT validation, JWKS caching, [DPoP](../../concepts/glossary.md#glossary-dpop) checks, and scope enforcement.
 
-> The canonical SDKs are published packages: [go-sdk](https://github.com/authplane/go-sdk) on the Go module proxy, [ts-sdk](https://github.com/authplane/ts-sdk) as `@authplane/sdk` / `@authplane/mcp` / `@authplane/fastmcp` on npm, and [python-sdk](https://github.com/authplane/python-sdk) as `authplane-sdk` + `authplane-fastmcp` on PyPI.
+> The canonical SDKs are published packages: [go-sdk](https://github.com/authplane/go-sdk) on the Go module proxy, [ts-sdk](https://github.com/authplane/ts-sdk) as `@authplane/sdk` / `@authplane/mcp` / `@authplane/fastmcp` on npm, [python-sdk](https://github.com/authplane/python-sdk) as `authplane-sdk` + `authplane-fastmcp` on PyPI, [java-sdk](https://github.com/authplane/java-sdk) as `ai.authplane.sdk:authplane-sdk` + `:authplane-mcp` + `:authplane-spring` on Maven Central, and [cs-sdk](https://github.com/authplane/cs-sdk) as `Authplane.Sdk` + `Authplane.Mcp` on NuGet. The recipes below cover Go, TypeScript and Python; for Java and C# follow each repo's README.
 
 ## What you'll achieve in 10 minutes
 
@@ -30,9 +30,12 @@ Each SDK ships a core verifier plus framework adapters. Pin the adapter that mat
 | **Python** | Any other framework (FastAPI, Starlette, raw ASGI) | `pip install authplane-sdk` | `from authplane import AuthplaneResource` |
 | **TypeScript** | Official `@modelcontextprotocol/sdk` on Express (tier-01) | `npm install @authplane/mcp` | `import { authplaneMcpAuth } from "@authplane/mcp"` |
 | **TypeScript** | FastMCP | `npm install @authplane/fastmcp` | `import { authplaneAuth } from "@authplane/fastmcp"` |
-| **TypeScript** | Any other framework | `npm install @authplane/sdk` | `import { AuthplaneResource } from "@authplane/sdk"` |
+| **TypeScript** | Hono | `npm install @authplane/hono` | `import { bearerAuth } from "@authplane/hono"` |
+| **TypeScript** | NestJS | `npm install @authplane/nestjs` | `import { AuthplaneModule } from "@authplane/nestjs"` |
+| **TypeScript** | Any other framework | `npm install @authplane/sdk` | `import { AuthplaneResource } from "@authplane/sdk/core"` |
 | **Go** | Official `modelcontextprotocol/go-sdk` (tier-01) | `go get github.com/authplane/go-sdk/mcp` | `import "github.com/authplane/go-sdk/mcp/pkg/authplanemcp"` (`authplanemcp.NewAdapter`) |
-| **Go** | net/http (raw HTTP service) | `go get github.com/authplane/go-sdk/http` | `import authhttp "github.com/authplane/go-sdk/http/pkg/auth"` |
+| **Go** | `mark3labs/mcp-go` | `go get github.com/authplane/go-sdk/mark3labs` | `import "github.com/authplane/go-sdk/mark3labs/pkg/authplanemark3labs"` (`authplanemark3labs.NewAdapter`) |
+| **Go** | net/http (raw HTTP service) | `go get github.com/authplane/go-sdk/http` | `import "github.com/authplane/go-sdk/http/pkg/authplanehttp"` |
 
 The recipes below show the MCP-adapter path for each language — that's the one that delivers JWT validation + JWKS caching + DPoP + scope enforcement in ~5 lines. For raw-HTTP integrations (non-MCP), use the core verifier and wire your own middleware.
 

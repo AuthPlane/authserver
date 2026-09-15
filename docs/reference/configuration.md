@@ -105,6 +105,7 @@ CIMDConfig controls Client ID Metadata Document handling.
 
 | Key | Type | Default | Env var | Notes |
 | --- | --- | --- | --- | --- |
+| `cimd.allow_private_addresses` | `bool` | `false` | `AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES` | AllowPrivateAddresses turns off SSRF address filtering for CIMD document fetches, at both the URL check and the dial. Local development only: with it set, a document URL may resolve to loopback, RFC 1918 space or the cloud metadata endpoint. Validate refuses it unless server.issuer is localhost, so it cannot be left on in a deployment. |
 | `cimd.cache_ttl` | `duration` | `1h` | `AUTHPLANE_CIMD_CACHE_TTL` | — |
 | `cimd.enabled` | `bool` | `true` | `AUTHPLANE_CIMD_ENABLED` | — |
 | `cimd.fetch_timeout` | `duration` | `10s` | `AUTHPLANE_CIMD_FETCH_TIMEOUT` | — |
@@ -165,7 +166,7 @@ OAuthConfig controls OAuth authorization server behavior.
 
 | Key | Type | Default | Env var | Notes |
 | --- | --- | --- | --- | --- |
-| `oauth.require_scope` | `bool` | `true` | `AUTHPLANE_OAUTH_REQUIRE_SCOPE` | RequireScope rejects authorize requests missing the scope parameter with invalid_scope (RFC 6749 §3.3 compliant). When false, missing scope defaults to all registered scopes for the resource (ADR-012). |
+| `oauth.require_scope` | `bool` | `true` | `AUTHPLANE_OAUTH_REQUIRE_SCOPE` | RequireScope rejects authorize requests missing the scope parameter with invalid_scope. When false, missing scope is processed using a pre-defined default value: all scopes registered for the resource. RFC 6749 §3.3 requires the server to do one or the other — "either process the request using a pre-defined default value or fail the request indicating an invalid scope" — so both settings are conformant and this flag picks between them. Defaults to true. |
 | `oauth.state_max_age` | `duration` | `10m` | `AUTHPLANE_OAUTH_STATE_MAX_AGE` | StateMaxAge bounds the OIDC state cookie's lifetime: both the cookie's Max-Age attribute and the server-side freshness window checked at callback. Default 10m. A shorter value tightens the state replay window (regulatory or UX driven, per deployment). |
 
 ## `oidc`
@@ -260,7 +261,7 @@ ClientCredentialsConfig controls the client_credentials grant (RFC 6749 §4.4).
 
 | Key | Type | Default | Env var | Notes |
 | --- | --- | --- | --- | --- |
-| `client_credentials.enabled` | `bool` | `false` | `AUTHPLANE_CLIENT_CREDENTIALS_ENABLED` | — |
+| `client_credentials.enabled` | `bool` | `true` | `AUTHPLANE_CLIENT_CREDENTIALS_ENABLED` | — |
 | `client_credentials.token_expiry` | `duration` | `1h` | `AUTHPLANE_CLIENT_CREDENTIALS_TOKEN_EXPIRY` | machine token TTL (default: 1h) |
 
 ## `dpop`
@@ -271,7 +272,7 @@ DPoPConfig controls DPoP proof-of-possession (RFC 9449).
 
 | Key | Type | Default | Env var | Notes |
 | --- | --- | --- | --- | --- |
-| `dpop.enabled` | `bool` | `false` | `AUTHPLANE_DPOP_ENABLED` | enable DPoP support (default: false) |
+| `dpop.enabled` | `bool` | `true` | `AUTHPLANE_DPOP_ENABLED` | enable DPoP support (default: true; support only — a client that sends no proof still receives a bearer token) |
 | `dpop.nonce_ttl` | `duration` | `60s` | `AUTHPLANE_DPOP_NONCE_TTL` | TTL for server-issued nonces (default: 60s) |
 | `dpop.proof_lifetime` | `duration` | `60s` | `AUTHPLANE_DPOP_PROOF_LIFETIME` | max \|now - iat\| for proof freshness (default: 60s) |
 | `dpop.require_nonce` | `bool` | — | `AUTHPLANE_DPOP_REQUIRE_NONCE` | when true, all DPoP proofs must include server nonce (default: false) |
@@ -285,7 +286,7 @@ TokenExchangeConfig controls RFC 8693 token exchange.
 | Key | Type | Default | Env var | Notes |
 | --- | --- | --- | --- | --- |
 | `token_exchange.allow_self_exchange` | `bool` | — | `AUTHPLANE_TOKEN_EXCHANGE_ALLOW_SELF_EXCHANGE` | when true, client may exchange its own token for narrower scope (default: false) |
-| `token_exchange.enabled` | `bool` | `false` | `AUTHPLANE_TOKEN_EXCHANGE_ENABLED` | — |
+| `token_exchange.enabled` | `bool` | `true` | `AUTHPLANE_TOKEN_EXCHANGE_ENABLED` | — |
 | `token_exchange.max_chain_depth` | `int` | `5` | `AUTHPLANE_TOKEN_EXCHANGE_MAX_CHAIN_DEPTH` | maximum delegation chain depth (required when enabled, 1-10) |
 | `token_exchange.token_expiry` | `duration` | `1h` | `AUTHPLANE_TOKEN_EXCHANGE_TOKEN_EXPIRY` | TTL for exchanged tokens (required when enabled) |
 
@@ -319,12 +320,12 @@ XAAConfig controls Enterprise-Managed Authorization (Cross App Access).
 
 | Key | Type | Default | Env var | Notes |
 | --- | --- | --- | --- | --- |
-| `xaa.enabled` | `bool` | — | — | — |
-| `xaa.jwks_cache_ttl` | `duration` | — | — | JWKS cache TTL (default: 1h) |
-| `xaa.max_assertion_age` | `duration` | — | — | Max age of ID-JAG iat (default: 5m) |
-| `xaa.require_resource` | `bool` | — | — | Refuse exchanges that name no resource, on the assertion or the request (default: false) |
-| `xaa.subject_mode` | `string` | — | — | "auto_map" or "strict" (default: "auto_map") |
-| `xaa.token_expiry` | `duration` | — | — | TTL for XAA-issued access tokens (default: 1h) |
+| `xaa.enabled` | `bool` | `true` | `AUTHPLANE_XAA_ENABLED` | — |
+| `xaa.jwks_cache_ttl` | `duration` | `1h` | `AUTHPLANE_XAA_JWKS_CACHE_TTL` | JWKS cache TTL (default: 1h) |
+| `xaa.max_assertion_age` | `duration` | `5m` | `AUTHPLANE_XAA_MAX_ASSERTION_AGE` | Max age of ID-JAG iat (default: 5m) |
+| `xaa.require_resource` | `bool` | `false` | `AUTHPLANE_XAA_REQUIRE_RESOURCE` | Refuse exchanges that name no resource, on the assertion or the request (default: false) |
+| `xaa.subject_mode` | `string` | `auto_map` | `AUTHPLANE_XAA_SUBJECT_MODE` | "auto_map" or "strict" (default: "auto_map") |
+| `xaa.token_expiry` | `duration` | `1h` | `AUTHPLANE_XAA_TOKEN_EXPIRY` | TTL for XAA-issued access tokens (default: 1h) |
 
 ## `client_secret_pepper`
 

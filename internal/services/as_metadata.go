@@ -16,6 +16,13 @@ var _ input.ASMetadataPort = (*ASMetadataService)(nil)
 //nolint:gosec // G101 false positive: this is an OAuth grant-type URN, not a credential.
 const grantTypeJWTBearer = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 
+// grantProfileIDJAG is the Identity Assertion Authorization Grant profile URN
+// (draft-ietf-oauth-identity-assertion-authz-grant Section 7.2). The stable MCP
+// Enterprise-Managed Authorization extension defines discovery as its presence
+// in authorization_grant_profiles_supported, so this URN — not any flag of our
+// own — is what tells a conformant client the ID-JAG flow works here.
+const grantProfileIDJAG = "urn:ietf:params:oauth:grant-profile:id-jag"
+
 // baselineGrantTypes is the grant set discovery falls back to when the
 // EnabledGrantsProvider errors. Discovery is critical infrastructure — a
 // transient provider failure must degrade to the always-present grants rather
@@ -93,7 +100,20 @@ func (s *ASMetadataService) Metadata(ctx context.Context) (*input.ASMetadata, er
 		CodeChallengeMethodsSupported:     []string{"S256"},
 		ScopesSupported:                   s.resolveScopes(ctx),
 		ResourceIndicatorsSupported:       true,
-		IdentityAssertionSupported:        slices.Contains(grants, grantTypeJWTBearer),
+
+		// Unconditional: the authorization endpoint always stamps iss (it fails
+		// the request if it cannot resolve the issuer), so there is no
+		// configuration under which this would be false. RFC 9207 Section 2.3
+		// requires the advertisement from any server that emits the parameter.
+		AuthorizationResponseIssParameterSupported: true,
+	}
+
+	// The ID-JAG profile rides on the jwt-bearer grant: no jwt-bearer, no ID-JAG
+	// exchange, so advertise both from the same condition. IdentityAssertionSupported
+	// is the deprecated alias kept in lockstep for one release.
+	if slices.Contains(grants, grantTypeJWTBearer) {
+		md.AuthorizationGrantProfilesSupported = []string{grantProfileIDJAG}
+		md.IdentityAssertionSupported = true
 	}
 
 	if s.cimdEnabled(ctx) {

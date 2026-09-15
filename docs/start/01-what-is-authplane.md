@@ -8,7 +8,7 @@ ships as a single Go binary. You run it next to your MCP server. It:
 
 - Implements OAuth 2.1 (authorization code + PKCE, client credentials,
   refresh tokens, token exchange RFC 8693, JWT bearer RFC 7523).
-- Implements the **MCP Authorization spec (2025-11-25)** — discovery,
+- Implements the **MCP Authorization spec (2026-07-28)** — discovery,
   resource indicators, scopes-as-tools, DPoP sender constraining
   (RFC 9449).
 - Acts in one of two modes per resource:

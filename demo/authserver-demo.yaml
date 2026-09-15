@@ -33,7 +33,11 @@ dcr:
   default_refresh_expiry: 168h
 
 cimd:
+  # The two controls are independent: require_https governs the URL scheme,
+  # allow_private_addresses governs SSRF address filtering. The demo needs both
+  # relaxed to serve documents over http:// on the local machine.
   require_https: false
+  allow_private_addresses: true
   cache_ttl: 1h
   fetch_timeout: 10s
 

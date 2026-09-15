@@ -19,10 +19,18 @@ import (
 	"github.com/authplane/authserver/testdata"
 )
 
+// cimdTestPath is the path component every test CIMD client_id carries.
+//
+// The MCP 2026-07-28 client-registration spec requires the client_id URL to
+// contain a path component, so a bare httptest origin is not a legal client_id
+// and the fetcher rejects it before any network call. Appending this keeps these
+// tests exercising the CIMD flow rather than tripping the structural gate.
+const cimdTestPath = "/client.json"
+
 func TestCIMD_CreateClient(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Test Client",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -34,16 +42,15 @@ func TestCIMD_CreateClient(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	ctx := context.Background()
-	c, err := svc.VerifyCIMD(ctx, ts.URL)
+	c, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("verify cimd: %v", err)
 	}
-	if c.ID != ts.URL {
-		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL)
+	if c.ID != ts.URL+cimdTestPath {
+		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL+cimdTestPath)
 	}
 	if c.Name != "CIMD Test Client" {
 		t.Errorf("client_name: got %q", c.Name)
@@ -51,7 +58,7 @@ func TestCIMD_CreateClient(t *testing.T) {
 	if c.RegistrationSource != "cimd" {
 		t.Errorf("registration_source: got %q", c.RegistrationSource)
 	}
-	if c.CIMDURL != ts.URL {
+	if c.CIMDURL != ts.URL+cimdTestPath {
 		t.Errorf("cimd_url: got %q", c.CIMDURL)
 	}
 }
@@ -60,7 +67,7 @@ func TestCIMD_CreateClient(t *testing.T) {
 func TestCIMD_RedirectURIsEnforced(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "CIMD Redirect Test",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -72,11 +79,10 @@ func TestCIMD_RedirectURIsEnforced(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	ctx := context.Background()
-	c, err := svc.VerifyCIMD(ctx, ts.URL)
+	c, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("verify cimd: %v", err)
 	}
@@ -104,7 +110,7 @@ func TestCIMD_UpdateExistingClient(t *testing.T) {
 			name = "Updated Name"
 		}
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   name,
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -117,13 +123,12 @@ func TestCIMD_UpdateExistingClient(t *testing.T) {
 	obs := testObs()
 	// Use short cache TTL so second call re-fetches.
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	ctx := context.Background()
 
 	// First call — creates client.
-	c1, err := svc.VerifyCIMD(ctx, ts.URL)
+	c1, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("first verify: %v", err)
 	}
@@ -135,7 +140,7 @@ func TestCIMD_UpdateExistingClient(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	// Second call — updates existing client.
-	c2, err := svc.VerifyCIMD(ctx, ts.URL)
+	c2, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("second verify: %v", err)
 	}
@@ -156,10 +161,9 @@ func TestCIMD_FetchFailed(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -179,7 +183,7 @@ func TestCIMD_UpdateExisting_RedirectURIsChange(t *testing.T) {
 			uris = []string{"https://app.example.com/callback", "https://app.example.com/callback2"}
 		}
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Redirect Test",
 			RedirectURIs: uris,
 		}
@@ -191,13 +195,12 @@ func TestCIMD_UpdateExisting_RedirectURIsChange(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	ctx := context.Background()
 
 	// First call — creates client with 1 redirect_uri.
-	c1, err := svc.VerifyCIMD(ctx, ts.URL)
+	c1, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("first verify: %v", err)
 	}
@@ -208,7 +211,7 @@ func TestCIMD_UpdateExisting_RedirectURIsChange(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	// Second call — updates redirect_uris to 2.
-	c2, err := svc.VerifyCIMD(ctx, ts.URL)
+	c2, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("second verify: %v", err)
 	}
@@ -227,7 +230,7 @@ func TestCIMD_UpdateExisting_GrantTypesChange(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Grant Type Test",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -244,13 +247,12 @@ func TestCIMD_UpdateExisting_GrantTypesChange(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
 	ctx := context.Background()
 
 	// First call — defaults applied (authorization_code, code, none).
-	c1, err := svc.VerifyCIMD(ctx, ts.URL)
+	c1, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("first verify: %v", err)
 	}
@@ -264,7 +266,7 @@ func TestCIMD_UpdateExisting_GrantTypesChange(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	// Second call — updated grant_types and auth method.
-	c2, err := svc.VerifyCIMD(ctx, ts.URL)
+	c2, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("second verify: %v", err)
 	}
@@ -283,7 +285,7 @@ func TestCIMD_UpdateExisting_GrantTypesChange(t *testing.T) {
 func TestCIMD_ClientStatus_Active(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Status Test",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -295,10 +297,9 @@ func TestCIMD_ClientStatus_Active(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	c, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	c, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -314,7 +315,7 @@ func TestCIMD_ClientStatus_Active(t *testing.T) {
 func TestCIMD_AdminOnly_BlocksAutoRegistration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Blocked Client",
 			RedirectURIs: []string{"https://evil.example.com/callback"},
 		}
@@ -326,16 +327,15 @@ func TestCIMD_AdminOnly_BlocksAutoRegistration(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "admin_only"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if !errors.Is(err, domain.ErrRegistrationDisabled) {
 		t.Errorf("err = %v, want ErrRegistrationDisabled (admin_only should block CIMD)", err)
 	}
 
 	// Verify no client was created in the DB.
-	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL)
+	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath)
 	if c != nil {
 		t.Error("client should NOT have been created in admin_only mode")
 	}
@@ -347,7 +347,7 @@ func TestCIMD_AdminOnly_BlocksAutoRegistration(t *testing.T) {
 func TestCIMD_ProviderError_RejectsRegistration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Would-Be Client",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -359,10 +359,9 @@ func TestCIMD_ProviderError_RejectsRegistration(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, failingDCRModeForTest{}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err == nil {
 		t.Fatal("expected VerifyCIMD to fail closed when the mode provider errors, got nil")
 	}
@@ -371,7 +370,7 @@ func TestCIMD_ProviderError_RejectsRegistration(t *testing.T) {
 	}
 
 	// Fail-closed must not auto-register a client.
-	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL)
+	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath)
 	if c != nil {
 		t.Error("client should NOT have been created on provider error")
 	}
@@ -383,7 +382,7 @@ func TestCIMD_ProviderError_RejectsRegistration(t *testing.T) {
 func TestCIMD_UnknownMode_RejectsRegistration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Would-Be Client",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -395,16 +394,15 @@ func TestCIMD_UnknownMode_RejectsRegistration(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "bogus"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err == nil {
 		t.Fatal("expected VerifyCIMD to reject an unknown DCR mode, got nil")
 	}
 
 	// Fail-closed must not auto-register a client.
-	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL)
+	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath)
 	if c != nil {
 		t.Error("client should NOT have been created under an unknown mode")
 	}
@@ -415,7 +413,7 @@ func TestCIMD_UnknownMode_RejectsRegistration(t *testing.T) {
 func TestCIMD_ApprovedRedirects_RejectsUnapprovedURI(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Attacker Client",
 			RedirectURIs: []string{"https://evil.example.com/callback"},
 		}
@@ -427,19 +425,18 @@ func TestCIMD_ApprovedRedirects_RejectsUnapprovedURI(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{
 		Mode:              "approved_redirects",
 		ApprovedRedirects: []string{"https://trusted.example.com/callback"},
 	}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if !errors.Is(err, domain.ErrInvalidRedirectURI) {
 		t.Errorf("err = %v, want ErrInvalidRedirectURI (unapproved redirect_uri)", err)
 	}
 
 	// Verify no client was created.
-	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL)
+	c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath)
 	if c != nil {
 		t.Error("client should NOT have been created with unapproved redirect_uri")
 	}
@@ -450,7 +447,7 @@ func TestCIMD_ApprovedRedirects_RejectsUnapprovedURI(t *testing.T) {
 func TestCIMD_ApprovedRedirects_AllowsApprovedURI(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Approved Client",
 			RedirectURIs: []string{"https://trusted.example.com/callback"},
 		}
@@ -462,18 +459,17 @@ func TestCIMD_ApprovedRedirects_AllowsApprovedURI(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{
 		Mode:              "approved_redirects",
 		ApprovedRedirects: []string{"https://trusted.example.com/callback"},
 	}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	c, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	c, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("verify: %v (approved redirect should be allowed)", err)
 	}
-	if c.ID != ts.URL {
-		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL)
+	if c.ID != ts.URL+cimdTestPath {
+		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL+cimdTestPath)
 	}
 }
 
@@ -482,7 +478,7 @@ func TestCIMD_ApprovedRedirects_AllowsApprovedURI(t *testing.T) {
 func TestCIMD_ApprovedRedirects_MixedURIs(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Mixed Client",
 			RedirectURIs: []string{"https://trusted.example.com/callback", "https://evil.example.com/callback"},
 		}
@@ -494,13 +490,12 @@ func TestCIMD_ApprovedRedirects_MixedURIs(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{
 		Mode:              "approved_redirects",
 		ApprovedRedirects: []string{"https://trusted.example.com/callback"},
 	}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if !errors.Is(err, domain.ErrInvalidRedirectURI) {
 		t.Errorf("err = %v, want ErrInvalidRedirectURI (one URI unapproved)", err)
 	}
@@ -511,7 +506,7 @@ func TestCIMD_ApprovedRedirects_MixedURIs(t *testing.T) {
 func TestCIMD_Open_AllowsAutoRegistration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Open Mode Client",
 			RedirectURIs: []string{"https://any.example.com/callback"},
 		}
@@ -523,15 +518,14 @@ func TestCIMD_Open_AllowsAutoRegistration(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{Mode: "open"}, enabledCIMDConfigForTest(), obs.WithComponent("cimd"))
 
-	c, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	c, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("verify: %v (open mode should allow any client)", err)
 	}
-	if c.ID != ts.URL {
-		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL)
+	if c.ID != ts.URL+cimdTestPath {
+		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL+cimdTestPath)
 	}
 }
 
@@ -548,7 +542,7 @@ func TestCIMD_ApprovedRedirects_BlocksUpdateWithUnapprovedURI(t *testing.T) {
 			uris = []string{"https://evil.example.com/callback"} // second: unapproved
 		}
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Update Test",
 			RedirectURIs: uris,
 		}
@@ -560,7 +554,6 @@ func TestCIMD_ApprovedRedirects_BlocksUpdateWithUnapprovedURI(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(stores.Client, fetcher, staticDCRModeForTest{
 		Mode:              "approved_redirects",
 		ApprovedRedirects: []string{"https://trusted.example.com/callback"},
@@ -569,18 +562,18 @@ func TestCIMD_ApprovedRedirects_BlocksUpdateWithUnapprovedURI(t *testing.T) {
 	ctx := context.Background()
 
 	// First call — approved redirect, should succeed.
-	c, err := svc.VerifyCIMD(ctx, ts.URL)
+	c, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("first verify: %v", err)
 	}
-	if c.ID != ts.URL {
-		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL)
+	if c.ID != ts.URL+cimdTestPath {
+		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL+cimdTestPath)
 	}
 
 	time.Sleep(5 * time.Millisecond) // expire cache
 
 	// Second call — CIMD doc now has unapproved redirect, should be rejected.
-	_, err = svc.VerifyCIMD(ctx, ts.URL)
+	_, err = svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if !errors.Is(err, domain.ErrInvalidRedirectURI) {
 		t.Errorf("err = %v, want ErrInvalidRedirectURI (update with unapproved URI)", err)
 	}
@@ -593,7 +586,7 @@ func TestCIMD_ApprovedRedirects_BlocksUpdateWithUnapprovedURI(t *testing.T) {
 func TestCIMD_GrantNotEnabled_Rejected(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:                "http://" + r.Host,
+			ClientID:                "http://" + r.Host + r.URL.Path,
 			ClientName:              "CIMD CC Client",
 			RedirectURIs:            []string{"https://app.example.com/callback"},
 			GrantTypes:              []string{"client_credentials"},
@@ -607,7 +600,6 @@ func TestCIMD_GrantNotEnabled_Rejected(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(
 		stores.Client, fetcher, staticDCRModeForTest{Mode: "open"},
 		enabledCIMDConfigForTest(),
@@ -615,7 +607,7 @@ func TestCIMD_GrantNotEnabled_Rejected(t *testing.T) {
 		services.WithCIMDEnabledGrants(staticGrantsForTest{grants: []string{"authorization_code", "refresh_token"}}),
 	)
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err == nil {
 		t.Fatal("CIMD must reject doc with disabled grant_type")
 	}
@@ -627,7 +619,7 @@ func TestCIMD_GrantNotEnabled_Rejected(t *testing.T) {
 	}
 
 	// And nothing was persisted — fail-loud beats silent half-write.
-	persisted, lookupErr := stores.Client.GetByCIMDURL(context.Background(), ts.URL)
+	persisted, lookupErr := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath)
 	if lookupErr != nil {
 		t.Fatalf("GetByCIMDURL: %v", lookupErr)
 	}
@@ -641,7 +633,7 @@ func TestCIMD_GrantNotEnabled_Rejected(t *testing.T) {
 func TestCIMD_GrantEnabled_Accepted(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:                "http://" + r.Host,
+			ClientID:                "http://" + r.Host + r.URL.Path,
 			ClientName:              "CIMD CC Client",
 			RedirectURIs:            []string{"https://app.example.com/callback"},
 			GrantTypes:              []string{"client_credentials"},
@@ -655,7 +647,6 @@ func TestCIMD_GrantEnabled_Accepted(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(
 		stores.Client, fetcher, staticDCRModeForTest{Mode: "open"},
 		enabledCIMDConfigForTest(),
@@ -663,12 +654,12 @@ func TestCIMD_GrantEnabled_Accepted(t *testing.T) {
 		services.WithCIMDEnabledGrants(staticGrantsForTest{grants: []string{"authorization_code", "refresh_token", "client_credentials"}}),
 	)
 
-	c, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	c, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("verify cimd with enabled grant: %v", err)
 	}
-	if c.ID != ts.URL {
-		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL)
+	if c.ID != ts.URL+cimdTestPath {
+		t.Errorf("client_id: got %q, want %q", c.ID, ts.URL+cimdTestPath)
 	}
 }
 
@@ -707,16 +698,19 @@ func (failingCIMDConfigForTest) Config(context.Context) (output.CIMDConfig, erro
 }
 
 // enabledCIMDConfigForTest is the default config provider for CIMD service
-// tests: feature enabled, loopback-friendly (RequireHTTPS=false), and a 1ms
-// cache TTL so the update tests' re-fetch-after-expiry path works (harmless for
-// the single-call tests). cimdConfig is a required positional constructor arg,
-// so every service construction passes this (or its own provider).
+// tests: feature enabled, http:// permitted (RequireHTTPS=false), address
+// filtering off so the httptest servers on loopback are reachable
+// (AllowPrivateAddresses=true), and a 1ms cache TTL so the update tests'
+// re-fetch-after-expiry path works (harmless for the single-call tests).
+// cimdConfig is a required positional constructor arg, so every service
+// construction passes this (or its own provider).
 func enabledCIMDConfigForTest() output.CIMDConfigProvider {
 	return staticCIMDConfigForTest{cfg: output.CIMDConfig{
-		Enabled:      true,
-		RequireHTTPS: false,
-		CacheTTL:     time.Millisecond,
-		FetchTimeout: 10 * time.Second,
+		Enabled:               true,
+		RequireHTTPS:          false,
+		AllowPrivateAddresses: true,
+		CacheTTL:              time.Millisecond,
+		FetchTimeout:          10 * time.Second,
 	}}
 }
 
@@ -728,7 +722,7 @@ func TestCIMD_ConfigDisabled_RejectsRegistration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCalled = true
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Disabled Test",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -740,7 +734,6 @@ func TestCIMD_ConfigDisabled_RejectsRegistration(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(
 		stores.Client, fetcher, staticDCRModeForTest{Mode: "open"},
 		staticCIMDConfigForTest{cfg: output.CIMDConfig{
@@ -749,14 +742,14 @@ func TestCIMD_ConfigDisabled_RejectsRegistration(t *testing.T) {
 		obs.WithComponent("cimd"),
 	)
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if !errors.Is(err, domain.ErrRegistrationDisabled) {
 		t.Fatalf("expected ErrRegistrationDisabled, got %v", err)
 	}
 	if fetchCalled {
 		t.Error("fetcher must not be called when CIMD config is disabled")
 	}
-	if c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL); c != nil {
+	if c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath); c != nil {
 		t.Error("client must NOT be created when CIMD disabled")
 	}
 }
@@ -774,14 +767,13 @@ func TestCIMD_ConfigProviderError_RejectsRegistration(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(
 		stores.Client, fetcher, staticDCRModeForTest{Mode: "open"},
 		failingCIMDConfigForTest{},
 		obs.WithComponent("cimd"),
 	)
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if err == nil {
 		t.Fatal("expected fail-closed error when config provider errors")
 	}
@@ -791,7 +783,7 @@ func TestCIMD_ConfigProviderError_RejectsRegistration(t *testing.T) {
 	if fetchCalled {
 		t.Error("fetcher must not be called when config provider errors")
 	}
-	if c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL); c != nil {
+	if c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath); c != nil {
 		t.Error("client must NOT be created on provider error")
 	}
 }
@@ -801,7 +793,7 @@ func TestCIMD_ConfigProviderError_RejectsRegistration(t *testing.T) {
 func TestCIMD_GrantsProviderError_RejectsRegistration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		doc := output.CIMDDocument{
-			ClientID:     "http://" + r.Host,
+			ClientID:     "http://" + r.Host + r.URL.Path,
 			ClientName:   "Grants Provider Error",
 			RedirectURIs: []string{"https://app.example.com/callback"},
 		}
@@ -813,18 +805,17 @@ func TestCIMD_GrantsProviderError_RejectsRegistration(t *testing.T) {
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
 	fetcher := cimd.New(obs)
-	fetcher.SetAllowLoopback(true)
 	svc := services.NewCIMDService(
 		stores.Client, fetcher, staticDCRModeForTest{Mode: "open"},
 		enabledCIMDConfigForTest(), obs.WithComponent("cimd"),
 		services.WithCIMDEnabledGrants(failingGrantsForTest{}),
 	)
 
-	_, err := svc.VerifyCIMD(context.Background(), ts.URL)
+	_, err := svc.VerifyCIMD(context.Background(), ts.URL+cimdTestPath)
 	if !errors.Is(err, errGrantsUnavailable) {
 		t.Fatalf("expected wrapped errGrantsUnavailable, got %v", err)
 	}
-	if c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL); c != nil {
+	if c, _ := stores.Client.GetByCIMDURL(context.Background(), ts.URL+cimdTestPath); c != nil {
 		t.Error("client must NOT be created when the grants provider errors")
 	}
 }

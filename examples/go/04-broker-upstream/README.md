@@ -28,7 +28,7 @@ All the auth-specific code fits inside the `// authplane:begin` /
 that prints the vended-token shape.
 
 <!-- loccount:begin -->
-**Auth-specific code: 19 lines · Total example: 49 lines · SDK: go-sdk v0.2.0**
+**Auth-specific code: 19 lines · Total example: 49 lines · SDK: go-sdk v0.3.0**
 <!-- loccount:end -->
 
 ## What you'll learn
@@ -50,7 +50,7 @@ that prints the vended-token shape.
 |---|---|
 | **Time to run** | ~2 minutes (first build ~90s; subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `go 1.25+`, `curl`, `jq`, a GitHub OAuth App (for live runs) |
-| **SDK** | `github.com/authplane/go-sdk/core` v0.2.0 (Go module proxy) |
+| **SDK** | `github.com/authplane/go-sdk/core` v0.3.0 (Go module proxy) |
 | **Grant** | `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693) |
 | **Upstream** | GitHub by default; the same recipe works for Google / Slack / Notion / Linear / Atlassian — see [`docs/guides/upstream-providers/connecting-providers.md`](../../../docs/guides/upstream-providers/connecting-providers.md) step 2 table |
 | **Builds on** | [Tier 03 — DPoP + per-tool scopes (Go)](../03-mcp-server-dpop-scopes/) — tier 03 vends AS-signed JWTs; tier 04 keeps that foundation and swaps the grant out for the brokered upstream vend. |
@@ -234,10 +234,16 @@ describe what's happening so you can reproduce the flow by hand.
      -u "$CLIENT_ID:$CLIENT_SECRET" \
      -H "Content-Type: application/x-www-form-urlencoded" \
      --data-urlencode "grant_type=client_credentials" \
-     --data-urlencode "scope=mcp:tools" \
+     --data-urlencode "scope=repo" \
      --data-urlencode "resource=https://github-stub.example.invalid/api" \
      | jq -r '.access_token')
    ```
+
+   The subject token carries `repo` because the exchange in the next step
+   asks for `repo`: a subject token with a scope claim can only be
+   narrowed by an exchange, never widened (RFC 8693 §2.1). A subject minted
+   with `mcp:tools` and exchanged for `repo` is refused with
+   `invalid_scope`.
 
 9. **Get the user's consent.** Direct the user's browser to
    [`GET /connect/{provider}`](../../../docs/reference/http-api.md#http-public-connect-provider) —

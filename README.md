@@ -7,7 +7,9 @@
 
 ### The self-hosted authorization server for the Model Context Protocol.
 
-One Go binary. AGPL-3.0. MCP Authorization spec **2025-11-25**, end-to-end.
+One Go binary. AGPL-3.0. MCP Authorization spec **2026-07-28**, end-to-end.
+
+> **New in v0.2.0 — MCP Authorization 2026-07-28.** Client ID Metadata Documents on by default, RFC 9207 `iss` on every authorization response, Protected Resource Metadata served by the AS, `authorization_grant_profiles_supported` for Enterprise-Managed Authorization, `application_type` on registration — and DPoP, client credentials, token exchange and XAA enabled out of the box. Details and the breaking changes in the [changelog](CHANGELOG.md).
 
 > **AI coding agents:** read [AGENTS.md](AGENTS.md) first — it has the deterministic workflow for adding Authplane to an existing MCP server, the SDK pins per stack, and the three byte-for-byte rules that cause >90% of `invalid_token` failures. If you're an agent operating from web docs (no clone), [llms.txt](llms.txt) is the same link map in the [llmstxt.org](https://llmstxt.org/) convention.
 
@@ -38,14 +40,11 @@ echo "Save this — it's your Admin UI login: $AUTHPLANE_ADMIN_API_KEY"
 docker run -p 9000:9000 -p 9001:9001 \
   -e AUTHPLANE_ADMIN_API_KEY \
   -e AUTHPLANE_SESSION_SECRET \
-  -e AUTHPLANE_CLIENT_CREDENTIALS_ENABLED=true \
-  -e AUTHPLANE_DPOP_ENABLED=true \
-  -e AUTHPLANE_TOKEN_EXCHANGE_ENABLED=true \
   -v authserver-data:/data \
   authplane/authserver:latest serve
 ```
 
-Open http://localhost:9001/admin/ui/ and paste the printed API key. The public OAuth endpoints are on http://localhost:9000.
+Open http://localhost:9001/admin/ui/ and paste the printed API key. The public OAuth endpoints are on http://localhost:9000. Client credentials, token exchange, DPoP and CIMD are on out of the box — nothing to enable before your first MCP server can get a token.
 
 ### Next: register your first MCP server
 
@@ -78,12 +77,12 @@ Pick the language and the framework adapter that match the stack you're already 
 
 | Language | Repo | Integration Adapters | Docs |
 |---|---|---|---|
-| **Go** | [authplane/go-sdk](https://github.com/authplane/go-sdk)<br>![License](https://img.shields.io/github/license/authplane/go-sdk) | ✓ Official MCP Go SDK (`go-sdk/mcp`) | [README](https://github.com/authplane/go-sdk#readme) |
+| **Go** | [authplane/go-sdk](https://github.com/authplane/go-sdk)<br>![License](https://img.shields.io/github/license/authplane/go-sdk) | ✓ Official MCP Go SDK (`go-sdk/mcp`)<br>✓ `mark3labs/mcp-go` (`go-sdk/mark3labs`) | [README](https://github.com/authplane/go-sdk#readme) |
 | **TypeScript** | [authplane/ts-sdk](https://github.com/authplane/ts-sdk)<br>![License](https://img.shields.io/github/license/authplane/ts-sdk) | ✓ Official MCP TypeScript SDK (`@authplane/mcp`)<br>✓ FastMCP (`@authplane/fastmcp`) | [README](https://github.com/authplane/ts-sdk#readme) |
 | **Python** | [authplane/python-sdk](https://github.com/authplane/python-sdk)<br>![License](https://img.shields.io/github/license/authplane/python-sdk) | ✓ Official MCP Python SDK (`authplane-mcp`)<br>✓ FastMCP (`authplane-fastmcp`) | [README](https://github.com/authplane/python-sdk#readme) |
+| **Java** | [authplane/java-sdk](https://github.com/authplane/java-sdk)<br>![License](https://img.shields.io/github/license/authplane/java-sdk) | ✓ Official MCP Java SDK (`authplane-mcp`)<br>✓ Spring Boot (`authplane-spring`) | [README](https://github.com/authplane/java-sdk#readme) |
+| **C#** | [authplane/cs-sdk](https://github.com/authplane/cs-sdk)<br>![License](https://img.shields.io/github/license/authplane/cs-sdk) | ✓ Official MCP C# SDK on ASP.NET Core (`Authplane.Mcp`) | [README](https://github.com/authplane/cs-sdk#readme) |
 | **Rust** | _roadmap_ | — | — |
-| **C#** | _roadmap_ | — | — |
-| **Java** | _roadmap_ | — | — |
 
 Working examples wired against authserver live under [`examples/`](examples/) — Python / TypeScript / Go, with four tiers each (basic MCP server, calling another resource, DPoP + per-tool scopes, MCP server fronting a Broker). Every example's `make verify` is exercised by `make docs-smoke` and the per-tier LOC budget is CI-enforced via `tools/loccount`.
 
@@ -107,18 +106,18 @@ For advanced operations and deeper reference, the [`docs/`](docs/) tree is organ
 
 ## Standards & Specifications
 
-Authplane implements the MCP Authorization specification (2025-11-25) and the OAuth 2.1 ecosystem standards behind it. ("OAuth 2.1" is an active IETF Internet-Draft, not a finalized RFC — the MCP spec itself targets it. See [Compliance](docs/reference/compliance.md) for the full picture.) Here's what each one gives you, in operator terms:
+Authplane implements the MCP Authorization specification (2026-07-28) and the OAuth 2.1 ecosystem standards behind it. ("OAuth 2.1" is an active IETF Internet-Draft, not a finalized RFC — the MCP spec itself targets it. See [Compliance](docs/reference/compliance.md) for the full picture.) Here's what each one gives you, in operator terms:
 
 | Standard | What it provides |
 |---|---|
-| **MCP Authorization 2025-11-25** | The contract MCP clients and servers expect: discovery endpoints, dynamic client registration, audience-bound tokens. The reason your existing MCP tooling can find and talk to authserver without custom adapters. |
+| **MCP Authorization 2026-07-28** | The contract MCP clients and servers expect: discovery endpoints, CIMD and dynamic client registration, audience-bound tokens, `iss`-stamped authorization responses. The reason your existing MCP tooling can find and talk to authserver without custom adapters. |
 | **OAuth 2.1** | The base authorization flow — authorize endpoint, token endpoint, refresh tokens, scopes. PKCE-S256 is mandatory; the older insecure flows aren't supported. |
 | **PKCE (RFC 7636)** | Prevents stolen authorization codes from being redeemed. Critical for public clients (CLIs, desktop apps, mobile). |
 | **DPoP (RFC 9449)** | Binds tokens to a client-held key. A leaked token can't be replayed from another machine. |
 | **Resource Indicators (RFC 8707)** | Audience-binds every token to a specific resource URI. An access token for one MCP server can't be replayed against another. |
 | **Protected Resource Metadata (RFC 9728)** | MCP servers advertise where their authorization server lives. Clients discover the AS automatically. |
-| **Dynamic Client Registration (RFC 7591)** | Clients register themselves at runtime — needed for MCP clients you don't pre-provision. Three security modes: open, approved-redirects, admin-only. |
-| **Client ID Metadata Documents (CIMD)** | Auto-registration by fetching client metadata from the client's URL. The MCP-native way for agents to identify themselves without a registration round-trip. |
+| **Client ID Metadata Documents (CIMD)** | The MCP-native way for a client with no prior relationship to identify itself: it hosts its metadata at an HTTPS URL and uses that URL as its `client_id`. No registration round-trip, no server-side record. **Enabled by default**, and the mechanism MCP 2026-07-28 asks clients to prefer. |
+| **Dynamic Client Registration (RFC 7591)** | Clients register themselves at runtime. **Deprecated by MCP 2026-07-28 in favor of CIMD**, and retained for clients that do not support CIMD yet. Three security modes: open (default), approved-redirects, admin-only — see the note below. |
 | **OAuth AS Metadata (RFC 8414)** + **OIDC Discovery** | The `/.well-known/oauth-authorization-server` and `/.well-known/openid-configuration` documents every OAuth client knows how to fetch. |
 | **Token Exchange (RFC 8693)** | Delegated identity — one client mints a narrower or differently-scoped token from an existing one. Powers the agent-to-agent delegation chain and the upstream-provider Broker flow. |
 | **JWT Bearer (RFC 7523)** | Trusted external IdPs assert identity directly into Authplane. The foundation for Cross-App Access (XAA) and enterprise federation. |
@@ -128,13 +127,28 @@ Authplane implements the MCP Authorization specification (2025-11-25) and the OA
 
 ## Status & roadmap
 
-Authplane is in active development. `v0.1.x` is production-shaped — the OAuth core, MCP discovery, and audit log are spec-compliant and tested. A few things to set expectations:
+Authplane is in active development. `v0.2.x` is production-shaped — the OAuth core, MCP discovery, and audit log are spec-compliant and tested. A few things to set expectations:
 
-- **Rust, C#, and Java SDKs** are on the roadmap; Go, TypeScript, and Python are released.
+- **The Rust SDK** is on the roadmap; Go, TypeScript, Python, Java, and C# are released.
 - **Upstream-provider connections** (Broker flow) require manual configuration of at-rest encryption (`aes_master` or HashiCorp Vault Transit) before they activate — covered in [`docs/guides/upstream-providers/connecting-providers.md`](docs/guides/upstream-providers/connecting-providers.md).
 - **Isolating separate customers or environments** today means running separate instances. A first-class abstraction for it is post-`v1.0`.
-- **Public dynamic-registration signup UI** is not in `v0.1`; Dynamic Client Registration works over HTTP today, a hosted signup page is a follow-up.
-- **Helm chart (`charts/authplane`)** is at `v0.3.0`; tested for single-instance and basic HA, expect tuning for large fleets.
+- **Public dynamic-registration signup UI** is not in `v0.2`; Dynamic Client Registration works over HTTP today, a hosted signup page is a follow-up.
+- **Helm chart (`charts/authplane`)** is at `v0.4.0`; tested for single-instance and basic HA, expect tuning for large fleets.
+
+### A note on `dcr.mode`
+
+`dcr.mode` defaults to `open`, which means **any unauthenticated caller can register a client**. The `client_name` it supplies is rendered on the consent screen a user is asked to trust.
+
+That default exists for a historical reason: until recently, RFC 7591 was the only way a client with no prior relationship could obtain a `client_id`. MCP 2026-07-28 replaces that role with CIMD, which needs no registration endpoint and is enabled here by default — so **most deployments no longer need open DCR for anything**, and the server logs a warning at boot while it is active.
+
+Clients choose a registration mechanism in this priority order, per the specification:
+
+1. Pre-registered credentials, if the client has them
+2. **CIMD**, when the AS advertises `client_id_metadata_document_supported` — which this server does
+3. Dynamic Client Registration, when the AS advertises a `registration_endpoint`
+4. Prompt the user
+
+If your clients register via CIMD or are pre-provisioned, set `dcr.mode: admin_only` (or `approved_redirects`) and close the endpoint. It is left open by default only because client-side CIMD support is still arriving, and flipping it would break deployments whose clients register via DCR today.
 
 If something here blocks your deployment, open an issue — the priority list is informed by what you're trying to ship.
 

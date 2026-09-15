@@ -67,10 +67,53 @@ func IsPrivateIP(ip net.IP) bool {
 	return false
 }
 
+// ipResolver is the DNS seam. Production uses net.DefaultResolver; tests
+// substitute a fixed answer so a dial-time assertion can name an address.
+type ipResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+}
+
+type safeConfig struct {
+	allowPrivate bool
+	resolver     ipResolver
+}
+
+// Option configures a safe transport.
+type Option func(*safeConfig)
+
+// AllowPrivate permits connections to the private and reserved ranges this
+// package otherwise refuses — loopback, RFC 1918 space, link-local including
+// the cloud metadata endpoint, and the rest of privateNetworks. It turns the
+// address filter off; it is for local development, and the caller is expected
+// to have made that choice explicit and visible to the operator.
+func AllowPrivate() Option {
+	return func(c *safeConfig) { c.allowPrivate = true }
+}
+
+// withResolver substitutes the DNS resolver. Unexported: tests in this package
+// use it to assert on a named address without depending on real DNS. It reaches
+// only the filtering path — with the filter off nothing is resolved here.
+func withResolver(r ipResolver) Option {
+	return func(c *safeConfig) { c.resolver = r }
+}
+
 // NewSafeTransport returns an http.Transport that blocks connections to
 // private/reserved IP addresses. Used for outbound HTTP requests
 // (OIDC discovery, CIMD fetch, etc.) to prevent SSRF attacks.
-func NewSafeTransport() *http.Transport {
+//
+// Proxy is deliberately unset, unlike http.DefaultTransport, so no transport
+// from here honors HTTP_PROXY/HTTPS_PROXY. It is not an omission to correct:
+// with a proxy configured, DialContext is handed the proxy's address and never
+// the target's, so the filter below would clear the proxy and let the request
+// through to whatever the target was. ForceAttemptHTTP2 is unset for the same
+// reason it is unset on any transport with a custom DialContext — HTTP/2 is not
+// negotiated on these connections.
+func NewSafeTransport(opts ...Option) *http.Transport {
+	cfg := &safeConfig{resolver: net.DefaultResolver}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -78,15 +121,28 @@ func NewSafeTransport() *http.Transport {
 
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Filter off: there is no address to inspect, so the name goes to
+			// the dialer untouched and it picks among every address the name
+			// resolves to. Resolving here would pin the dial to one of them,
+			// which fails whenever the listener is on another — a hostname
+			// resolving to both ::1 and 127.0.0.1 against an IPv4-only server
+			// being the ordinary local-development case.
+			if cfg.allowPrivate {
+				return dialer.DialContext(ctx, network, addr)
+			}
+
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, fmt.Errorf("ssrf: invalid address %q: %w", addr, err)
 			}
 
 			// Resolve hostname to IPs.
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			ips, err := cfg.resolver.LookupIPAddr(ctx, host)
 			if err != nil {
 				return nil, fmt.Errorf("ssrf: DNS resolution failed for %q: %w", host, err)
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("ssrf: no addresses resolved for %q", host)
 			}
 
 			// Check all resolved IPs before connecting.
@@ -96,7 +152,7 @@ func NewSafeTransport() *http.Transport {
 				}
 			}
 
-			// All IPs are public — connect to the first one.
+			// Connect to the first resolved address.
 			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
 		},
 		TLSHandshakeTimeout:   10 * time.Second,

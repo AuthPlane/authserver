@@ -170,6 +170,36 @@ func (h *TestHarness) AdminGetResourceBySlug(slug string) AdminResource {
 	return out
 }
 
+// AdminAllowExchangeClient adds clientID to a Resource's
+// policy.exchange.allowed_client_ids, preserving whatever is already
+// there and leaving the rest of the policy untouched.
+//
+// A Mint resource denies a cross-client exchange unless the acting client
+// is named here: the consent grant the exchange spends is keyed on the
+// subject token's client, so an operator has to say which other clients
+// may inherit it. Most scenarios need exactly one such call between
+// creating the acting client and driving the exchange — which is also the
+// step a real deployment now has to perform.
+func (h *TestHarness) AdminAllowExchangeClient(slug, clientID string) {
+	h.T.Helper()
+
+	res := h.AdminGetResourceBySlug(slug)
+	for _, existing := range res.Policy.Exchange.AllowedClientIDs {
+		if existing == clientID {
+			return
+		}
+	}
+	policy := res.Policy
+	policy.Exchange.AllowedClientIDs = append(policy.Exchange.AllowedClientIDs, clientID)
+
+	resp := h.AdminRequest("PATCH", "/admin/resources/"+res.ID, map[string]any{"policy": policy})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		h.T.Fatalf("AdminAllowExchangeClient(%q, %q): status %d, body %s", slug, clientID, resp.StatusCode, string(raw))
+	}
+}
+
 // AdminCreateBrokerProvider registers a new BrokerProvider and returns
 // its server-generated ID.
 func (h *TestHarness) AdminCreateBrokerProvider(spec CreateBrokerProviderSpec) string {

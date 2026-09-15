@@ -67,6 +67,32 @@ WARN session.fail_closed=false explicitly overrides the secure default (true); t
 
 ---
 
+## CIMD: keep SSRF address filtering on (`cimd.allow_private_addresses`)
+
+**Default:** `false`. Client ID Metadata Document fetches go out to a URL supplied by the party registering, so every fetch is validated twice: the URL's host is checked for IP literals and `localhost`, and every address the host resolves to is checked again at dial time. The dial-time check is the complete one: it refuses every range in the IANA special-use registries, loopback and RFC 1918 through CGNAT (`100.64.0.0/10`), the TEST-NETs and reserved space (`240.0.0.0/4`, `2001:db8::/32`). The URL check catches a subset — it uses the standard library's loopback/private/link-local/unspecified predicates, so an IP literal in one of the wider reserved ranges passes it and is stopped at the dial instead. Both layers read the same key.
+
+**Override to `true`:** turn address filtering off so a document can be served from the machine or network you are developing on — loopback, a container network (`172.18.x.x`), a Kubernetes ClusterIP (`10.x`), a VM on the LAN (`192.168.x`). This also makes the cloud metadata endpoint at `169.254.169.254` reachable, which is the one consequence worth reading twice. Local development only, and enforced as such: the server refuses to start with this on unless `server.issuer` is localhost, the same rule `cimd.require_https: false` carries.
+
+```yaml
+cimd:
+  require_https: true          # default — keep it
+  allow_private_addresses: false # default — keep it
+```
+
+```bash
+AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES=true   # opt OUT of secure default
+```
+
+**These two keys are independent.** `require_https` governs the URL scheme and nothing else; `allow_private_addresses` governs address filtering and nothing else. Setting `require_https: false` to serve a document over `http://` does not weaken SSRF protection, and relaxing addresses does not permit `http://`. Assuming otherwise was the defect this split fixed: before it, one flag silently governed both.
+
+On a localhost issuer, where it is permitted, setting `true` gets a startup WARN:
+
+```
+WARN cimd.allow_private_addresses=true (AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES): CIMD document fetches may target private and reserved addresses, including loopback, RFC 1918 space and the cloud metadata endpoint at 169.254.169.254
+```
+
+---
+
 ## Admin port: network isolation
 
 The admin port (`/admin/*`, default `:9090`) wraps every JSON API route in API-key middleware with constant-time comparison. The following surfaces on the same port are intentionally NOT API-key-protected:
@@ -93,6 +119,10 @@ oauth:
 
 session:
   fail_closed: true         # default — keep it
+
+cimd:
+  require_https: true            # default — keep it
+  allow_private_addresses: false # default — keep it
 
 admin:
   address: "127.0.0.1:9090" # not 0.0.0.0 in production

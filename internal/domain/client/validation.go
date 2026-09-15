@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -213,6 +214,46 @@ func requiresRedirectURI(grantTypes []string) bool {
 		case "authorization_code", "refresh_token":
 			return true
 		}
+	}
+	return false
+}
+
+// RedirectURIHost returns the host component of a redirect URI, for display on
+// the consent screen. Empty when the URI does not parse or carries no host.
+//
+// The host is the only part of an authorization request the authorization
+// server has actually verified — it was matched exactly against the client's
+// registration. The client name beside it is self-declared and unverified, so
+// on a screen where the user is being asked to make a trust decision, this is
+// the field that carries a guarantee.
+func RedirectURIHost(uri string) string {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
+}
+
+// IsLoopbackRedirectURI reports whether a redirect URI sends the authorization
+// code to the user's own machine.
+//
+// Deliberately broader than the http-scheme exemption in ValidateRedirectURI,
+// which admits only the three literals it needs to: this drives a warning, and
+// warning on one loopback address while staying silent on 127.0.0.5 would be
+// the wrong way round. A DNS name that happens to resolve to a loopback address
+// is not included — the address is not knowable here, and the specification's
+// concern is a redirect that names the local machine on its face.
+func IsLoopbackRedirectURI(uri string) bool {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
 	}
 	return false
 }

@@ -7,8 +7,8 @@ import (
 
 func TestStaticResourceLister_List(t *testing.T) {
 	resources := []ResourceInfo{
-		{URI: "https://api.example.com", Scopes: []string{"read", "write"}, ClientID: "client-1"},
-		{URI: "https://other.example.com", Scopes: []string{"admin"}, ClientID: "client-2"},
+		{URI: "https://api.example.com", Scopes: []string{"read", "write"}},
+		{URI: "https://other.example.com", Scopes: []string{"admin"}},
 	}
 	lister := NewStaticResourceLister(resources)
 
@@ -22,8 +22,8 @@ func TestStaticResourceLister_List(t *testing.T) {
 	if got[0].URI != "https://api.example.com" {
 		t.Errorf("expected URI https://api.example.com, got %s", got[0].URI)
 	}
-	if got[1].ClientID != "client-2" {
-		t.Errorf("expected ClientID client-2, got %s", got[1].ClientID)
+	if got[1].URI != "https://other.example.com" {
+		t.Errorf("expected URI https://other.example.com, got %s", got[1].URI)
 	}
 }
 

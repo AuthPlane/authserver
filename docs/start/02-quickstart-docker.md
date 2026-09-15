@@ -67,12 +67,13 @@ admin:
   address: ":9001"
   api_key: "${AUTHPLANE_ADMIN_API_KEY}"
 
-# Grants are off by default. Enable the ones your clients will use.
-# (See docs/concepts/resources-and-scopes.md for which grant fits which use case.)
+# Every grant is on by default. Listed here so the choice is visible; set one
+# to false to turn it off. (See docs/concepts/resources-and-scopes.md for
+# which grant fits which use case.)
 client_credentials:
   enabled: true       # machine-to-machine — the simplest MCP-server path
 token_exchange:
-  enabled: true       # RFC 8693 — needed for agent-to-agent delegation and Broker upstreams
+  enabled: true       # RFC 8693 — agent-to-agent delegation and Broker upstreams
   max_chain_depth: 5
   token_expiry: 1h
 

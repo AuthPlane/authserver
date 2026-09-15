@@ -10,7 +10,7 @@
 
 SHARED       := ../../_shared
 AS_CONTAINER ?= authplane-tier01-as
-AS_IMAGE     ?= authplane/authserver:latest
+AS_IMAGE     ?= $(or $(AUTHSERVER_IMAGE),authplane/authserver:latest)
 MCP_PORT     ?= 8080
 
 run: check-prereqs

@@ -20,6 +20,12 @@ type ExchangeCodeRequest struct {
 	ClientID     string
 	ClientSecret string // empty for public clients
 	CodeVerifier string // PKCE
+	// Resource is the RFC 8707 resource indicator, optional at the token
+	// endpoint. When present it must name the resource the authorization grant
+	// already covers; anything else is refused with invalid_target rather than
+	// quietly ignored, because a client that asked for one audience and was
+	// handed another only finds out at the resource server.
+	Resource string
 
 	// DPoP fields (RFC 9449) — optional.
 	DPoPProof  string // raw DPoP proof JWT from DPoP header
@@ -34,6 +40,10 @@ type RefreshTokenRequest struct {
 	ClientID     string
 	ClientSecret string // empty for public clients
 	Scope        string // optional: request narrower scope
+	// Resource is the RFC 8707 resource indicator, optional. Same rule as
+	// ExchangeCodeRequest.Resource: it may only name what the refresh family
+	// was issued against.
+	Resource string
 
 	// DPoP fields (RFC 9449) — optional.
 	DPoPProof  string // raw DPoP proof JWT from DPoP header

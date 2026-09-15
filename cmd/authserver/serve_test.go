@@ -200,6 +200,51 @@ func TestWarnIfCORSDisabled(t *testing.T) {
 	}
 }
 
+func TestWarnIfCIMDPrivateAddressesAllowed(t *testing.T) {
+	tests := []struct {
+		name     string
+		cimd     config.CIMDConfig
+		wantWarn bool
+	}{
+		{"enabled + private allowed warns", config.CIMDConfig{Enabled: true, AllowPrivateAddresses: true}, true},
+		{"safe default is silent", config.CIMDConfig{Enabled: true, AllowPrivateAddresses: false}, false},
+		{"CIMD off is silent", config.CIMDConfig{Enabled: false, AllowPrivateAddresses: true}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			warnIfCIMDPrivateAddressesAllowed(logger, tt.cimd)
+
+			out := buf.String()
+			gotWarn := strings.Contains(out, "level=WARN") &&
+				strings.Contains(out, "cimd.allow_private_addresses=true")
+
+			if gotWarn != tt.wantWarn {
+				t.Fatalf("wantWarn=%v, gotWarn=%v\nlog output:\n%s", tt.wantWarn, gotWarn, out)
+			}
+
+			if tt.wantWarn {
+				if got := strings.Count(out, "level=WARN"); got != 1 {
+					t.Errorf("expected exactly 1 warning record, got %d\noutput:\n%s", got, out)
+				}
+				if !strings.Contains(out, "AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES") {
+					t.Errorf("warning should name the env var\noutput:\n%s", out)
+				}
+				// Naming the metadata endpoint is the point of the warning.
+				if !strings.Contains(out, "169.254.169.254") {
+					t.Errorf("warning should name the metadata endpoint\noutput:\n%s", out)
+				}
+				if !strings.Contains(out, "never enable it in production") {
+					t.Errorf("warning should give the operator remediation\noutput:\n%s", out)
+				}
+			}
+		})
+	}
+}
+
 func TestProbeSecretRefs_OIDC_RefSet_Nil(t *testing.T) {
 	t.Setenv("CONNECTOR_OIDC_SECRET", "oidcsecret")
 	cfg := &config.Config{OIDC: config.OIDCConfig{ClientSecretRef: "CONNECTOR_OIDC_SECRET"}}

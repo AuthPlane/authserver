@@ -240,7 +240,7 @@ Which component owns which bound is what makes the fronted path differ: because 
 
 Failures emit `error=consent_required` with a `cause` sub-discriminator (`consent_missing` | `scope_insufficient`) and a `consent_url` that flips between `/connect/{provider}` (upstream re-auth) and `/authorize?resource=...` (AS-side re-consent) based on which bound failed.
 
-**Per-resource exchange policy:** Each resource carries `policy.exchange.allowed_client_ids`. Empty means any client; user consent is a separate gate, skipped for Mint self-exchange and on fronted paths — Mint→Mint and Mint→Broker alike (there the operator's fronting declaration and its `scope_map` stand in for the consent row).
+**Per-resource exchange policy:** Each resource carries `policy.exchange.allowed_client_ids`. Empty means any client exchanging a token issued to *itself*; a client presenting a token minted for a different client must be listed explicitly on the direct Mint path, because the consent row that authorizes the exchange belongs to the subject token's client. User consent is a separate gate, skipped for Mint self-exchange and on fronted paths — Mint→Mint and Mint→Broker alike (there the operator's fronting declaration and its `scope_map` stand in for the consent row).
 
 **Encryption:** Upstream refresh-grants are encrypted at rest with AES-256-GCM or HashiCorp Vault Transit.
 

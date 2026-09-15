@@ -82,6 +82,7 @@ func runServe() error {
 	// intentionally leave this empty, so this is a one-line warning, not a
 	// fail-on-boot.
 	warnIfCORSDisabled(obs.Logger, cfg.Server.AllowedOrigins)
+	warnIfCIMDPrivateAddressesAllowed(obs.Logger, cfg.CIMD)
 
 	// 2a'. Feature self-check. Validate every required-config
 	// combination before any service is constructed. Misconfigured features
@@ -140,6 +141,13 @@ func runServe() error {
 		obs.Logger.Warn("deprecated config key in use — update your configuration", "migration", migration)
 	}
 
+	// The DCR warning is deliberately NOT emitted here from cfg.DCR.Mode. A
+	// persisted runtime mode is restored from the database much later in this
+	// function and overrides the config value, so warning on config alone is
+	// silent in exactly the case that matters: config says admin_only, a prior
+	// POST /admin/dcr persisted "open", and the server boots open and quiet.
+	// warnIfDCROpen is called once the effective mode is known.
+
 	// Client-secret hashing: HMAC-SHA256 when a pepper is configured, otherwise
 	// bcrypt. Set once before any client authentication happens.
 	crypto.SetClientSecretPepper(cfg.ClientSecretPepper)
@@ -195,10 +203,11 @@ func runServe() error {
 	// document (client_id_metadata_document_supported). Built unconditionally so
 	// discovery can resolve CIMD.Enabled even when the CIMD service is off.
 	cimdConfigProvider := static.NewCIMDConfigProvider(output.CIMDConfig{
-		Enabled:      cfg.CIMD.Enabled,
-		RequireHTTPS: cfg.CIMD.RequireHTTPS,
-		CacheTTL:     cfg.CIMD.CacheTTL,
-		FetchTimeout: cfg.CIMD.FetchTimeout,
+		Enabled:               cfg.CIMD.Enabled,
+		RequireHTTPS:          cfg.CIMD.RequireHTTPS,
+		AllowPrivateAddresses: cfg.CIMD.AllowPrivateAddresses,
+		CacheTTL:              cfg.CIMD.CacheTTL,
+		FetchTimeout:          cfg.CIMD.FetchTimeout,
 	})
 
 	// 6a. Setup CIMD service (if enabled)
@@ -725,9 +734,26 @@ func runServe() error {
 		obs.WithComponent("as-metadata"),
 	)
 
+	// Protected Resource Metadata (RFC 9728). Reads the same resource registry
+	// the token path validates resource= against, so the document cannot name a
+	// Resource this AS does not know.
+	//
+	// "Discoverable exactly when usable" would be too strong: the endpoint
+	// applies no backend-kind filter, while AuthorizeService refuses a Resource
+	// that is not Mint-backed. A broker-backed Resource therefore returns a full
+	// document that the authorization-code flow will not honor — it fails closed
+	// (no token is issued) and token exchange does serve broker targets, so the
+	// document is not false, but it is reachable for a flow that will reject it.
+	prMetadataSvc := services.NewPRMetadataService(
+		issuerProvider,
+		resourceRegistry,
+		obs.WithComponent("prm-metadata"),
+	)
+
 	deps := apipublic.Deps{
 		JWKS:          jwksSvc,
 		ASMetadata:    asMetadataSvc,
+		PRMetadata:    prMetadataSvc,
 		DCR:           dcrSvc,
 		Auth:          authSvc,
 		Authorize:     authzSvc,
@@ -879,6 +905,13 @@ func runServe() error {
 			default:
 				obs.Logger.Error("ignoring invalid persisted DCR mode", "mode", persistedMode)
 			}
+		}
+
+		// Effective mode is settled here: config, then any persisted override.
+		if mode, err := dcrSvc.GetMode(context.Background()); err != nil {
+			obs.Logger.Warn("could not resolve the effective DCR mode for the startup posture warning", "error", err)
+		} else {
+			warnIfDCROpen(obs.Logger, mode)
 		}
 
 		dcrDeps := &apiadmin.DCRDeps{
@@ -1119,6 +1152,28 @@ func warnIfCORSDisabled(logger *slog.Logger, allowedOrigins []string) {
 	)
 }
 
+// warnIfCIMDPrivateAddressesAllowed announces the setting that turns off SSRF
+// address filtering for CIMD document fetches. It names the metadata endpoint
+// explicitly: an operator who enabled this to reach a container network should
+// read the consequence that matters rather than infer it from "private
+// addresses".
+//
+// Warn, not fatal: this is a legitimate local-development setting, so refusing
+// to boot on it would break the case it exists for.
+func warnIfCIMDPrivateAddressesAllowed(logger *slog.Logger, cimd config.CIMDConfig) {
+	if !cimd.Enabled || !cimd.AllowPrivateAddresses {
+		return
+	}
+	logger.Warn(
+		"cimd.allow_private_addresses=true (AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES): " +
+			"CIMD document fetches may target private and reserved addresses, including " +
+			"loopback, RFC 1918 space and the cloud metadata endpoint at 169.254.169.254. " +
+			"This disables SSRF address filtering for CIMD and is a local-development " +
+			"setting; never enable it in production " +
+			"(see docs/guides/deploy/hardened-deployment.md).",
+	)
+}
+
 // probeSecretRefs verifies that the OIDC client secret configured by an env-var
 // reference (oidc.client_secret_ref) has that env var set and non-empty, so a
 // missing one fails fast at boot rather than at first login — restoring the
@@ -1154,4 +1209,32 @@ func probeSecretRefs(cfg *config.Config) error {
 		return fmt.Errorf("oidc.client_secret_ref: env var %s is not set or empty", ref)
 	}
 	return nil
+}
+
+// warnIfDCROpen warns when Dynamic Client Registration accepts unauthenticated
+// callers.
+//
+// Open DCR is a write endpoint any caller can reach: it creates a client row,
+// and the client_name it supplies is rendered on the consent screen a user is
+// asked to trust. It defaults to open because, until recently, RFC 7591 was the
+// only way a client with no prior relationship could obtain a client_id. MCP
+// 2026-07-28 deprecates that path in favor of Client ID Metadata Documents,
+// which need no registration endpoint and are enabled by default — so most
+// deployments no longer need open DCR for anything.
+//
+// Called with the EFFECTIVE mode, after any persisted runtime override has been
+// restored. Warning on the config value alone would stay silent when config
+// says admin_only and a persisted setting says open, which is the case an
+// operator most needs to hear about.
+func warnIfDCROpen(logger *slog.Logger, mode string) {
+	if mode != "open" {
+		return
+	}
+	logger.Warn(
+		"dynamic client registration is open to unauthenticated callers",
+		"config_key", "dcr.mode",
+		"effective", "open",
+		"alternatives", "approved_redirects, admin_only",
+		"note", "MCP 2026-07-28 deprecates Dynamic Client Registration in favor of Client ID Metadata Documents, which are enabled by default and require no registration endpoint",
+	)
 }

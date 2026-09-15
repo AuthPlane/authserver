@@ -18,6 +18,7 @@ The `Labels` column lists the OTel attributes that emit sites attach via `metric
 | `authserver_auth_denied_total` | counter | reason | Total auth requests denied | `AuthDenied` in `internal/observability/metrics.go` |
 | `authserver_audit_events_dropped_total` | counter | action (the dropped event's audit action) | Audit events that could not be persisted (the audit store is best-effort; the full event is emitted to the structured log instead) | `AuditEventsDropped` in `internal/observability/metrics.go` |
 | `authserver_clients_registered_total` | counter | source (`dcr` / `admin`) | Total clients registered | `ClientsRegistered` in `internal/observability/metrics.go` |
+| `authserver_cimd_fetch_suppressed_total` | counter | reason (`negative_cache` / `single_flight` / `capacity`) | Outbound CIMD fetches that did not happen, by the control that stopped them: a recently-failed target not re-fetched, a concurrent request that rode an in-progress fetch, or a request shed because the global in-flight limit was full. The CIMD fetch path is reachable from an unauthenticated `GET /oauth/authorize` with a caller-chosen URL, so a sustained rate here means fetches are being driven, not that clients are registering | `CIMDFetchSuppressed` in `internal/observability/metrics.go` |
 | `authserver_consent_decisions_total` | counter | decision (`granted` / `denied`) | Total consent decisions | `ConsentDecisions` in `internal/observability/metrics.go` |
 | `authserver_login_attempts_total` | counter | outcome | Total login attempts | `LoginAttempts` in `internal/observability/metrics.go` |
 | `authserver_refresh_token_reuse_total` | counter | (none) | Total refresh token reuse detections | `RefreshTokenReuse` in `internal/observability/metrics.go` |
@@ -51,7 +52,7 @@ The `Labels` column lists the OTel attributes that emit sites attach via `metric
 | --- | --- | --- | --- | --- |
 | `authserver_token_issuance_duration_seconds` | histogram | (none) | Token issuance duration | `TokenIssuanceDuration` in `internal/observability/metrics.go` |
 | `authserver_auth_flow_duration_seconds` | histogram | (none) | Authorization flow duration | `AuthFlowDuration` in `internal/observability/metrics.go` |
-| `authserver_cimd_fetch_duration_seconds` | histogram | outcome | CIMD document fetch duration | `CIMDFetchDuration` in `internal/observability/metrics.go` |
+| `authserver_cimd_fetch_duration_seconds` | histogram | (none) | Duration of an outbound CIMD document fetch. Recorded around the HTTP round trip only, so cache hits and suppressed fetches contribute no samples | `CIMDFetchDuration` in `internal/observability/metrics.go` |
 | `authserver_db_operation_duration_seconds` | histogram | op | Database operation duration | `DBOperationDuration` in `internal/observability/metrics.go` |
 | `authserver_oidc_exchange_duration_seconds` | histogram | outcome | OIDC code exchange and ID token verification duration | `OIDCExchangeDuration` in `internal/observability/metrics.go` |
 | `authserver_introspection_duration_seconds` | histogram | (none) | Token introspection duration | `IntrospectionDuration` in `internal/observability/metrics.go` |

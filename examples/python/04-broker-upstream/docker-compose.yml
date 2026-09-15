@@ -19,7 +19,7 @@
 #      treated as requested (selfcheck.go:88-93) and these become required.
 services:
   authserver:
-    image: authplane/authserver:latest
+    image: ${AUTHSERVER_IMAGE:-authplane/authserver:latest}
     # ---------------------------------------------------------------------
     # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
     # ---------------------------------------------------------------------

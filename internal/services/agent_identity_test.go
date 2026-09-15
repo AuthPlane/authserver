@@ -256,7 +256,6 @@ func TestAgentIdentity_Delegation_BuildsChain(t *testing.T) {
 	}
 
 	// Now do a self-exchange (delegation scenario with act claim).
-	// Mint a subject token with may_act allowing this agent.
 	subjectClaims := crypto.AccessTokenClaims{
 		Issuer:    aiIssuer,
 		Subject:   "user-1",
@@ -321,17 +320,22 @@ func TestAgentIdentity_ChainOrder_ShallowToDeep(t *testing.T) {
 
 	// Mint a subject token with an act claim from agent-a.
 	subjectClaims := crypto.AccessTokenClaims{
-		Issuer:    aiIssuer,
-		Subject:   "user-1",
-		Audience:  []string{aiIssuer},
-		ClientID:  agentA.ID,
+		Issuer:   aiIssuer,
+		Subject:  "user-1",
+		Audience: []string{aiIssuer},
+		// Self-exchange: agentB holds a token issued to itself that already
+		// carries an act claim naming agentA. Cross-client exchange on the
+		// resource-less path is no longer authorizable — may_act was its only
+		// gate and this server has had no writer for it since Inc 71 — and the
+		// ordering this test asserts comes from the act claim plus the acting
+		// client, which the self-exchange path builds identically.
+		ClientID:  agentB.ID,
 		Scope:     "read write",
 		JTI:       crypto.GenerateRandomString(16),
 		IssuedAt:  time.Now().Unix(),
 		Expiry:    time.Now().Add(time.Hour).Unix(),
 		NotBefore: time.Now().Unix(),
 		Act:       token.ActClaimToMap(&token.ActClaim{Sub: agentA.ID}),
-		MayAct:    map[string]interface{}{"sub": agentB.ID},
 	}
 	subjectToken, err := crypto.SignAccessToken(s.kp, subjectClaims)
 	if err != nil {

@@ -166,3 +166,113 @@ func (m *MockIdP) SignIDJAGWithResource(t *testing.T, audience, clientID, subjec
 
 	return compact
 }
+
+// IDJAGOptions varies every part of an ID-JAG assertion that a conformance
+// probe needs to bend: the header type, each claim, the signing key id, and
+// which claims are present at all.
+//
+// SignIDJAG and SignIDJAGWithResource cover the well-formed cases and build
+// their assertions with the IdP's fixed signer. This builds a signer per call,
+// which is what lets Typ vary — the header type is baked into a go-jose signer
+// at construction, so a wrong-typ assertion cannot be produced any other way.
+type IDJAGOptions struct {
+	// Typ is the JWT header type. Empty means oauth-id-jag+jwt, the value the
+	// Enterprise-Managed Authorization extension shows in its worked example.
+	Typ string
+	// Issuer defaults to the mock IdP's own issuer. Set it to something else to
+	// present an assertion from an IdP the authorization server does not trust.
+	Issuer   string
+	Subject  string
+	Audience string
+	ClientID string
+	Scope    string
+	Resource string
+	// JTI defaults to a fresh random value. Set it to replay one.
+	JTI string
+	// IssuedAt and Expiry default to now and now+5m.
+	IssuedAt time.Time
+	Expiry   time.Time
+	// OmitClaims removes claims by JSON name after marshalling, so a probe can
+	// present an assertion missing exactly one required claim.
+	OmitClaims []string
+	// KeyID defaults to the IdP's own kid. Set it to an unknown value to make
+	// key resolution fail at the authorization server.
+	KeyID string
+}
+
+// SignIDJAGCustom signs an ID-JAG assertion built from opts.
+func (m *MockIdP) SignIDJAGCustom(t *testing.T, opts IDJAGOptions) string {
+	t.Helper()
+
+	typ := opts.Typ
+	if typ == "" {
+		typ = "oauth-id-jag+jwt"
+	}
+	kid := opts.KeyID
+	if kid == "" {
+		kid = m.kid
+	}
+	issuer := opts.Issuer
+	if issuer == "" {
+		issuer = m.Issuer
+	}
+	jti := opts.JTI
+	if jti == "" {
+		jti = crypto.GenerateRandomString(16)
+	}
+	now := time.Now().UTC()
+	issuedAt := opts.IssuedAt
+	if issuedAt.IsZero() {
+		issuedAt = now
+	}
+	expiry := opts.Expiry
+	if expiry.IsZero() {
+		expiry = now.Add(5 * time.Minute)
+	}
+
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.ES256, Key: m.privKey},
+		(&jose.SignerOptions{}).WithType(jose.ContentType(typ)).WithHeader(jose.HeaderKey("kid"), kid),
+	)
+	if err != nil {
+		t.Fatalf("create ID-JAG signer (typ=%q): %v", typ, err)
+	}
+
+	payload, err := json.Marshal(IDJAGClaims{
+		Issuer:   issuer,
+		Subject:  opts.Subject,
+		Audience: opts.Audience,
+		ClientID: opts.ClientID,
+		JTI:      jti,
+		Expiry:   expiry.Unix(),
+		IssuedAt: issuedAt.Unix(),
+		Scope:    opts.Scope,
+		Resource: opts.Resource,
+	})
+	if err != nil {
+		t.Fatalf("marshal ID-JAG claims: %v", err)
+	}
+
+	if len(opts.OmitClaims) > 0 {
+		var claims map[string]any
+		if err := json.Unmarshal(payload, &claims); err != nil {
+			t.Fatalf("unmarshal ID-JAG claims for omission: %v", err)
+		}
+		for _, name := range opts.OmitClaims {
+			delete(claims, name)
+		}
+		if payload, err = json.Marshal(claims); err != nil {
+			t.Fatalf("re-marshal ID-JAG claims: %v", err)
+		}
+	}
+
+	signed, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatalf("sign ID-JAG: %v", err)
+	}
+	compact, err := signed.CompactSerialize()
+	if err != nil {
+		t.Fatalf("serialize ID-JAG: %v", err)
+	}
+	return compact
+}

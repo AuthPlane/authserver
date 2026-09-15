@@ -41,24 +41,35 @@ func main() {
 	// authplane:end
 
 	// === call the MCP tool =======================================================
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hello from tier-02 agent"}}}`)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpURL, bytes.NewReader(body))
-	if err != nil {
-		log.Fatal(err)
+	// Streamable HTTP needs the 3-step handshake before a tool call is legal:
+	// `initialize` (the response carries `Mcp-Session-Id`), the one-way
+	// `notifications/initialized`, then `tools/call` — every request after the
+	// first carrying the session id. See docs/reference/mcp-streamable-http.md.
+	post := func(session, body string) (string, []byte) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpURL, bytes.NewReader([]byte(body)))
+		if err != nil {
+			log.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		if session != "" {
+			req.Header.Set("Mcp-Session-Id", session)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode/100 != 2 {
+			log.Fatalf("mcp call failed: HTTP %d\n%s", resp.StatusCode, out)
+		}
+		return resp.Header.Get("Mcp-Session-Id"), out
 	}
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode/100 != 2 {
-		log.Fatalf("mcp call failed: HTTP %d\n%s", resp.StatusCode, out)
-	}
+	session, _ := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tier-02-agent","version":"1.0"}}}`)
+	post(session, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	_, out := post(session, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hello from tier-02 agent"}}}`)
 	fmt.Printf("%s\n", out)
 }
 

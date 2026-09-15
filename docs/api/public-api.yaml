@@ -41,6 +41,30 @@ paths:
       responses:
         "200":
           description: OK
+  /.well-known/oauth-protected-resource:
+    get:
+      operationId: http-public-well-known-oauth-protected-resource
+      summary: '`GET /.well-known/oauth-protected-resource`'
+      tags:
+        - .well-known
+      responses:
+        default:
+          description: See `docs/reference/http-api.md` for the response shape.
+  /.well-known/oauth-protected-resource/{ref...}:
+    get:
+      operationId: http-public-well-known-oauth-protected-resource-ref
+      summary: '`GET /.well-known/oauth-protected-resource/{ref...}`'
+      tags:
+        - .well-known
+      responses:
+        default:
+          description: See `docs/reference/http-api.md` for the response shape.
+    parameters:
+      - name: ref...
+        in: path
+        required: true
+        schema:
+          type: string
   /.well-known/openid-configuration:
     get:
       operationId: http-public-well-known-openid-configuration

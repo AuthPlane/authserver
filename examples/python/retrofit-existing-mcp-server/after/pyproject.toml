@@ -7,6 +7,6 @@ dependencies = [
     # floor: authplane-fastmcp 0.3.0 requires fastmcp>=3.2, where before/ needs
     # only 3.0. Declared here so the constraint is visible, not resolver-only.
     "fastmcp>=3.2,<4",
-    "authplane-sdk==0.3.0",
-    "authplane-fastmcp==0.3.0",
+    "authplane-sdk==0.4.0",
+    "authplane-fastmcp==0.4.0",
 ]

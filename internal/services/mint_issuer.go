@@ -76,7 +76,7 @@ func (m *MintIssuer) Kind() resource.BackendKind { return resource.BackendMint }
 // Issue produces an AS-signed access token for the request and persists
 // the matching issuance audit row. Behavior parity with the previous
 // TokenService.signAccessToken is required for v0.1.0-rc1: same claims,
-// same audience-fallback semantics, same may_act / cnf shape. The new
+// same audience-fallback semantics, same cnf shape. The new
 // surface is the issuance row and the explicit AgentIdentity field —
 // AgentID and AgentChain on the JWT now flow from the request, so a
 // single code path owns the agent-claim contract.

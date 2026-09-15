@@ -1,7 +1,7 @@
 # Tier 03 — MCP server + agent with DPoP + per-tool scopes (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 15 lines · Total example: 132 lines · SDK: go-sdk v0.2.0**
+**Auth-specific code: 15 lines · Total example: 132 lines · SDK: go-sdk v0.3.0**
 <!-- loccount:end -->
 
 A paired Go MCP server and agent that demonstrate two raised guard rails on
@@ -40,7 +40,7 @@ plumbing.
 |---|---|
 | **Time to run** | ~1 minute first run (AS image pull + `go build`); seconds warm. The `make docker-run` variant adds a ~90s image build. |
 | **Prereqs** | Docker 24+, `docker compose`, `go 1.25+`, `curl`, `jq` |
-| **SDK** | `github.com/authplane/go-sdk/{mcp,core}` v0.2.0 (Go module proxy) |
+| **SDK** | `github.com/authplane/go-sdk/{mcp,core}` v0.3.0 (Go module proxy) |
 | **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.4.1` |
 | **DPoP algorithm** | ES256 (ECDSA P-256). RS256 is also supported via `authplane.NewDPoPKeyMaterial(jose.RS256)`. |
 | **Pairs with** | [Tier 02 — Basic agent (Go)](../02-agent-basic/) — same client-credentials flow, but Bearer-only. This tier upgrades it to DPoP. |
@@ -288,7 +288,7 @@ token fails on the per-tool boundary with a clear
 > `*http.Request`, so `htu`/`htm`/`ath`/`cnf.jkt` are unreachable and the proof
 > could not be checked against the request.
 >
-> Verified against `go-sdk/mcp` v0.2.0 and `modelcontextprotocol/go-sdk`
+> Verified against `go-sdk/mcp` v0.3.0 and `modelcontextprotocol/go-sdk`
 > v1.4.1; v1.6.0 of the MCP Go SDK carries the same scheme check, so this is
 > not fixable by a version bump. Resource-side DPoP needs adapter support: the
 > route has to bypass `AuthMiddleware` and call

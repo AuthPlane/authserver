@@ -73,6 +73,12 @@ func TestCrossResourceExchange_ViaPerMCPConsent(t *testing.T) {
 	// for it.)
 	mcpBRes := h.AdminGetResourceBySlug("mcp-1")
 
+	// mcp-a exchanges alice's agent-issued token for an mcp-b token, so
+	// it spends the (alice, agent-a, mcp-b) consent grant. That grant is
+	// the agent's; mcp-b's operator authorizes mcp-a to inherit it by
+	// naming it here.
+	h.AdminAllowExchangeClient("mcp-1", mcpAClientID)
+
 	const redirectURI = "http://localhost:9999/callback"
 
 	t.Run("HappyPath_ConsentForBothMCPs_ExchangeSucceeds", func(t *testing.T) {

@@ -348,7 +348,11 @@ func TestXAA_Revocation(t *testing.T) {
 	}
 }
 
-// TestXAA_DiscoveryGrantType verifies that jwt-bearer appears in AS metadata.
+// TestXAA_DiscoveryGrantType verifies that jwt-bearer appears in AS metadata,
+// and that the ID-JAG grant profile is advertised under the field the stable MCP
+// Enterprise-Managed Authorization extension actually reads. A conformant client
+// discovers EMA support solely from authorization_grant_profiles_supported, so
+// the grant type alone is not enough to be discoverable.
 func TestXAA_DiscoveryGrantType(t *testing.T) {
 	h, _ := e2e.SetupE2E(t, e2e.HarnessConfig{
 		EnableXAA: true,
@@ -366,6 +370,18 @@ func TestXAA_DiscoveryGrantType(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("AS metadata should include jwt-bearer grant type, got: %v", meta.GrantTypesSupported)
+	}
+
+	profileFound := false
+	for _, p := range meta.AuthorizationGrantProfilesSupported {
+		if p == "urn:ietf:params:oauth:grant-profile:id-jag" {
+			profileFound = true
+			break
+		}
+	}
+	if !profileFound {
+		t.Errorf("AS metadata should advertise the ID-JAG grant profile in authorization_grant_profiles_supported, got: %v",
+			meta.AuthorizationGrantProfilesSupported)
 	}
 }
 

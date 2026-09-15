@@ -78,9 +78,14 @@ func newIssuanceFlowFixture(t *testing.T, slug string) *issuanceFlowFixture {
 			{Name: "tools/echo"},
 		},
 		Policy: &e2e.AdminPolicy{
-			Runtime: e2e.AdminRuntimePolicy{ClientIDs: []string{mcpClientID}},
+			Runtime:  e2e.AdminRuntimePolicy{ClientIDs: []string{mcpClientID}},
+			Exchange: e2e.AdminExchangePolicy{AllowedClientIDs: []string{mcpClientID}},
 		},
 	})
+	// The consent grant below is keyed on webAppClientID — the user
+	// consented to the web app, not to the MCP server. The MCP server
+	// spends that grant when it exchanges, which the operator has to
+	// authorize explicitly.
 	h.RunFlowC1Consent(
 		email, password, webAppClientID, "http://localhost:9999/callback",
 		mcpResourceSlug,

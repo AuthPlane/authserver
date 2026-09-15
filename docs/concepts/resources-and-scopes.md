@@ -178,7 +178,10 @@ Plus a per-resource exchange policy:
 
 3. The acting client must satisfy
    `resources.policy.exchange.allowed_client_ids` (empty allows any
-   client).
+   client exchanging a token issued to *itself*; delegating another
+   client's token on the direct Mint path requires an explicit entry,
+   because the consent row that authorizes the exchange belongs to the
+   subject token's client).
 
 If any bound fails, authserver returns
 [ConsentRequiredError](glossary.md#glossary-consentrequirederror) with the

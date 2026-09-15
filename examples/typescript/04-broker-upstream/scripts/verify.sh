@@ -218,7 +218,7 @@ trap 'rm -f "$agent_log"' EXIT
 # path here, not a failure. `|| true` keeps `set -e` from tripping; we
 # assert on the log content below.
 log "running agent (expect ConsentRequiredError + consent_url)"
-docker compose run --rm \
+docker compose --progress quiet run --build --rm \
   -e AUTHPLANE_ISSUER="http://authserver:9000" \
   -e AUTHPLANE_CLIENT_ID="${CLIENT_ID}" \
   -e AUTHPLANE_CLIENT_SECRET="${CLIENT_SECRET}" \

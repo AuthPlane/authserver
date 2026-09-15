@@ -1,6 +1,6 @@
 # Authplane
 
-> Self-hosted OAuth 2.1 + Model Context Protocol (spec 2025-11-25) authorization server delivered as a single Go binary. Use it to add MCP-spec-compliant authorization to an MCP server, federate to an existing IdP, broker upstream provider OAuth (GitHub, Slack, Google, Linear, ...), and record agent-on-behalf-of-user delegation chains. AGPL-3.0.
+> Self-hosted OAuth 2.1 + Model Context Protocol (spec 2026-07-28) authorization server delivered as a single Go binary. Use it to add MCP-spec-compliant authorization to an MCP server, federate to an existing IdP, broker upstream provider OAuth (GitHub, Slack, Google, Linear, ...), and record agent-on-behalf-of-user delegation chains. AGPL-3.0.
 
 This file follows the [llms.txt](https://llmstxt.org/) convention so AI agents can navigate the project without a clone. The deterministic workflow for adding Authplane to an existing MCP server lives in `AGENTS.md`; everything below is the link map.
 
@@ -18,9 +18,11 @@ This file follows the [llms.txt](https://llmstxt.org/) convention so AI agents c
 
 ## SDK packages (pin these by stack)
 
-- Go: `github.com/authplane/go-sdk` ([repo](https://github.com/authplane/go-sdk)) — core + MCP-SDK adapter + FastMCP adapter.
-- TypeScript: `@authplane/sdk`, `@authplane/mcp`, `@authplane/fastmcp` (npm) — ESM-only, Node.js 22+.
-- Python: `authplane`, `authplane-mcp`, `authplane-fastmcp` (PyPI) — requires Python 3.12+.
+- Go: `github.com/authplane/go-sdk/core`, `/mcp`, `/http`, `/mark3labs` ([repo](https://github.com/authplane/go-sdk)) — one module per adapter; the repo root is not a module, so pin the one you import.
+- TypeScript: `@authplane/sdk`, `@authplane/mcp`, `@authplane/fastmcp`, `@authplane/hono`, `@authplane/nestjs` (npm) — ESM-only, Node.js 22+; `@authplane/sdk` exports `./core` and `./auth`, with no root entry point.
+- Python: `authplane-sdk`, `authplane-mcp`, `authplane-fastmcp` (PyPI) — requires Python 3.12+; the import name is `authplane`.
+- Java: `ai.authplane.sdk:authplane-sdk`, `:authplane-mcp`, `:authplane-spring` (Maven Central) — requires Java 21+.
+- C#: `Authplane.Sdk`, `Authplane.Mcp` (NuGet) — targets `net8.0` and `net10.0`.
 
 ## Tiered runnable examples (Go · TypeScript · Python)
 

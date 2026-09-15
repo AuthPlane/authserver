@@ -28,15 +28,15 @@ admin:
   address: ":9001"
   api_key: ${AUTHPLANE_ADMIN_API_KEY}
 
-# Grant enables. Every grant is `enabled: false` by default; turn on only
-# what your clients will actually use. The examples set these via the
-# matching `AUTHPLANE_<NAME>_ENABLED` env vars in `.env` (the env value
-# overrides whatever's in this file).
+# Grant switches. Every grant is on by default as of v0.2.0; listed here so
+# the posture is visible, and so the matching `AUTHPLANE_<NAME>_ENABLED`
+# env vars in `.env` have a documented home (the env value overrides
+# whatever's in this file). Set one to false to turn it off.
 # Full reference: docs/reference/configuration.md § client_credentials,
 # § dpop, § token_exchange.
 client_credentials:
-  enabled: false       # AUTHPLANE_CLIENT_CREDENTIALS_ENABLED — machine-to-machine
+  enabled: true        # AUTHPLANE_CLIENT_CREDENTIALS_ENABLED — machine-to-machine
 dpop:
-  enabled: false       # AUTHPLANE_DPOP_ENABLED — RFC 9449 proof-of-possession
+  enabled: true        # AUTHPLANE_DPOP_ENABLED — RFC 9449 proof-of-possession
 token_exchange:
-  enabled: false       # AUTHPLANE_TOKEN_EXCHANGE_ENABLED — RFC 8693 token exchange
+  enabled: true        # AUTHPLANE_TOKEN_EXCHANGE_ENABLED — RFC 8693 token exchange

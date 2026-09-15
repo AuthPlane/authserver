@@ -39,19 +39,19 @@ Tell the user to install one of these, **at the exact version shown**. Each adap
 
 | Stack | Install (pinned) | Import / call |
 |---|---|---|
-| Python · FastMCP | `pip install authplane-fastmcp==0.3.0` | `from authplane_fastmcp import authplane_auth` |
-| Python · official MCP Python SDK | `pip install authplane-mcp==0.3.0` | `from authplane_mcp import ...` |
-| Python · any other framework (FastAPI, Starlette, raw ASGI) | `pip install authplane-sdk==0.3.0` | `from authplane import AuthplaneResource` |
-| TypeScript · Express + `@modelcontextprotocol/sdk` | `npm i @authplane/mcp@0.3.0` | `import { authplaneMcpAuth } from "@authplane/mcp"` |
-| TypeScript · FastMCP | `npm i @authplane/fastmcp@0.3.0` | `import { authplaneAuth } from "@authplane/fastmcp"` |
-| TypeScript · any other framework | `npm i @authplane/sdk@0.3.0` | `import { AuthplaneResource } from "@authplane/sdk"` |
-| Go · official MCP Go SDK | `go get github.com/authplane/go-sdk/mcp@v0.2.0` | `import "github.com/authplane/go-sdk/mcp/pkg/authplanemcp"` |
-| Go · `net/http` resource server | `go get github.com/authplane/go-sdk/http@v0.2.0` | `import authhttp "github.com/authplane/go-sdk/http/pkg/auth"` |
-| Go · raw token client (agent side) | `go get github.com/authplane/go-sdk/core@v0.2.0` | `import "github.com/authplane/go-sdk/core/authplane"` |
+| Python · FastMCP | `pip install authplane-fastmcp==0.4.0` | `from authplane_fastmcp import authplane_auth` |
+| Python · official MCP Python SDK | `pip install authplane-mcp==0.4.0` | `from authplane_mcp import ...` |
+| Python · any other framework (FastAPI, Starlette, raw ASGI) | `pip install authplane-sdk==0.4.0` | `from authplane import AuthplaneResource` |
+| TypeScript · Express + `@modelcontextprotocol/sdk` | `npm i @authplane/mcp@0.4.0` | `import { authplaneMcpAuth } from "@authplane/mcp"` |
+| TypeScript · FastMCP | `npm i @authplane/fastmcp@0.4.0` | `import { authplaneFastMcpAuth } from "@authplane/fastmcp"` |
+| TypeScript · any other framework | `npm i @authplane/sdk@0.4.0` | `import { AuthplaneResource } from "@authplane/sdk/core"` (the package has no root export) |
+| Go · official MCP Go SDK | `go get github.com/authplane/go-sdk/mcp@v0.3.0` | `import "github.com/authplane/go-sdk/mcp/pkg/authplanemcp"` |
+| Go · `net/http` resource server | `go get github.com/authplane/go-sdk/http@v0.3.0` | `import "github.com/authplane/go-sdk/http/pkg/authplanehttp"` |
+| Go · raw token client (agent side) | `go get github.com/authplane/go-sdk/core@v0.3.0` | `import "github.com/authplane/go-sdk/core/authplane"` |
 
-**Go: `go get .../mcp` (or `.../http`) is not enough on its own.** Both adapters import `github.com/authplane/go-sdk/core` transitively, and `go get` of the adapter alone does *not* record `core` in your `go.sum`. The next `go build` then fails with `missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`. Fix it by running **`go mod tidy`** immediately after `go get` (or `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.2.0` — naming the import path pulls its full transitive set). This is the one place "one package, exact version" doesn't hold: `core` rides along whether you name it or not.
+**Go: `go get .../mcp` (or `.../http`) is not enough on its own.** Both adapters import `github.com/authplane/go-sdk/core` transitively, and `go get` of the adapter alone does *not* record `core` in your `go.sum`. The next `go build` then fails with `missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`. Fix it by running **`go mod tidy`** immediately after `go get` (or `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.3.0` — naming the import path pulls its full transitive set). This is the one place "one package, exact version" doesn't hold: `core` rides along whether you name it or not.
 
-Python users: SDK packages require **Python 3.12+** (`requires-python = ">=3.12"`).
+Python users: SDK packages require **Python 3.11+** (`requires-python = ">=3.11"`); the examples here use 3.12 images.
 TypeScript users: SDK packages are **ESM-only** and require **Node.js 22+**.
 
 ## Runnable examples to point users at
@@ -68,17 +68,20 @@ All examples are smoke-tested by CI (`make docs-smoke`). They default to the pub
 
 For the LOC matrix and the full ladder, see [`examples/README.md`](examples/README.md).
 
-## Three off-by-default grants
+## Grants and their switches
 
-If the user wants client-credentials, DPoP, or token-exchange, the AS needs the matching env var set to `true` at startup. Easy to forget and the discovery endpoint silently omits the grant:
+Client credentials, DPoP, token exchange (RFC 8693) and XAA all ship **enabled** as of v0.2.0 — a stock AS advertises them in discovery with no extra configuration. Each has a switch an operator may have turned off; if the discovery document is missing a grant, that is where to look:
 
-| Grant | Env var (set to `true`) |
+| Feature | Env var (default `true`) |
 |---|---|
 | Client Credentials | `AUTHPLANE_CLIENT_CREDENTIALS_ENABLED` |
 | DPoP sender-constrained tokens | `AUTHPLANE_DPOP_ENABLED` |
 | Token Exchange (RFC 8693) | `AUTHPLANE_TOKEN_EXCHANGE_ENABLED` |
+| XAA / Enterprise-Managed Authorization | `AUTHPLANE_XAA_ENABLED` |
 
-The AS listens on `:9000` (public OAuth) and `:9001` (Admin API + Admin UI at `/admin/ui/`). Implements MCP Authorization spec `2025-11-25`.
+Grants remain gated by client registration: enabling one server-wide widens what a client *may* register for, it does not grant it to anyone. A client still needs the grant in its own `grant_types`.
+
+The AS listens on `:9000` (public OAuth) and `:9001` (Admin API + Admin UI at `/admin/ui/`). Implements MCP Authorization spec `2026-07-28`.
 
 ## Common user requests + where to route them
 
@@ -145,7 +148,7 @@ This is the 98% case. Run these steps in order. Stop and consult the user only a
 | 406 Not Acceptable on the MCP call | Missing `Accept: application/json, text/event-stream` header | The 3-step handshake doc |
 | 401 even with what looks like a valid token | Issuer hostname mismatch (AS announces `http://X`, SDK fetches metadata at `http://Y`) | The two `AUTHPLANE_*ISSUER` env vars |
 | `invalid_scope` or `insufficient_scope` | Scope string drift across the four places it appears | `Scopes:`, Resource registration, Client registration, `scope=` token param |
-| `grant type not supported` | The grant is off by default; set the matching `AUTHPLANE_*_ENABLED=true` and restart the AS | [§ Three off-by-default grants](#three-off-by-default-grants) |
+| `grant type not supported` | Either the client was registered without that grant in `grant_types`, or an operator turned the grant off server-wide | Check the client's `grant_types` first; then [§ Grants and their switches](#grants-and-their-switches) |
 | SDK adapter throws at module load / startup | AS unreachable at metadata fetch time | Bring up the AS first, or wrap the adapter constructor in a bounded retry loop |
 | Stale state on retry | A previous run left a Resource or Client with the same slug/name | Either `make distclean` in the example dir, or delete the conflicting record via admin API |
 | Readiness probe "passes" but the run misbehaves | A leftover server/AS from a prior attempt is still bound to the port and answering the probe (even a valid-looking 401 looks "ready") — you're talking to the wrong process | `docker ps` + `lsof -i :9000 -i :9001 -i :8080 -i :8090`; kill strays (`docker ps -aq --filter name=authplane \| xargs -r docker rm -f`) before re-running. A bare port check is not proof *this* run's process answered. |

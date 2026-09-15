@@ -42,6 +42,20 @@ case "${1:-}" in
       -e AUTHPLANE_TOKEN_EXCHANGE_ENABLED \
       -v "$AS_CONFIG:/config.yaml:ro" \
       "$AS_IMAGE" serve --config /config.yaml >/dev/null
+    # Block until discovery answers. The example MCP servers run SDK
+    # discovery at startup and exit if the AS is not there yet — and Docker's
+    # port forward accepts connections a moment before the container
+    # listens, so "started" is not "ready". Callers start their server right
+    # after this returns.
+    deadline=$(( $(date +%s) + 60 ))
+    until curl -sf "http://localhost:$AS_PORT/.well-known/oauth-authorization-server" >/dev/null 2>&1; do
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "  authserver:   $AS_CONTAINER did not answer discovery on :$AS_PORT within 60s" >&2
+        docker logs --tail 20 "$AS_CONTAINER" >&2 || true
+        exit 1
+      fi
+      sleep 1
+    done
     echo "  authserver:   $AS_CONTAINER on :$AS_PORT / admin :$AS_ADMIN_PORT"
     ;;
   stop)

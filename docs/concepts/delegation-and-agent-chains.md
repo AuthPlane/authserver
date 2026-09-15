@@ -129,21 +129,30 @@ the gates run in sequence — operator allowlist (3 below), subject-scope
 ceiling, user consent (skipped for Mint self-exchange and on fronted
 paths, Mint→Mint and Mint→Broker alike); see
 [Token Exchange grant → Step 3](../guides/upstream-providers/token-exchange-grant.md#step-3-gate-the-resource-with-policyexchangeallowed_client_ids).
-When `resource` is omitted (legacy fall-through), exactly one of (1) and
-(2) below runs — never both. Which one is decided by whether the acting
-`client_id` equals the subject token's:
+When `resource` is omitted (legacy fall-through), only (1) can authorize
+the exchange. A cross-client exchange there is refused outright: naming a
+resource is what routes the request to the operator gate in (2).
 
 1. **Self-exchange** — `allow_self_exchange: true` AND the requesting
    client's `client_id` matches the subject token's `client_id`. Used for
    scope narrowing (a service that has a broad token wants a narrow one).
-2. **`may_act` claim** — the subject token carries
-   `may_act: {"sub": "<requesting client>"}`. The original token issuer
-   pre-authorized this specific actor.
-3. **Per-resource policy** — the target resource's
-   `policy.exchange.allowed_client_ids` includes the acting client (empty
-   list allows any client). For [Broker](glossary.md#glossary-broker-backend)
-   resources, the three-bound [consent](glossary.md#glossary-consent) check
-   then runs on top.
+2. **Per-resource policy** — the target resource's
+   `policy.exchange.allowed_client_ids` includes the acting client. An
+   empty list allows any client to exchange a token that was issued to
+   *itself*. Delegating another client's token on the direct Mint path is
+   different: there the acting client must be named, because the
+   consent grant that authorizes the exchange belongs to the subject
+   token's client and an operator who never named the delegate never
+   authorized it to inherit that grant. Being listed in the target's
+   `policy.runtime.client_ids` also satisfies it — that declares the
+   caller *is* the target resource, so the token's audience and its
+   holder are the same thing the user consented to reach, and there is no
+   third party to name. For
+   [Broker](glossary.md#glossary-broker-backend) resources, the
+   three-bound [consent](glossary.md#glossary-consent) check then runs on
+   top; its agent-attestation gate resolves the acting client to a
+   resource of its own, so a delegate that no operator registered cannot
+   reach it either.
 
 The operator gate (3) and the legacy fall-through (1 and 2) deny with
 `access_denied`. The other sequential gates fail differently: the

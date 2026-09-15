@@ -378,3 +378,54 @@ func TestValidateCreateParams_NilEnabledGrants_SkipsCheck(t *testing.T) {
 		t.Errorf("nil enabledGrants should skip the runtime-enabled check: %v", err)
 	}
 }
+
+// The host shown on the consent screen is the user's only verified signal, so
+// the cases that matter are the ones designed to make it read as somewhere
+// else. Userinfo is the classic: a browser shows the host after the @, and so
+// must this.
+func TestRedirectURIHost(t *testing.T) {
+	for _, tc := range []struct {
+		uri, want string
+	}{
+		{"https://app.example.com/cb", "app.example.com"},
+		{"https://app.example.com:8443/cb", "app.example.com:8443"},
+		// The decoy is userinfo, not the host. Showing "good.example.com" here
+		// would tell the user the opposite of the truth.
+		{"https://good.example.com@evil.example/cb", "evil.example"},
+		{"https://evil.example/cb?next=good.example.com", "evil.example"},
+		{"http://127.0.0.1:9999/cb", "127.0.0.1:9999"},
+		{"http://[::1]:9999/cb", "[::1]:9999"},
+		// Unparseable or hostless: the template omits the block rather than
+		// rendering an empty destination.
+		{"not a url", ""},
+		{"", ""},
+	} {
+		if got := RedirectURIHost(tc.uri); got != tc.want {
+			t.Errorf("RedirectURIHost(%q) = %q, want %q", tc.uri, got, tc.want)
+		}
+	}
+}
+
+func TestIsLoopbackRedirectURI(t *testing.T) {
+	for _, tc := range []struct {
+		uri  string
+		want bool
+	}{
+		{"http://localhost:9999/cb", true},
+		{"http://LOCALHOST:9999/cb", true},
+		{"http://127.0.0.1:9999/cb", true},
+		// Any address in 127.0.0.0/8 is the local machine. Warning on .1 and
+		// staying silent on .5 would be the wrong way round.
+		{"https://127.0.0.5/cb", true},
+		{"http://[::1]:9999/cb", true},
+		{"https://app.example.com/cb", false},
+		// A name that merely looks local is not: the check is on the address
+		// the URI names, not on the string.
+		{"https://localhost.evil.example/cb", false},
+		{"not a url", false},
+	} {
+		if got := IsLoopbackRedirectURI(tc.uri); got != tc.want {
+			t.Errorf("IsLoopbackRedirectURI(%q) = %v, want %v", tc.uri, got, tc.want)
+		}
+	}
+}

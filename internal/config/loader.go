@@ -195,11 +195,35 @@ func DefaultConfig() *Config {
 			DefaultTokenExpiry:   15 * time.Minute,
 			DefaultRefreshExpiry: 7 * 24 * time.Hour,
 		},
+		XAA: XAAConfig{
+			// Enterprise-Managed Authorization. Enabling it adds the jwt-bearer
+			// grant, which is what the ID-JAG grant profile advertisement keys
+			// off — with this false the AS silently claims no EMA support.
+			//
+			// Safe to default on: the trusted-IdP registry starts empty, so no
+			// assertion validates until an operator registers an IdP.
+			Enabled: true,
+			// These three were previously absent here, leaving them as Go zero
+			// values that cmd/authserver/serve.go re-defaulted at wiring time.
+			// Seeded explicitly so the generated config reference documents the
+			// values the server actually runs with rather than zeros.
+			TokenExpiry:     1 * time.Hour,
+			MaxAssertionAge: 5 * time.Minute,
+			SubjectMode:     "auto_map",
+			JWKSCacheTTL:    1 * time.Hour,
+			// Left false deliberately. This is an enforcement switch, not a
+			// feature toggle: flipping it would refuse exchanges that name no
+			// resource, which is a behavior change beyond turning XAA on.
+			RequireResource: false,
+		},
 		CIMD: CIMDConfig{
 			Enabled:      true,
 			RequireHTTPS: true,
-			CacheTTL:     time.Hour,
-			FetchTimeout: 10 * time.Second,
+			// Written out rather than left to the zero value: a security
+			// default belongs where the defaults are read.
+			AllowPrivateAddresses: false,
+			CacheTTL:              time.Hour,
+			FetchTimeout:          10 * time.Second,
 		},
 		Session: SessionConfig{
 			CookieName: "authserver_session",
@@ -237,16 +261,16 @@ func DefaultConfig() *Config {
 			IncludeGroupsScope: true,
 		},
 		ClientCredentials: ClientCredentialsConfig{
-			Enabled:     false,
+			Enabled:     true,
 			TokenExpiry: 1 * time.Hour,
 		},
 		DPoP: DPoPConfig{
-			Enabled:       false,
+			Enabled:       true,
 			NonceTTL:      60 * time.Second,
 			ProofLifetime: 60 * time.Second,
 		},
 		TokenExchange: TokenExchangeConfig{
-			Enabled:       false,
+			Enabled:       true,
 			MaxChainDepth: 5,
 			TokenExpiry:   1 * time.Hour,
 		},
@@ -300,6 +324,7 @@ func loadFromEnv(cfg *Config) error {
 	loadClientCredentialsFromEnv(&cfg.ClientCredentials)
 	loadDPoPFromEnv(&cfg.DPoP)
 	loadTokenExchangeFromEnv(&cfg.TokenExchange)
+	loadXAAFromEnv(&cfg.XAA)
 	loadAgentsFromEnv(&cfg.Agents)
 	loadDataEncryptionFromEnv(&cfg.DataEncryption)
 	loadConnectFromEnv(&cfg.Connect)
@@ -391,8 +416,26 @@ func loadDCRFromEnv(cfg *DCRConfig) {
 func loadCIMDFromEnv(cfg *CIMDConfig) {
 	cfg.Enabled = getEnvBool("AUTHPLANE_CIMD_ENABLED", cfg.Enabled)
 	cfg.RequireHTTPS = getEnvBool("AUTHPLANE_CIMD_REQUIRE_HTTPS", cfg.RequireHTTPS)
+	cfg.AllowPrivateAddresses = getEnvBool("AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES", cfg.AllowPrivateAddresses)
 	cfg.CacheTTL = getEnvDuration("AUTHPLANE_CIMD_CACHE_TTL", cfg.CacheTTL)
 	cfg.FetchTimeout = getEnvDuration("AUTHPLANE_CIMD_FETCH_TIMEOUT", cfg.FetchTimeout)
+}
+
+// loadXAAFromEnv reads the Enterprise-Managed Authorization knobs from the
+// environment.
+//
+// XAA was the one feature block with no env-var path at all: it could only be
+// configured from a YAML file. That was survivable while it defaulted to false,
+// but now that it ships enabled, an operator running the container with
+// env-only configuration — the documented deployment path — would have had no
+// way to turn it off.
+func loadXAAFromEnv(cfg *XAAConfig) {
+	cfg.Enabled = getEnvBool("AUTHPLANE_XAA_ENABLED", cfg.Enabled)
+	cfg.TokenExpiry = getEnvDuration("AUTHPLANE_XAA_TOKEN_EXPIRY", cfg.TokenExpiry)
+	cfg.MaxAssertionAge = getEnvDuration("AUTHPLANE_XAA_MAX_ASSERTION_AGE", cfg.MaxAssertionAge)
+	cfg.RequireResource = getEnvBool("AUTHPLANE_XAA_REQUIRE_RESOURCE", cfg.RequireResource)
+	cfg.SubjectMode = getEnv("AUTHPLANE_XAA_SUBJECT_MODE", cfg.SubjectMode)
+	cfg.JWKSCacheTTL = getEnvDuration("AUTHPLANE_XAA_JWKS_CACHE_TTL", cfg.JWKSCacheTTL)
 }
 
 func loadSessionFromEnv(cfg *SessionConfig) error {

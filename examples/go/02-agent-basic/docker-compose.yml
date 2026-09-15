@@ -18,7 +18,7 @@
 # stand up the AS in isolation (e.g. to register additional clients).
 services:
   authserver:
-    image: authplane/authserver:latest
+    image: ${AUTHSERVER_IMAGE:-authplane/authserver:latest}
     # ---------------------------------------------------------------------
     # LOCAL BUILD ESCAPE HATCH — see ../../_shared/docker-compose.authserver.yml
     # ---------------------------------------------------------------------

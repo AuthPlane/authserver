@@ -101,11 +101,12 @@ func (s *ConsentService) GetPendingConsent(ctx context.Context, sessionID string
 	}
 
 	view := &input.ConsentView{
-		SessionID:  sess.ID,
-		ClientName: c.Name,
-		ClientID:   c.ID,
-		Resource:   sess.Resource,
-		Scopes:     []input.ScopeInfo{},
+		SessionID:   sess.ID,
+		ClientName:  c.Name,
+		ClientID:    c.ID,
+		Resource:    sess.Resource,
+		RedirectURI: sess.RedirectURI,
+		Scopes:      []input.ScopeInfo{},
 	}
 
 	// Empty resource= takes the AS-level path (e.g., introspection / OIDC

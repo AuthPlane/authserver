@@ -26,11 +26,11 @@ import { InMemoryDPoPReplayStore } from "@authplane/sdk/core";
 import { requireScopes } from "fastmcp";
 const auth = await authplaneFastMcpAuth({
   issuer: process.env.AUTHPLANE_ISSUER!, resource: process.env.AUTHPLANE_RESOURCE!,
-  scopes: ["mcp:echo", "mcp:add"], inboundDPoP: { required: true }, devMode: true,
-  // A replay store is required to honor DPoP proofs (RFC 9449 §11.1). Without
-  // it the adapter ignores the DPoP header and rejects bound tokens with 401.
-  // InMemory is fine for a single-process demo; use a shared store in prod.
-  replayStore: new InMemoryDPoPReplayStore(),
+  scopes: ["mcp:echo", "mcp:add"], devMode: true,
+  // The replay store tracks accepted proof `jti`s (RFC 9449 §11.1). Omit it and
+  // the SDK allocates an in-memory one per resource — fine for a single
+  // process; hand it a shared store (Redis, database) when you run more than one.
+  inboundDPoP: { required: true, replayStore: new InMemoryDPoPReplayStore() },
 });
 // authplane:end
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -577,12 +578,18 @@ func (s *TokenExchangeService) checkRevocation(ctx context.Context, span trace.S
 
 // checkPolicy verifies that the requesting client is authorized to exchange this token.
 //
-// The unified-dispatch path does not call into checkPolicy — its
-// operator gate uses target.Policy.Exchange.AllowedClientIDs from the resource
-// row. checkPolicy survives only for the legacy mint fall-through used when
-// the requested resource has no row in the unified table yet. The
-// cross-client config + DB allowlist seams are retired; the only
-// cross-client authorization left here is the per-token may_act claim.
+// The unified-dispatch path does not call into checkPolicy — its operator gate
+// uses target.Policy.Exchange.AllowedClientIDs from the resource row.
+// checkPolicy survives only for the legacy mint fall-through used when the
+// requested resource has no row in the unified table yet.
+//
+// Self-exchange is the only thing authorizable here. Cross-client exchange on
+// this path is refused outright, because there is nothing left on it that could
+// authorize one: the config and DB allowlist seams were retired when the
+// authorization seam moved to per-resource policy, and the per-token may_act
+// claim went with the writer that produced it. Naming a resource — which puts
+// the request on the unified path and its operator gate — is how a cross-client
+// exchange is authorized now.
 func (s *TokenExchangeService) checkPolicy(_ context.Context, span trace.Span, requestingClientID string, subjectClaims, _ *crypto.AccessTokenClaims, teCfg output.TokenExchangeConfig) error {
 	// Self-exchange: client is exchanging its own token.
 	if requestingClientID == subjectClaims.ClientID {
@@ -594,15 +601,8 @@ func (s *TokenExchangeService) checkPolicy(_ context.Context, span trace.Span, r
 		return domain.ErrTokenExchangeNotAuthorized
 	}
 
-	// Cross-client exchange: check may_act claim in subject token.
-	if subjectClaims.MayAct != nil {
-		if actorSub, ok := subjectClaims.MayAct["sub"].(string); ok && actorSub == requestingClientID {
-			return nil
-		}
-	}
-
 	span.RecordError(domain.ErrTokenExchangeNotAuthorized)
-	span.SetStatus(codes.Error, "cross-client exchange not authorized")
+	span.SetStatus(codes.Error, "cross-client exchange not authorized on the resource-less path")
 	return domain.ErrTokenExchangeNotAuthorized
 }
 
@@ -858,8 +858,12 @@ func (s *TokenExchangeService) validateAgainstCatalog(scopeStr string, target *r
 //     the fronted-broker path does NOT gate the same way.
 //  4. subject-scope ceiling (ADR-002), direct path only — the fronted
 //     path bounded its scopes in step 3. Applies to self-exchange too.
-//  5. user-consent gate against consent_grants (user, agent, target),
-//     skipped on the fronted path and on a self-exchange.
+//  5. cross-client delegation gate, then the user-consent gate against
+//     consent_grants (user, agent, target). Both are skipped on the
+//     fronted path and on a self-exchange. The delegation gate is
+//     default-deny: a client presenting another client's token must be
+//     named in target.Policy.Exchange.AllowedClientIDs, or be one of
+//     target.Policy.Runtime.ClientIDs and so be the target itself.
 //  6. actor token verification, when an actor_token is present.
 //  7. act-chain build + chain-depth check. Direct path keeps legacy
 //     shape; fronted path applies Option β (issued client_id =
@@ -1006,12 +1010,73 @@ func (s *TokenExchangeService) dispatchMint(
 		}
 	}
 
-	// Self-exchange skips the consent gate (no third party involved). The
-	// operator gate already ran above and restricts nothing when the
-	// allowlist is empty, so in that composition only the subject-scope
-	// ceiling and catalog validation bound the issued token.
+	// Self-exchange skips the consent gate (no third party involved): the
+	// caller already holds a token issued to it and the subject-scope
+	// ceiling only lets scope narrow, so the exchange grants nothing the
+	// caller did not already have.
 	isSelfExchange := teCfg.AllowSelfExchange && req.ClientID == subjectClaims.ClientID
 	if frontedLink == nil && !isSelfExchange {
+		// Cross-client delegation gate. The consent lookup below is keyed
+		// on agentClientID — the subject token's client, the agent the
+		// user actually authorized — and not on the client presenting the
+		// exchange. That is deliberate and is what makes a delegation
+		// chain possible at all: agent 2 never faces the user, so it can
+		// only inherit agent 1's grant.
+		//
+		// The inheritance has to be authorized by someone, though, and on
+		// the direct path the only party who can authorize it is the
+		// operator. Without this gate any client holding a token minted
+		// for another client rides that client's consent, which is the
+		// whole of the third party's authorization. An operator who never
+		// named the delegate never authorized the delegation, so an empty
+		// allowlist denies here — unlike the operator gate above, where
+		// empty stays permissive because a same-client exchange carries
+		// its own authorization.
+		//
+		// Fronted paths are excluded by frontedLink == nil above: they
+		// consult no consent grant at all, because the operator's fronting
+		// link is itself the explicit declaration this gate looks for.
+		//
+		// Two operator declarations satisfy it, and they answer different
+		// questions. Exchange.AllowedClientIDs names a third party the
+		// operator is willing to hand a target-audienced token to.
+		// Runtime.ClientIDs says the caller *is* the target — it is the
+		// same predicate introspection calls resourceAuthorizes — so there
+		// is no third party to name: the token's audience and its holder
+		// are the resource the user already consented to reach. Requiring
+		// an Exchange entry as well would mean listing a resource as its
+		// own permitted delegate, which is why the common shape (a service
+		// exchanging a user's web-app token for a token audienced to
+		// itself) needed configuration to do nothing.
+		//
+		// The Runtime arm only widens this gate. A non-empty
+		// Exchange.AllowedClientIDs is an explicit restriction and still
+		// wins, because the operator gate at the top of dispatchMint has
+		// already rejected anyone missing from it before control reaches
+		// here.
+		//
+		// Membership is read from policy.runtime.client_ids alone. The
+		// retired slug==client_id convention that resolveActorMCP and
+		// resourceAuthorizes still accept is deliberately not honored
+		// here: a deployment on that convention keeps the Exchange path it
+		// has today, and a gate added now should not extend the reach of a
+		// convention already scheduled for removal.
+		actsAsTarget := slices.Contains(target.Policy.Runtime.ClientIDs, req.ClientID)
+		if req.ClientID != agentClientID &&
+			!slices.Contains(target.Policy.Exchange.AllowedClientIDs, req.ClientID) &&
+			!actsAsTarget {
+			span.RecordError(domain.ErrTokenExchangeNotAuthorized)
+			span.SetStatus(codes.Error, "cross-client exchange not authorized by operator")
+			s.logger.InfoContext(ctx, "mint dispatch denied: cross-client exchange requires the acting client in the target's policy.exchange.allowed_client_ids, or in its policy.runtime.client_ids if the client is that resource",
+				"client_id", req.ClientID,
+				"agent_client_id", agentClientID,
+				"sub", subjectClaims.Subject,
+				"resource_slug", target.Slug,
+			)
+			s.recordDenied(ctx, req.ClientID, "cross_client_not_authorized")
+			return nil, domain.ErrTokenExchangeNotAuthorized
+		}
+
 		grant, getErr := s.consentGrants.Get(ctx, subjectClaims.Subject, agentClientID, target.ID)
 		if getErr != nil {
 			span.RecordError(getErr)
@@ -1934,18 +1999,20 @@ func scopesNotConsented(grant *resource.ConsentGrant, requested []string) []stri
 // act") per Brief §1; user consent is a separate gate, skipped for Mint
 // self-exchange and on fronted paths — Mint→Mint and Mint→Broker alike
 // (see dispatchMint and dispatchFrontedBroker).
+//
+// The permissive default is safe here because it does not stand alone. A
+// same-client exchange carries its own authorization, and a cross-client
+// one on the direct Mint path must additionally appear in this same list —
+// see the cross-client delegation gate in dispatchMint, which requires
+// membership rather than merely tolerating absence.
+//
 // May flip to strict-by-default for broker resources if customer feedback
 // warrants it; the call site is shared by Mint and Broker.
 func operatorAllowsClient(allowed []string, clientID string) bool {
 	if len(allowed) == 0 {
 		return true
 	}
-	for _, a := range allowed {
-		if a == clientID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowed, clientID)
 }
 
 // requiredSourceScopesForTargets reverse-walks a fronting link's ScopeMap to

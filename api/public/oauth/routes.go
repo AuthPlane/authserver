@@ -119,14 +119,20 @@ type Deps struct {
 	DPoPNonce    DPoPNonceIssuer // optional: nil if DPoP disabled
 	DPoPNonceTTL time.Duration   // TTL for issued nonces
 	// IssuerProvider resolves the AS issuer URL — the public base for
-	// everything under the host. Both consent_url flavors in
-	// consent_required responses are built from it: the broker upstream
-	// re-connect URL (/connect/<provider>, bound-D / bound-E) and the
-	// AS-side re-consent URL (/authorize?resource=…, bound-B / bound-C).
-	// Optional — when nil (or it resolves empty) the handler logs a warn
-	// and emits consent_required without a consent_url (omitted via
-	// omitempty). Operators who want re-consent redirects must wire this;
-	// the OSS default adapter (cmd/authserver/serve.go) does so.
+	// everything under the host, and the value stamped into the RFC 9207 iss
+	// parameter on every authorization response.
+	//
+	// REQUIRED. It was optional when it only fed the two consent_url flavors in
+	// consent_required responses — the broker upstream re-connect URL
+	// (/connect/<provider>, bound-D / bound-E) and the AS-side re-consent URL
+	// (/authorize?resource=…, bound-B / bound-C), both of which degrade to an
+	// omitted consent_url. RFC 9207 changed that: handleAuthorize resolves the
+	// issuer before doing anything else and renders a 500 when it is nil,
+	// errors, or resolves empty, because discovery advertises
+	// authorization_response_iss_parameter_supported and a client that read
+	// that flag must reject any authorization response arriving without iss.
+	// api/public.NewServer panics at construction when Authorize or Consent is
+	// wired without it.
 	IssuerProvider output.IssuerProvider
 }
 
@@ -225,6 +231,9 @@ func RegisterLoginRoutes(mux *http.ServeMux, deps LoginDeps, sessMW *shared.Sess
 type ConsentDeps struct {
 	Consent ConsentProvider
 	URLs    output.URLBuilder
+	// IssuerProvider resolves the AS issuer identifier stamped into the RFC 9207
+	// iss parameter on the authorization response the consent POST emits.
+	IssuerProvider output.IssuerProvider
 }
 
 // RegisterConsentRoutes registers consent routes on the mux.
@@ -234,10 +243,11 @@ func RegisterConsentRoutes(mux *http.ServeMux, deps ConsentDeps, sessMW *shared.
 	}
 
 	ch := &consentHandler{
-		consent: deps.Consent,
-		session: sessMW,
-		obs:     obs,
-		urls:    deps.URLs,
+		consent:        deps.Consent,
+		session:        sessMW,
+		obs:            obs,
+		urls:           deps.URLs,
+		issuerProvider: deps.IssuerProvider,
 	}
 	mux.Handle("GET /consent", sessMW.Wrap(http.HandlerFunc(ch.handleGetConsent)))
 	mux.Handle("POST /consent", sessMW.Wrap(http.HandlerFunc(ch.handlePostConsent)))

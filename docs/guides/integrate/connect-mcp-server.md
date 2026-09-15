@@ -72,7 +72,7 @@ The document looks like this:
 }
 ```
 
-The `resource` field must match the `--uri` you registered in step 1 exactly — including scheme, host, port, path, and trailing-slash form. Use the [MCP canonical form](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#canonical-server-uri) (no trailing slash). On a 401 your server should emit `WWW-Authenticate: Bearer resource_metadata="<PRM URL>"` so the client can rediscover the AS.
+The `resource` field must match the `--uri` you registered in step 1 exactly — including scheme, host, port, path, and trailing-slash form. Use the [MCP canonical form](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#canonical-server-uri) (no trailing slash). On a 401 your server should emit `WWW-Authenticate: Bearer resource_metadata="<PRM URL>"` so the client can rediscover the AS.
 
 ### 3. Validate JWTs on the MCP endpoint
 

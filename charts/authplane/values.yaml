@@ -88,8 +88,10 @@ config:
   # -- Client ID Metadata Document (CIMD) handling.
   cimd:
     enabled: true
-    # -- Require HTTPS for CIMD fetch URLs
+    # -- Require HTTPS for CIMD fetch URLs. Governs the scheme only.
     require_https: true
+    # -- Turn off SSRF address filtering for CIMD fetches (loopback, RFC 1918, cloud metadata). Local development only; the server refuses to boot with it on unless server.issuer is localhost.
+    allow_private_addresses: false
     # -- Cache TTL for fetched CIMD documents
     cache_ttl: 1h
     # -- HTTP timeout for CIMD fetches
@@ -149,17 +151,17 @@ config:
     connector_id: ""
   # -- Client credentials grant (RFC 6749 Section 4.4) for machine-to-machine tokens.
   client_credentials:
-    enabled: false
+    enabled: true
     token_expiry: 1h
   # -- DPoP proof-of-possession (RFC 9449).
   dpop:
-    enabled: false
+    enabled: true
     nonce_ttl: 60s
     proof_lifetime: 60s
     require_nonce: false
   # -- Token exchange (RFC 8693) for delegation and scope narrowing.
   token_exchange:
-    enabled: false
+    enabled: true
     allow_self_exchange: false
     max_chain_depth: 5
     token_expiry: 1h
@@ -172,7 +174,7 @@ config:
   # Trusted IdPs issue ID-JAG assertions exchanged for access tokens via JWT bearer grant.
   # Configure IdPs at runtime via Admin API: POST /admin/idps
   xaa:
-    enabled: false
+    enabled: true
     token_expiry: 1h
     max_assertion_age: 5m
     # -- Refuse exchanges that name no resource, on the ID-JAG assertion

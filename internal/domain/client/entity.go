@@ -40,6 +40,11 @@ type Client struct {
 	Status                  Status
 	RegistrationSource      RegistrationSource
 	CIMDURL                 string // non-empty for CIMD-registered clients
+	// ApplicationType is the OIDC application_type declared at registration:
+	// ApplicationTypeWeb or ApplicationTypeNative. Empty means the client
+	// registered before we asked for it — read it through EffectiveApplicationType,
+	// which applies the OIDC default rather than leaking the empty value.
+	ApplicationType string
 	// Scope is the space-separated per-client scope ceiling (RFC 7591). Only
 	// the admin surface sets it; dynamic registration and CIMD never do,
 	// because those doors create user-delegated clients whose scopes come from
@@ -170,5 +175,43 @@ func (p *CreateParams) Defaults() {
 	}
 	if p.TokenEndpointAuthMethod == "" {
 		p.TokenEndpointAuthMethod = "none"
+	}
+}
+
+// Application types defined by OpenID Connect Dynamic Client Registration 1.0.
+//
+// The distinction is not cosmetic: an OIDC-conformant AS refuses a "web" client
+// the http://localhost and http://127.0.0.1 redirect URIs that desktop apps,
+// mobile apps, CLI tools and locally-hosted web apps rely on. The MCP
+// 2026-07-28 client-registration spec therefore requires MCP clients to declare
+// one, since omitting it defaults to "web".
+const (
+	ApplicationTypeWeb    = "web"
+	ApplicationTypeNative = "native"
+)
+
+// EffectiveApplicationType returns the client's application type, substituting
+// the OIDC default for a client that registered before the field existed.
+//
+// Callers must use this rather than reading ApplicationType directly: an empty
+// stored value and an explicit "web" mean the same thing to every consumer, and
+// only the audit trail cares which one is in the row.
+func (c *Client) EffectiveApplicationType() string {
+	if c.ApplicationType == "" {
+		return ApplicationTypeWeb
+	}
+	return c.ApplicationType
+}
+
+// ValidateApplicationType accepts the two OIDC-defined values, plus empty for
+// a request that omits the field.
+func ValidateApplicationType(t string) error {
+	switch t {
+	case "", ApplicationTypeWeb, ApplicationTypeNative:
+		return nil
+	default:
+		return &ValidationError{
+			Errors: []string{`application_type must be "web" or "native", got "` + t + `"`},
+		}
 	}
 }

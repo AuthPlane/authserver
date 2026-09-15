@@ -115,7 +115,7 @@ curl -X POST http://localhost:9001/admin/resources \
 
 - `scopes[].name` is the AS-side scope your MCP server requests (`scope=repo`).
 - `scopes[].upstream` is the actual upstream scope(s) the AS sends to GitHub on consent and uses for the bound check.
-- `policy.exchange.allowed_client_ids` gates which MCP-server clients may vend this resource. Empty list = any client (user consent is a separate gate).
+- `policy.exchange.allowed_client_ids` gates which MCP-server clients may vend this resource. Empty list = any client exchanging a token issued to itself; a client delegating another client's token must be listed (user consent is a separate gate, and it is keyed on the subject token's client — see the [threat model, T17](../../concepts/threat-model.md)).
 
 > **Fronting an existing Mint resource:** if you already have a Mint resource (your MCP server's own AS-issued tokens) and want to add an upstream brokered side to it without changing the slug, register a separate Broker resource and link it via [`POST /admin/fronting`](../../reference/http-api.md#http-admin-fronting-create). See [Topologies → Folded resource](../../topologies/folded-resource.md).
 
@@ -172,7 +172,7 @@ The AS performs three checks before responding (the [three-bound check](../../co
 
 - requested scopes ⊆ `consent_grants.scopes` for `(user, agent, resource)`
 - requested scopes ⊆ `broker_grants.scopes_granted` for `(user, broker_provider)`
-- acting client ∈ `policy.exchange.allowed_client_ids` (or list is empty)
+- acting client ∈ `policy.exchange.allowed_client_ids` (or the list is empty **and** the acting client is exchanging its own token)
 
 If the upstream access token has expired, the AS refreshes transparently using the encrypted refresh-grant.
 
@@ -194,7 +194,7 @@ A 200 with the user's GitHub profile confirms the round-trip. For Slack, hit `ht
 | `consent_required` with `cause=scope_insufficient`, `consent_url` points at `/connect/{provider}` | Upstream granted a strict subset of the requested scopes (bound E) | Have the user re-run `/connect/{provider}` to widen scopes. For Google, also ensure `extra_auth_params.access_type=offline` so the refresh-grant persists. |
 | `consent_required` with `cause=consent_missing`, `consent_url` points at `/authorize?resource=...` | The agent never got per-resource consent (bound B) — the MCP server hasn't run a standard OAuth 2.1 authorize flow against this AS for `resource=<slug>` | Have the agent redirect through `/authorize` with `resource=<slug>` and the needed scopes. |
 | `invalid_target` on the token call | `resource=<slug>` doesn't match a registered resource, or the slug points at a Broker resource whose `broker_provider_slug` isn't registered | `GET /admin/resources` ([anchor](../../reference/http-api.md#http-admin-resources-list)) — confirm the slug and that `broker_provider_slug` resolves. |
-| `access_denied` on the token call | Acting client not in `policy.exchange.allowed_client_ids` for the target resource | Add the client via [`POST /admin/resources/{slug}/policy/exchange/allowed-clients`](../../reference/http-api.md#http-admin-resources-slug-policy-exchange-allowed-clients-create) (or leave the list empty to allow any client). |
+| `access_denied` on the token call | Acting client not in `policy.exchange.allowed_client_ids` for the target resource | Add the client via [`POST /admin/resources/{slug}/policy/exchange/allowed-clients`](../../reference/http-api.md#http-admin-resources-slug-policy-exchange-allowed-clients-create). Leaving the list empty allows any client only when it exchanges a token issued to itself. |
 | `unsupported_grant_type` | Token Exchange disabled, or MCP client wasn't registered with the token-exchange grant | Set `token_exchange.enabled: true` (or `AUTHPLANE_TOKEN_EXCHANGE_ENABLED=true`). Re-register the client with `"grant_types": ["urn:ietf:params:oauth:grant-type:token-exchange"]` via [`POST /oauth/register`](../../reference/http-api.md#http-public-oauth-register). |
 | `unauthorized_client` | Client exists but doesn't have token-exchange in its `grant_types` | `PATCH /admin/clients/{id}` ([anchor](../../reference/http-api.md#http-admin-clients-id-update)) to add the grant type. |
 | `invalid_grant` | The user's `subject_token` is expired or revoked | User must re-authenticate. If the upstream rejected the refresh-grant (e.g. user revoked GitHub access), the AS surfaces this as `consent_required` with `cause=consent_missing` — direct the user back to `/connect/{provider}`. |

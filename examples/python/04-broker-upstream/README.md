@@ -1,7 +1,7 @@
 # Tier 04 — MCP server fronting a Broker (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 26 lines · Total example: 59 lines · SDK: python-sdk 0.3.0**
+**Auth-specific code: 27 lines · Total example: 60 lines · SDK: python-sdk 0.4.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call a third-party API on the user's
@@ -46,7 +46,7 @@ has the end-to-end sequence diagram.
 |---|---|
 | **Time to run** | ~2 minutes (first build is ~60s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, **Python 3.12+** (only if you run outside Docker — `pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` 0.3.0 (PyPI) |
+| **SDK** | `authplane-sdk` 0.4.0 (PyPI) |
 | **Topology** | Agent ↔ Authserver only — no MCP server in this tier |
 
 ## Run it in 3 commands
@@ -326,7 +326,7 @@ transparently. The agent never sees the upstream refresh token.
 + from authplane.oauth import TokenExchangeOptions
 
   client = await AuthplaneClient.create(issuer=ISSUER, auth=ASCredentials(...))
-  base = (await client.client_credentials(scopes=["mcp:tools"], resources=[MCP_URI])).access_token
+  base = (await client.client_credentials(scopes=["repo"], resources=[BROKER_URI])).access_token
 + try:
 +     upstream = await client.exchange(TokenExchangeOptions(
 +         subject_token=base, scope="repo", resources=("github",),

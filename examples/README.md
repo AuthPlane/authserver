@@ -13,9 +13,9 @@ by `tools/loccount` and CI-enforced against the per-tier budget.
 | Tier | What it shows | Go | TypeScript | Python |
 |---|---|---|---|---|
 | **01** basic server | MCP server protected by JWT, single tool, `client_credentials` token | [5 lines](go/01-mcp-server-basic/) | [5 lines](typescript/01-mcp-server-basic/) | [5 lines](python/01-mcp-server-basic/) |
-| **02** calling another resource | The same MCP server mints a token via the SDK to call a second protected resource | [5 lines](go/02-agent-basic/) | [5 lines](typescript/02-agent-basic/) | [8 lines](python/02-agent-basic/) |
+| **02** calling another resource | The same MCP server mints a token via the SDK to call a second protected resource | [5 lines](go/02-agent-basic/) | [6 lines](typescript/02-agent-basic/) | [8 lines](python/02-agent-basic/) |
 | **03** DPoP + per-tool scopes | RFC 9449 sender-constrained tokens, per-tool scope enforcement | [15 lines](go/03-mcp-server-dpop-scopes/) | [15 lines](typescript/03-mcp-server-fastmcp-dpop/) | [15 lines](python/03-mcp-server-dpop-scopes/) |
-| **04** MCP server fronting a Broker | RFC 8693 token exchange against an upstream provider (GitHub), `ConsentRequiredError` handling | [19 lines](go/04-broker-upstream/) | [21 lines](typescript/04-broker-upstream/) | [26 lines](python/04-broker-upstream/) |
+| **04** MCP server fronting a Broker | RFC 8693 token exchange against an upstream provider (GitHub), `ConsentRequiredError` handling | [19 lines](go/04-broker-upstream/) | [21 lines](typescript/04-broker-upstream/) | [27 lines](python/04-broker-upstream/) |
 
 ## Retrofit — add Authplane to an MCP server you already have
 
