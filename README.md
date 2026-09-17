@@ -82,7 +82,7 @@ Pick the language and the framework adapter that match the stack you're already 
 | **Python** | [authplane/python-sdk](https://github.com/authplane/python-sdk)<br>![License](https://img.shields.io/github/license/authplane/python-sdk) | ✓ Official MCP Python SDK (`authplane-mcp`)<br>✓ FastMCP (`authplane-fastmcp`) | [README](https://github.com/authplane/python-sdk#readme) |
 | **Java** | [authplane/java-sdk](https://github.com/authplane/java-sdk)<br>![License](https://img.shields.io/github/license/authplane/java-sdk) | ✓ Official MCP Java SDK (`authplane-mcp`)<br>✓ Spring Boot (`authplane-spring`) | [README](https://github.com/authplane/java-sdk#readme) |
 | **C#** | [authplane/cs-sdk](https://github.com/authplane/cs-sdk)<br>![License](https://img.shields.io/github/license/authplane/cs-sdk) | ✓ Official MCP C# SDK on ASP.NET Core (`Authplane.Mcp`) | [README](https://github.com/authplane/cs-sdk#readme) |
-| **Rust** | _roadmap_ | — | — |
+| **Rust** | _ready to ship — see [ROADMAP.md](ROADMAP.md)_ | — | — |
 
 Working examples wired against authserver live under [`examples/`](examples/) — Python / TypeScript / Go, with four tiers each (basic MCP server, calling another resource, DPoP + per-tool scopes, MCP server fronting a Broker). Every example's `make verify` is exercised by `make docs-smoke` and the per-tier LOC budget is CI-enforced via `tools/loccount`.
 
@@ -125,17 +125,11 @@ Authplane implements the MCP Authorization specification (2026-07-28) and the OA
 | **Token Introspection (RFC 7662)** | Runtime token validation endpoint for revocation-aware verification. |
 | **Token Revocation (RFC 7009)** | Standard endpoint to revoke refresh tokens and their families. |
 
-## Status & roadmap
+## Roadmap
 
-Authplane is in active development. `v0.2.x` is production-shaped — the OAuth core, MCP discovery, and audit log are spec-compliant and tested. A few things to set expectations:
+What is coming after `v0.2.0`, staged by how far along it is: [ROADMAP.md](ROADMAP.md).
 
-- **The Rust SDK** is on the roadmap; Go, TypeScript, Python, Java, and C# are released.
-- **Upstream-provider connections** (Broker flow) require manual configuration of at-rest encryption (`aes_master` or HashiCorp Vault Transit) before they activate — covered in [`docs/guides/upstream-providers/connecting-providers.md`](docs/guides/upstream-providers/connecting-providers.md).
-- **Isolating separate customers or environments** today means running separate instances. A first-class abstraction for it is post-`v1.0`.
-- **Public dynamic-registration signup UI** is not in `v0.2`; Dynamic Client Registration works over HTTP today, a hosted signup page is a follow-up.
-- **Helm chart (`charts/authplane`)** is at `v0.4.0`; tested for single-instance and basic HA, expect tuning for large fleets.
-
-### A note on `dcr.mode`
+## A note on `dcr.mode`
 
 `dcr.mode` defaults to `open`, which means **any unauthenticated caller can register a client**. The `client_name` it supplies is rendered on the consent screen a user is asked to trust.
 
