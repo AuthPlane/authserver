@@ -36,7 +36,7 @@ topology trade-offs, or SDK code. Target time: 5–15 minutes.
 | What does the network look like? | [Topology decision tree](topologies/) — picks a deployment shape from your constraints |
 | When should I use Authplane (and when not)? | [Threat model](concepts/threat-model.md) + [Broker vs Mint](concepts/broker-vs-mint.md) — the two scope decisions |
 | What SDKs exist today? | [Root README → SDKs](../README.md#sdks) — Go, TypeScript, Python, Java, C# with package names; [`llms.txt`](../llms.txt) has the versions to pin |
-| What's production-shaped vs roadmap? | [Root README → Status & roadmap](../README.md#status--roadmap) — what's stable, what's WIP |
+| What's coming next? | [ROADMAP.md](../ROADMAP.md) — staged by how far along each item is |
 | What can I run in 15 minutes? | [Quickstart](start/02-quickstart-docker.md) → tier-01 retrofit ([Python](../examples/python/retrofit-existing-mcp-server/) · [TypeScript](../examples/typescript/retrofit-existing-mcp-server/) · [Go](../examples/go/retrofit-existing-mcp-server/)) |
 
 Convinced? Pick a deeper lane below. Still evaluating? The [Architect
