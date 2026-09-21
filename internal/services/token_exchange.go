@@ -71,6 +71,12 @@ type TokenExchangeService struct {
 	// Cross-Mint fronting links. Optional — nil disables the
 	// fronted-path branch in dispatchMint.
 	fronting *FrontingService
+
+	// issuances is the log dispatchMint writes through mintIssuer, read
+	// back here so a subject token revoked there (consent cascade, admin
+	// revoke) cannot seed another hop. Taken from mintIssuer at
+	// construction so the two can never point at different stores.
+	issuances output.IssuanceStore
 }
 
 // NewTokenExchangeService creates a new token exchange service.  makes
@@ -98,7 +104,7 @@ func NewTokenExchangeService(
 	if teConfig == nil {
 		panic("NewTokenExchangeService: teConfig must not be nil")
 	}
-	return &TokenExchangeService{
+	svc := &TokenExchangeService{
 		clients:        clients,
 		machineTokens:  machineTokens,
 		jwksVerify:     jwksVerify,
@@ -115,6 +121,10 @@ func NewTokenExchangeService(
 		tracer:         obs.Tracer,
 		metrics:        obs.Metrics,
 	}
+	if mintIssuer != nil {
+		svc.issuances = mintIssuer.issuances
+	}
+	return svc
 }
 
 // WithDPoP enables DPoP proof-of-possession support on the token exchange service.
@@ -546,10 +556,111 @@ func (s *TokenExchangeService) verifyToken(ctx context.Context, span trace.Span,
 	return claims, nil
 }
 
+// refuseIfRevokedSinceCheck closes the window between the checks that
+// admitted a mint and the insert of its issuance row. It re-reads the two
+// facts a consent revocation changes — the subject token's own issuance
+// row, and the grant the delegation gate consulted — and, if either is
+// gone, revokes the row just written and returns the refusal the caller
+// would have received had the revocation landed a moment earlier. A read
+// that fails is treated the same way: this is the last check before the
+// token leaves, and "could not tell" is not a reason to hand it out.
+func (s *TokenExchangeService) refuseIfRevokedSinceCheck(
+	ctx context.Context,
+	span trace.Span,
+	callerID string,
+	subjectClaims *crypto.AccessTokenClaims,
+	agentClientID string,
+	target *resource.Resource,
+	consentGated bool,
+	issuanceID string,
+) error {
+	var refusal error
+	reason := ""
+
+	if s.issuances != nil && subjectClaims.JTI != "" {
+		iss, err := s.issuances.GetByJTI(ctx, subjectClaims.JTI)
+		switch {
+		case err != nil:
+			refusal = fmt.Errorf("re-check subject token issuance after mint: %w", err)
+			reason = "subject_recheck_failed"
+		case iss != nil && iss.IsRevoked():
+			refusal = domain.ErrInvalidGrant
+			reason = "subject_token_revoked_during_mint"
+		}
+	}
+
+	if refusal == nil && consentGated {
+		grant, err := s.consentGrants.Get(ctx, subjectClaims.Subject, agentClientID, target.ID)
+		switch {
+		case err != nil:
+			refusal = fmt.Errorf("re-check consent grant after mint: %w", err)
+			reason = "consent_recheck_failed"
+		case grant == nil:
+			refusal = &domain.ConsentRequiredError{
+				Service:      target.Slug,
+				ResourceSlug: target.Slug,
+				Cause:        domain.CauseConsentMissing,
+			}
+			reason = "consent_revoked_during_mint"
+		}
+	}
+
+	if refusal == nil {
+		return nil
+	}
+
+	span.RecordError(refusal)
+	span.SetStatus(codes.Error, reason)
+	if err := s.revokeOwnIssuance(ctx, issuanceID); err != nil {
+		// The token is never returned, so the live row is an audit
+		// inconsistency rather than an exposure — but say so loudly.
+		s.logger.ErrorContext(ctx, "mint refused after the fact but its issuance row could not be revoked",
+			"jti", issuanceID, "reason", reason, "error", err)
+	}
+	s.logger.WarnContext(ctx, "mint dispatch refused after mint: authorization changed under it",
+		"client_id", callerID,
+		"agent_client_id", agentClientID,
+		"sub", subjectClaims.Subject,
+		"resource_slug", target.Slug,
+		"jti", issuanceID,
+		"reason", reason,
+	)
+	s.recordDenied(ctx, callerID, reason)
+	return refusal
+}
+
+func (s *TokenExchangeService) revokeOwnIssuance(ctx context.Context, issuanceID string) error {
+	if s.issuances == nil {
+		return errors.New("issuance store not wired")
+	}
+	return s.issuances.Revoke(ctx, issuanceID)
+}
+
 // checkRevocation checks if a token has been revoked.
 func (s *TokenExchangeService) checkRevocation(ctx context.Context, span trace.Span, claims *crypto.AccessTokenClaims) error {
 	if claims.JTI == "" {
 		return nil
+	}
+
+	// The issuance log first: it is where consent revocation lands, and a
+	// subject token whose row is revoked must not seed another hop — the
+	// chain below a revoked consent would otherwise keep growing from any
+	// token minted before the revoke. A lookup failure is refused as a
+	// server fault rather than passed over: the two checks below tolerate
+	// their own store errors, but this one is the only check that sees a
+	// consent revocation at all.
+	if s.issuances != nil {
+		iss, err := s.issuances.GetByJTI(ctx, claims.JTI)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "issuance lookup failed")
+			return fmt.Errorf("look up subject token issuance: %w", err)
+		}
+		if iss != nil && iss.IsRevoked() {
+			span.RecordError(domain.ErrInvalidGrant)
+			span.SetStatus(codes.Error, "subject token issuance revoked")
+			return domain.ErrInvalidGrant
+		}
 	}
 
 	// Check machine token store for machine tokens (sub == client_id).
@@ -1240,18 +1351,31 @@ func (s *TokenExchangeService) dispatchMint(
 
 	now := time.Now().UTC()
 	expiry := now.Add(teCfg.TokenExpiry)
+	// Lineage for consent revocation. The consenting client is the
+	// subject token's client on every non-fronted path — the delegation
+	// gate above looked the grant up under it, and a self-exchange mints
+	// for the same client the user faced. A fronted exchange records none:
+	// no grant was consulted, the operator's link stood in for it, and the
+	// parent link alone ties the token to whatever the source token
+	// answers to.
+	consentClientID := ""
+	if frontedLink == nil {
+		consentClientID = agentClientID
+	}
 	issueReq := IssueRequest{
-		Resource:      target,
-		Provider:      nil,
-		SubjectUserID: subjectClaims.Subject,
-		ActorClientID: issuedClientID,
-		Scopes:        requestedScopes,
-		AgentIdentity: agentClaims,
-		DPoPJKT:       dpopJKT,
-		Audience:      []string{target.URI},
-		Act:           actMap,
-		NotBefore:     now,
-		Expiry:        expiry,
+		Resource:        target,
+		Provider:        nil,
+		SubjectUserID:   subjectClaims.Subject,
+		ActorClientID:   issuedClientID,
+		Scopes:          requestedScopes,
+		AgentIdentity:   agentClaims,
+		DPoPJKT:         dpopJKT,
+		ConsentClientID: consentClientID,
+		ParentJTI:       subjectClaims.JTI,
+		Audience:        []string{target.URI},
+		Act:             actMap,
+		NotBefore:       now,
+		Expiry:          expiry,
 	}
 	resp, err := s.mintIssuer.Issue(ctx, issueReq)
 	if err != nil {
@@ -1259,6 +1383,18 @@ func (s *TokenExchangeService) dispatchMint(
 		span.SetStatus(codes.Error, "mint issuer failed")
 		s.recordDenied(ctx, req.ClientID, "mint_issue_failed")
 		return nil, err
+	}
+
+	// The row exists now. Everything above was checked before it did, so
+	// a consent revocation that ran in between cascaded over a table this
+	// token was not in yet, and would hand the caller a live token minted
+	// under a grant that is already gone. Re-read what the mint was
+	// authorized against; if it changed, revoke the row we just wrote and
+	// refuse. Once the row is in, a revocation running after this point
+	// sees it.
+	if refuse := s.refuseIfRevokedSinceCheck(ctx, span, req.ClientID, subjectClaims, agentClientID, target,
+		frontedLink == nil && !isSelfExchange, resp.IssuanceID); refuse != nil {
+		return nil, refuse
 	}
 
 	s.recordExchangeSuccess(ctx, start, "mint_dispatch")
@@ -1903,37 +2039,18 @@ func (s *TokenExchangeService) emitFrontedBrokerDenialAudit(
 	))
 }
 
-// extractAgentIdentity runs AgentIdentityService.AttachClaims against a
-// throwaway claims struct and lifts the resulting AgentID and AgentChain
-// into an *AgentIdentityClaims. Returns nil when the agent-identity
-// service is not wired or the issuing client is not an agent.
-//
-// The throwaway pattern (vs. a dedicated method on AgentIdentityService)
-// keeps the surface area minimal: AgentIdentityService is intentionally
-// not extended here. Surface a dedicated method as a follow-up if call
-// sites grow.
+// extractAgentIdentity lifts the agent_id / agent_chain pair for the
+// issuing client into the *AgentIdentityClaims carried on IssueRequest.
+// Returns nil when the agent-identity service is not wired or the issuing
+// client is not an agent. The implementation is shared with every other
+// grant that mints through MintIssuer (see extractAgentIdentityClaims).
 func (s *TokenExchangeService) extractAgentIdentity(
 	ctx context.Context,
 	span trace.Span,
 	clientID string,
 	actMap map[string]interface{},
 ) (*AgentIdentityClaims, error) {
-	if s.agentIdentity == nil {
-		return nil, nil
-	}
-	temp := crypto.AccessTokenClaims{Act: actMap}
-	if err := s.agentIdentity.AttachClaims(ctx, &temp, clientID); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "attach agent claims failed")
-		return nil, fmt.Errorf("attach agent claims: %w", err)
-	}
-	if temp.AgentID == "" && len(temp.AgentChain) == 0 {
-		return nil, nil
-	}
-	return &AgentIdentityClaims{
-		AgentID:    temp.AgentID,
-		AgentChain: temp.AgentChain,
-	}, nil
+	return extractAgentIdentityClaims(ctx, s.agentIdentity, span, clientID, actMap)
 }
 
 // recordExchangeSuccess emits the shared TokenExchangeTotal /

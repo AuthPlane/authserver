@@ -12,15 +12,15 @@ Every setting in the on-disk YAML configuration can also be supplied via an `AUT
 | `AUTHPLANE_ADMIN_AUDIT_MAX_LOOKBACK` | `admin.audit_max_lookback` | `duration` | `720h` | — | [`internal/config/loader.go:483`](../../internal/config/loader.go:483) |
 | `AUTHPLANE_ADMIN_ENABLED` | `admin.enabled` | `bool` | `true` | — | [`internal/config/loader.go:471`](../../internal/config/loader.go:471) |
 | `AUTHPLANE_AGENTS_ENABLE_JWKS_LISTING` | `agents.enable_jwks_listing` | `bool` | — | — | [`internal/config/loader.go:356`](../../internal/config/loader.go:356) |
-| `AUTHPLANE_BROKER_PROVIDER_AUTHORIZE_URL` | — | — | — | — | [`internal/config/loader.go:642`](../../internal/config/loader.go:642) |
-| `AUTHPLANE_BROKER_PROVIDER_CLIENT_ID` | — | — | — | — | [`internal/config/loader.go:632`](../../internal/config/loader.go:632) |
-| `AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_ENV` | — | — | — | — | [`internal/config/loader.go:637`](../../internal/config/loader.go:637) |
-| `AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_REF` | — | — | — | — | [`internal/config/loader.go:635`](../../internal/config/loader.go:635) |
-| `AUTHPLANE_BROKER_PROVIDER_DISPLAY_NAME` | — | — | — | — | [`internal/config/loader.go:626`](../../internal/config/loader.go:626) |
-| `AUTHPLANE_BROKER_PROVIDER_PROTOCOL` | — | — | — | — | [`internal/config/loader.go:627`](../../internal/config/loader.go:627) |
-| `AUTHPLANE_BROKER_PROVIDER_RESPONSE_FORMAT` | — | — | — | — | [`internal/config/loader.go:648`](../../internal/config/loader.go:648) |
-| `AUTHPLANE_BROKER_PROVIDER_SLUG` | — | — | — | — | [`internal/config/loader.go:619`](../../internal/config/loader.go:619) |
-| `AUTHPLANE_BROKER_PROVIDER_TOKEN_URL` | — | — | — | — | [`internal/config/loader.go:645`](../../internal/config/loader.go:645) |
+| `AUTHPLANE_BROKER_PROVIDER_AUTHORIZE_URL` | — | — | — | — | [`internal/config/loader.go:643`](../../internal/config/loader.go:643) |
+| `AUTHPLANE_BROKER_PROVIDER_CLIENT_ID` | — | — | — | — | [`internal/config/loader.go:633`](../../internal/config/loader.go:633) |
+| `AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_ENV` | — | — | — | — | [`internal/config/loader.go:638`](../../internal/config/loader.go:638) |
+| `AUTHPLANE_BROKER_PROVIDER_CLIENT_SECRET_REF` | — | — | — | — | [`internal/config/loader.go:636`](../../internal/config/loader.go:636) |
+| `AUTHPLANE_BROKER_PROVIDER_DISPLAY_NAME` | — | — | — | — | [`internal/config/loader.go:627`](../../internal/config/loader.go:627) |
+| `AUTHPLANE_BROKER_PROVIDER_PROTOCOL` | — | — | — | — | [`internal/config/loader.go:628`](../../internal/config/loader.go:628) |
+| `AUTHPLANE_BROKER_PROVIDER_RESPONSE_FORMAT` | — | — | — | — | [`internal/config/loader.go:649`](../../internal/config/loader.go:649) |
+| `AUTHPLANE_BROKER_PROVIDER_SLUG` | — | — | — | — | [`internal/config/loader.go:620`](../../internal/config/loader.go:620) |
+| `AUTHPLANE_BROKER_PROVIDER_TOKEN_URL` | — | — | — | — | [`internal/config/loader.go:646`](../../internal/config/loader.go:646) |
 | `AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES` | `cimd.allow_private_addresses` | `bool` | `false` | — | [`internal/config/loader.go:419`](../../internal/config/loader.go:419) |
 | `AUTHPLANE_CIMD_CACHE_TTL` | `cimd.cache_ttl` | `duration` | `1h` | — | [`internal/config/loader.go:420`](../../internal/config/loader.go:420) |
 | `AUTHPLANE_CIMD_ENABLED` | `cimd.enabled` | `bool` | `true` | — | [`internal/config/loader.go:417`](../../internal/config/loader.go:417) |
@@ -29,9 +29,9 @@ Every setting in the on-disk YAML configuration can also be supplied via an `AUT
 | `AUTHPLANE_CLIENT_CREDENTIALS_ENABLED` | `client_credentials.enabled` | `bool` | `true` | — | [`internal/config/loader.go:337`](../../internal/config/loader.go:337) |
 | `AUTHPLANE_CLIENT_CREDENTIALS_TOKEN_EXPIRY` | `client_credentials.token_expiry` | `duration` | `1h` | — | [`internal/config/loader.go:338`](../../internal/config/loader.go:338) |
 | `AUTHPLANE_CLIENT_SECRET_PEPPER` | `client_secret_pepper` | `string` | — | — | [`internal/config/loader.go:332`](../../internal/config/loader.go:332) |
-| `AUTHPLANE_CONNECT_ALLOWED_RETURN_URLS` | `connect.allowed_return_urls` | `[]string` | — | — | [`internal/config/loader.go:608`](../../internal/config/loader.go:608) |
-| `AUTHPLANE_CONNECT_REDIRECT_BASE_URL` | `connect.redirect_base_url` | `string` | — | — | [`internal/config/loader.go:607`](../../internal/config/loader.go:607) |
-| `AUTHPLANE_CONNECT_STATE_SECRET` | `connect.state_secret` | `string` | — | — | [`internal/config/loader.go:606`](../../internal/config/loader.go:606) |
+| `AUTHPLANE_CONNECT_ALLOWED_RETURN_URLS` | `connect.allowed_return_urls` | `[]string` | — | — | [`internal/config/loader.go:609`](../../internal/config/loader.go:609) |
+| `AUTHPLANE_CONNECT_REDIRECT_BASE_URL` | `connect.redirect_base_url` | `string` | — | — | [`internal/config/loader.go:608`](../../internal/config/loader.go:608) |
+| `AUTHPLANE_CONNECT_STATE_SECRET` | `connect.state_secret` | `string` | — | — | [`internal/config/loader.go:607`](../../internal/config/loader.go:607) |
 | `AUTHPLANE_DATA_ENCRYPTION_DRIVER` | `data_encryption.driver` | `string` | — | — | [`internal/config/loader.go:360`](../../internal/config/loader.go:360) |
 | `AUTHPLANE_DATA_ENCRYPTION_KEY_ENV` | `data_encryption.aes_master.key_env` | `string` | — | — | [`internal/config/loader.go:361`](../../internal/config/loader.go:361) |
 | `AUTHPLANE_DATA_ENCRYPTION_VAULT_ADDRESS` | `data_encryption.vault_transit_encrypt.address` | `string` | — | driver is vault_transit_encrypt | [`internal/config/loader.go:362`](../../internal/config/loader.go:362) |
@@ -51,29 +51,30 @@ Every setting in the on-disk YAML configuration can also be supplied via an `AUT
 | `AUTHPLANE_DPOP_NONCE_TTL` | `dpop.nonce_ttl` | `duration` | `60s` | — | [`internal/config/loader.go:343`](../../internal/config/loader.go:343) |
 | `AUTHPLANE_DPOP_PROOF_LIFETIME` | `dpop.proof_lifetime` | `duration` | `60s` | — | [`internal/config/loader.go:344`](../../internal/config/loader.go:344) |
 | `AUTHPLANE_DPOP_REQUIRE_NONCE` | `dpop.require_nonce` | `bool` | — | — | [`internal/config/loader.go:345`](../../internal/config/loader.go:345) |
-| `AUTHPLANE_LOG_ADD_SOURCE` | `observability.logging.add_source` | `bool` | — | — | [`internal/config/loader.go:518`](../../internal/config/loader.go:518) |
-| `AUTHPLANE_LOG_FORMAT` | `observability.logging.format` | `string` | `json` | — | [`internal/config/loader.go:517`](../../internal/config/loader.go:517) |
-| `AUTHPLANE_LOG_LEVEL` | `observability.logging.level` | `string` | `info` | — | [`internal/config/loader.go:516`](../../internal/config/loader.go:516) |
-| `AUTHPLANE_LOG_OTEL` | `observability.logging.outputs.otel` | `bool` | — | — | [`internal/config/loader.go:520`](../../internal/config/loader.go:520) |
-| `AUTHPLANE_LOG_OTEL_ENDPOINT` | `observability.logging.outputs.otel_endpoint` | `string` | — | logging outputs otel is enabled | [`internal/config/loader.go:521`](../../internal/config/loader.go:521) |
-| `AUTHPLANE_LOG_OTEL_INSECURE` | `observability.logging.outputs.insecure` | `bool` | — | — | [`internal/config/loader.go:522`](../../internal/config/loader.go:522) |
-| `AUTHPLANE_LOG_STDOUT` | `observability.logging.outputs.stdout` | `bool` | `true` | — | [`internal/config/loader.go:519`](../../internal/config/loader.go:519) |
-| `AUTHPLANE_METRICS_INSECURE` | `observability.metrics.insecure` | `bool` | — | — | [`internal/config/loader.go:526`](../../internal/config/loader.go:526) |
-| `AUTHPLANE_METRICS_OTEL_ENDPOINT` | `observability.metrics.otel_endpoint` | `string` | — | metrics provider is otel or both | [`internal/config/loader.go:525`](../../internal/config/loader.go:525) |
-| `AUTHPLANE_METRICS_PATH` | `observability.metrics.path` | `string` | `/metrics` | — | [`internal/config/loader.go:524`](../../internal/config/loader.go:524) |
-| `AUTHPLANE_METRICS_PROVIDER` | `observability.metrics.provider` | `string` | `prometheus` | — | [`internal/config/loader.go:523`](../../internal/config/loader.go:523) |
+| `AUTHPLANE_LOG_ADD_SOURCE` | `observability.logging.add_source` | `bool` | — | — | [`internal/config/loader.go:519`](../../internal/config/loader.go:519) |
+| `AUTHPLANE_LOG_FORMAT` | `observability.logging.format` | `string` | `json` | — | [`internal/config/loader.go:518`](../../internal/config/loader.go:518) |
+| `AUTHPLANE_LOG_LEVEL` | `observability.logging.level` | `string` | `info` | — | [`internal/config/loader.go:517`](../../internal/config/loader.go:517) |
+| `AUTHPLANE_LOG_OTEL` | `observability.logging.outputs.otel` | `bool` | — | — | [`internal/config/loader.go:521`](../../internal/config/loader.go:521) |
+| `AUTHPLANE_LOG_OTEL_ENDPOINT` | `observability.logging.outputs.otel_endpoint` | `string` | — | logging outputs otel is enabled | [`internal/config/loader.go:522`](../../internal/config/loader.go:522) |
+| `AUTHPLANE_LOG_OTEL_INSECURE` | `observability.logging.outputs.insecure` | `bool` | — | — | [`internal/config/loader.go:523`](../../internal/config/loader.go:523) |
+| `AUTHPLANE_LOG_STDOUT` | `observability.logging.outputs.stdout` | `bool` | `true` | — | [`internal/config/loader.go:520`](../../internal/config/loader.go:520) |
+| `AUTHPLANE_METRICS_INSECURE` | `observability.metrics.insecure` | `bool` | — | — | [`internal/config/loader.go:527`](../../internal/config/loader.go:527) |
+| `AUTHPLANE_METRICS_OTEL_ENDPOINT` | `observability.metrics.otel_endpoint` | `string` | — | metrics provider is otel or both | [`internal/config/loader.go:526`](../../internal/config/loader.go:526) |
+| `AUTHPLANE_METRICS_PATH` | `observability.metrics.path` | `string` | `/metrics` | — | [`internal/config/loader.go:525`](../../internal/config/loader.go:525) |
+| `AUTHPLANE_METRICS_PROVIDER` | `observability.metrics.provider` | `string` | `prometheus` | — | [`internal/config/loader.go:524`](../../internal/config/loader.go:524) |
+| `AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE` | `oauth.default_client_scope` | `string` | — | — | [`internal/config/loader.go:492`](../../internal/config/loader.go:492) |
 | `AUTHPLANE_OAUTH_REQUIRE_SCOPE` | `oauth.require_scope` | `bool` | `true` | — | [`internal/config/loader.go:491`](../../internal/config/loader.go:491) |
-| `AUTHPLANE_OAUTH_STATE_MAX_AGE` | `oauth.state_max_age` | `duration` | `10m` | — | [`internal/config/loader.go:494`](../../internal/config/loader.go:494) |
-| `AUTHPLANE_OIDC_CLIENT_ID` | `oidc.client_id` | `string` | — | oidc is enabled | [`internal/config/loader.go:505`](../../internal/config/loader.go:505) |
-| `AUTHPLANE_OIDC_CLIENT_SECRET` | `oidc.client_secret` | `string` | — | — | [`internal/config/loader.go:506`](../../internal/config/loader.go:506) |
-| `AUTHPLANE_OIDC_CONNECTOR_ID` | `oidc.connector_id` | `string` | — | — | [`internal/config/loader.go:512`](../../internal/config/loader.go:512) |
-| `AUTHPLANE_OIDC_DISPLAY_NAME` | `oidc.display_name` | `string` | — | — | [`internal/config/loader.go:507`](../../internal/config/loader.go:507) |
-| `AUTHPLANE_OIDC_ENABLED` | `oidc.enabled` | `bool` | — | — | [`internal/config/loader.go:503`](../../internal/config/loader.go:503) |
-| `AUTHPLANE_OIDC_INCLUDE_GROUPS_SCOPE` | `oidc.include_groups_scope` | `bool` | `true` | — | [`internal/config/loader.go:511`](../../internal/config/loader.go:511) |
-| `AUTHPLANE_OIDC_ISSUER` | `oidc.issuer` | `string` | — | oidc is enabled | [`internal/config/loader.go:504`](../../internal/config/loader.go:504) |
-| `AUTHPLANE_OIDC_REDIRECT_URI` | `oidc.redirect_uri` | `string` | — | oidc is enabled | [`internal/config/loader.go:509`](../../internal/config/loader.go:509) |
-| `AUTHPLANE_OIDC_SCOPES` | `oidc.scopes` | `[]string` | — | — | [`internal/config/loader.go:508`](../../internal/config/loader.go:508) |
-| `AUTHPLANE_OIDC_SHOW_LOCAL_LOGIN` | `oidc.show_local_login` | `bool` | `true` | — | [`internal/config/loader.go:510`](../../internal/config/loader.go:510) |
+| `AUTHPLANE_OAUTH_STATE_MAX_AGE` | `oauth.state_max_age` | `duration` | `10m` | — | [`internal/config/loader.go:495`](../../internal/config/loader.go:495) |
+| `AUTHPLANE_OIDC_CLIENT_ID` | `oidc.client_id` | `string` | — | oidc is enabled | [`internal/config/loader.go:506`](../../internal/config/loader.go:506) |
+| `AUTHPLANE_OIDC_CLIENT_SECRET` | `oidc.client_secret` | `string` | — | — | [`internal/config/loader.go:507`](../../internal/config/loader.go:507) |
+| `AUTHPLANE_OIDC_CONNECTOR_ID` | `oidc.connector_id` | `string` | — | — | [`internal/config/loader.go:513`](../../internal/config/loader.go:513) |
+| `AUTHPLANE_OIDC_DISPLAY_NAME` | `oidc.display_name` | `string` | — | — | [`internal/config/loader.go:508`](../../internal/config/loader.go:508) |
+| `AUTHPLANE_OIDC_ENABLED` | `oidc.enabled` | `bool` | — | — | [`internal/config/loader.go:504`](../../internal/config/loader.go:504) |
+| `AUTHPLANE_OIDC_INCLUDE_GROUPS_SCOPE` | `oidc.include_groups_scope` | `bool` | `true` | — | [`internal/config/loader.go:512`](../../internal/config/loader.go:512) |
+| `AUTHPLANE_OIDC_ISSUER` | `oidc.issuer` | `string` | — | oidc is enabled | [`internal/config/loader.go:505`](../../internal/config/loader.go:505) |
+| `AUTHPLANE_OIDC_REDIRECT_URI` | `oidc.redirect_uri` | `string` | — | oidc is enabled | [`internal/config/loader.go:510`](../../internal/config/loader.go:510) |
+| `AUTHPLANE_OIDC_SCOPES` | `oidc.scopes` | `[]string` | — | — | [`internal/config/loader.go:509`](../../internal/config/loader.go:509) |
+| `AUTHPLANE_OIDC_SHOW_LOCAL_LOGIN` | `oidc.show_local_login` | `bool` | `true` | — | [`internal/config/loader.go:511`](../../internal/config/loader.go:511) |
 | `AUTHPLANE_RATE_LIMIT_AUTH_FAIL_MAX` | `rate_limit.auth_fail_max` | `int` | `10` | — | [`internal/config/loader.go:464`](../../internal/config/loader.go:464) |
 | `AUTHPLANE_RATE_LIMIT_AUTH_FAIL_WINDOW` | `rate_limit.auth_fail_window` | `duration` | `10m` | — | [`internal/config/loader.go:465`](../../internal/config/loader.go:465) |
 | `AUTHPLANE_RATE_LIMIT_AUTH_LOCKOUT` | `rate_limit.auth_lockout` | `duration` | `15m` | — | [`internal/config/loader.go:466`](../../internal/config/loader.go:466) |
@@ -81,8 +82,8 @@ Every setting in the on-disk YAML configuration can also be supplied via an `AUT
 | `AUTHPLANE_RATE_LIMIT_ENABLED` | `rate_limit.enabled` | `bool` | `true` | — | [`internal/config/loader.go:461`](../../internal/config/loader.go:461) |
 | `AUTHPLANE_RATE_LIMIT_MAX_TRACKED_IDENTITIES` | `rate_limit.max_tracked_identities` | `int` | `250000` | — | [`internal/config/loader.go:467`](../../internal/config/loader.go:467) |
 | `AUTHPLANE_RATE_LIMIT_RPS` | `rate_limit.requests_per_second` | `float64` | `100` | — | [`internal/config/loader.go:462`](../../internal/config/loader.go:462) |
-| `AUTHPLANE_RESOURCE_SCOPES` | — | — | — | — | [`internal/config/loader.go:712`](../../internal/config/loader.go:712) |
-| `AUTHPLANE_RESOURCE_URI` | — | — | — | — | [`internal/config/loader.go:704`](../../internal/config/loader.go:704) |
+| `AUTHPLANE_RESOURCE_SCOPES` | — | — | — | — | [`internal/config/loader.go:713`](../../internal/config/loader.go:713) |
+| `AUTHPLANE_RESOURCE_URI` | — | — | — | — | [`internal/config/loader.go:705`](../../internal/config/loader.go:705) |
 | `AUTHPLANE_SERVER_ADDRESS` | `server.address` | `string` | `:9000` | — | [`internal/config/loader.go:373`](../../internal/config/loader.go:373) |
 | `AUTHPLANE_SERVER_ALLOWED_ORIGINS` | `server.allowed_origins` | `[]string` | — | — | [`internal/config/loader.go:378`](../../internal/config/loader.go:378) |
 | `AUTHPLANE_SERVER_IDLE_TIMEOUT` | `server.idle_timeout` | `duration` | `120s` | — | [`internal/config/loader.go:376`](../../internal/config/loader.go:376) |
@@ -112,10 +113,10 @@ Every setting in the on-disk YAML configuration can also be supplied via an `AUT
 | `AUTHPLANE_TOKEN_EXCHANGE_ENABLED` | `token_exchange.enabled` | `bool` | `true` | — | [`internal/config/loader.go:349`](../../internal/config/loader.go:349) |
 | `AUTHPLANE_TOKEN_EXCHANGE_MAX_CHAIN_DEPTH` | `token_exchange.max_chain_depth` | `int` | `5` | — | [`internal/config/loader.go:351`](../../internal/config/loader.go:351) |
 | `AUTHPLANE_TOKEN_EXCHANGE_TOKEN_EXPIRY` | `token_exchange.token_expiry` | `duration` | `1h` | — | [`internal/config/loader.go:352`](../../internal/config/loader.go:352) |
-| `AUTHPLANE_TRACING_ENABLED` | `observability.tracing.enabled` | `bool` | `false` | — | [`internal/config/loader.go:527`](../../internal/config/loader.go:527) |
-| `AUTHPLANE_TRACING_ENDPOINT` | `observability.tracing.endpoint` | `string` | — | tracing is enabled | [`internal/config/loader.go:528`](../../internal/config/loader.go:528) |
-| `AUTHPLANE_TRACING_INSECURE` | `observability.tracing.insecure` | `bool` | — | — | [`internal/config/loader.go:529`](../../internal/config/loader.go:529) |
-| `AUTHPLANE_TRACING_SAMPLE_RATE` | `observability.tracing.sample_rate` | `float64` | `1.0` | — | [`internal/config/loader.go:530`](../../internal/config/loader.go:530) |
+| `AUTHPLANE_TRACING_ENABLED` | `observability.tracing.enabled` | `bool` | `false` | — | [`internal/config/loader.go:528`](../../internal/config/loader.go:528) |
+| `AUTHPLANE_TRACING_ENDPOINT` | `observability.tracing.endpoint` | `string` | — | tracing is enabled | [`internal/config/loader.go:529`](../../internal/config/loader.go:529) |
+| `AUTHPLANE_TRACING_INSECURE` | `observability.tracing.insecure` | `bool` | — | — | [`internal/config/loader.go:530`](../../internal/config/loader.go:530) |
+| `AUTHPLANE_TRACING_SAMPLE_RATE` | `observability.tracing.sample_rate` | `float64` | `1.0` | — | [`internal/config/loader.go:531`](../../internal/config/loader.go:531) |
 | `AUTHPLANE_VAULT_ADDR` | `signing.vault_transit.address` | `string` | — | key_store is vault_transit | [`internal/config/loader.go:396`](../../internal/config/loader.go:396) |
 | `AUTHPLANE_VAULT_APPROLE_MOUNT` | `signing.vault_transit.approle.mount` | `string` | — | — | [`internal/config/loader.go:403`](../../internal/config/loader.go:403) |
 | `AUTHPLANE_VAULT_APPROLE_ROLE_ID` | `signing.vault_transit.approle.role_id` | `string` | — | — | [`internal/config/loader.go:401`](../../internal/config/loader.go:401) |

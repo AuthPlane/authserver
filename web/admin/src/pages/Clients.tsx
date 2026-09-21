@@ -282,7 +282,7 @@ export default function Clients() {
       name: client.name,
       redirect_uris: client.redirect_uris.join(", "),
       grant_types: [...client.grant_types],
-      scope: "", // scope is not exposed on ClientView; user fills in if needed
+      scope: "", // the API returns scope now; preload it so a ceiling can be cleared, not only replaced
     });
     setEditFormErrors({});
     setSelected(null);

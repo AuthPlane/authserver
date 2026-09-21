@@ -158,7 +158,9 @@ func TestAgentIdentity_BrokerIssuance_ClaimsOnIssuance_NotInWireToken(t *testing
 	webAppClientID := h.AdminCreatePublicClient(
 		"agent-identity-broker webapp",
 		[]string{"authorization_code"},
-		"tools/echo",
+		// The ceiling has to cover both legs of the fronted flow: the Mint
+		// scope and the upstream scope the fronting link maps it to.
+		"tools/echo repo",
 		nil,
 	)
 	// MCP server as a confidential, agent-flagged token-exchange caller.

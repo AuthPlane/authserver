@@ -230,6 +230,12 @@ type HarnessConfig struct {
 	// leaves every existing scenario byte-for-byte unchanged.
 	MountPath string
 
+	// DefaultClientScope is the ceiling stamped on clients registered through
+	// DCR and CIMD. Empty means no ceiling is stamped at all — which the
+	// authorize path leaves unenforced for now, so scenarios that don't care
+	// about ceilings keep passing. Set it explicitly to test the ceiling.
+	DefaultClientScope string
+
 	// EnableAdminAPI starts the admin HTTP server alongside
 	// the public AS so scenarios can drive /admin/resources,
 	// /admin/broker-providers, /admin/grants, /admin/issuances and
@@ -333,9 +339,16 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		CacheTTL:              cimdCacheTTL,
 		FetchTimeout:          10 * time.Second,
 	})
+	// DefaultClientScope is empty unless a scenario asks for one, mirroring the
+	// default binary. Self-registered clients then carry no ceiling, which
+	// AuthorizeService leaves unenforced for now, so scenarios written before
+	// ceilings existed keep passing. Scenarios that exercise the ceiling set
+	// HarnessConfig.DefaultClientScope, or set a scope on an admin-created
+	// client.
 	oauthConfigProvider := static.NewOAuthConfigProvider(output.OAuthConfig{
 		RequireScope:         false,
 		IntrospectionEnabled: true,
+		DefaultClientScope:   hcfg.DefaultClientScope,
 	})
 	agentsConfigProvider := static.NewAgentsConfigProvider(output.AgentsConfig{
 		AgentIdentityEnabled: true,
@@ -352,6 +365,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		cimdConfigProvider,
 		obs.WithComponent("cimd-svc"),
 		services.WithCIMDEnabledGrants(grantsProvider),
+		services.WithCIMDOAuthConfig(oauthConfigProvider),
 	)
 
 	dcrSvc := services.NewDCRService(
@@ -359,6 +373,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		dcrModeProvider,
 		obs.WithComponent("dcr"), auditSvc,
 		services.WithDCREnabledGrants(grantsProvider),
+		services.WithDCROAuthConfig(oauthConfigProvider),
 	)
 
 	authSvc := services.NewUserAuthService(userStore, obs.WithComponent("auth"), auditSvc)
@@ -425,6 +440,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		static.NewIssuerProvider("http://placeholder"), obs.WithComponent("introspect"), auditSvc,
 	)
 	introspectSvc.WithResourceRegistry(resourceRegistry)
+	introspectSvc.WithIssuanceStore(stores.Issuance)
 
 	adminSvc := services.NewAdminService(
 		stores.Client, userStore, stores.Token, stores.Audit,
@@ -585,6 +601,11 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	// stays empty for every Mint token issued via the standard OAuth
 	// grants under test.
 	tokenSvcReal.WithResourceRegistry(resourceRegistry)
+	// mirror cmd/authserver/serve.go so the auth-code and refresh-token
+	// grants stamp agent_id for is_agent clients. This must be applied to
+	// tokenSvcReal, not the placeholder-issuer tokenSvc above: srvReal is
+	// what backs the scenarios.
+	tokenSvcReal.WithAgentIdentity(agentIdentitySvc)
 	introspectSvcReal := services.NewIntrospectionService(
 		jwksSvc, stores.Revocation, stores.MachineToken, stores.Client, userStore,
 		static.NewIssuerProvider(issuerURL), obs.WithComponent("introspect"), auditSvc,
@@ -592,6 +613,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	// mirror cmd/authserver/serve.go so a resource server may introspect a
 	// token minted for it.
 	introspectSvcReal.WithResourceRegistry(resourceRegistry)
+	introspectSvcReal.WithIssuanceStore(stores.Issuance)
 	revokeSvcReal := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, static.NewIssuerProvider(issuerURL), obs.WithComponent("revoke"), auditSvc, stores.Revocation)
 	serverCfg.Issuer = issuerURL
 
@@ -812,6 +834,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 			stores.ConsentGrant, stores.BrokerGrant, stores.Issuance,
 			obs.WithComponent("grant-admin"), auditSvc,
 		)
+		grantAdminSvc.WithRefreshFamilyCascade(stores.Token, stores.Revocation, stores.Resource)
 		issuanceAdminSvc := services.NewIssuanceAdminService(
 			stores.Issuance, obs.WithComponent("issuance-admin"), auditSvc,
 		)
@@ -1710,20 +1733,58 @@ func (h *TestHarness) RegisterConfidentialClient(grantTypes []string, scope stri
 	return reg.ClientID, reg.ClientSecret
 }
 
+// RegisterPublicAgentClient registers a public (PKCE, no secret) agent
+// client via DCR and returns its client_id. The public variant is what a
+// user-consented agent flow needs: MCPClient.FullFlow drives the
+// authorization_code grant without a client secret, so the confidential
+// RegisterAgentClient cannot be used for it.
+func (h *TestHarness) RegisterPublicAgentClient(grantTypes []string, scope, description string) string {
+	h.T.Helper()
+	reg := h.registerAgentClient(true, "e2e-public-agent-client", grantTypes, scope, description)
+	return reg.ClientID
+}
+
 // RegisterAgentClient registers a confidential agent client via DCR and returns client_id + client_secret.
 func (h *TestHarness) RegisterAgentClient(grantTypes []string, scope, description string) (clientID, clientSecret string) {
 	h.T.Helper()
+	reg := h.registerAgentClient(false, "e2e-agent-client", grantTypes, scope, description)
+	return reg.ClientID, reg.ClientSecret
+}
 
-	reg, status := h.RegisterClient(input.RegisterClientRequest{
+// registerAgentClient is the shared body behind RegisterAgentClient and
+// RegisterPublicAgentClient: same DCR call and same post-registration scope
+// update. public selects the token endpoint auth method and, with it, whether
+// the client is registered for the auth-code response type.
+func (h *TestHarness) registerAgentClient(
+	public bool,
+	clientName string,
+	grantTypes []string,
+	scope, description string,
+) *input.RegisterClientResponse {
+	h.T.Helper()
+
+	authMethod := "client_secret_post"
+	if public {
+		authMethod = "none"
+	}
+
+	req := input.RegisterClientRequest{
 		RedirectURIs:            []string{"http://localhost:9999/callback"},
-		ClientName:              "e2e-agent-client",
+		ClientName:              clientName,
 		GrantTypes:              grantTypes,
-		TokenEndpointAuthMethod: "client_secret_post",
+		TokenEndpointAuthMethod: authMethod,
 		Agent:                   true,
 		AgentDescription:        description,
-	})
+	}
+	if public {
+		// Public clients drive the auth-code grant, which requires the
+		// response type to be registered.
+		req.ResponseTypes = []string{"code"}
+	}
+
+	reg, status := h.RegisterClient(req)
 	if status != http.StatusCreated {
-		h.T.Fatalf("register agent client: expected 201, got %d", status)
+		h.T.Fatalf("register agent client (%s): expected 201, got %d", authMethod, status)
 	}
 
 	if scope != "" {
@@ -1737,7 +1798,7 @@ func (h *TestHarness) RegisterAgentClient(grantTypes []string, scope, descriptio
 		}
 	}
 
-	return reg.ClientID, reg.ClientSecret
+	return reg
 }
 
 // CreatePublicClientWithID / CreateConfidentialClientWithID /

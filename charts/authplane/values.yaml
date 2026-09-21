@@ -102,6 +102,11 @@ config:
     # When false, missing scope defaults to all registered scopes for the resource.
     # Default true matches DefaultConfig() in internal/config/loader.go.
     require_scope: true
+    # -- Space-separated scope ceiling assigned to clients that register
+    # themselves (DCR, CIMD). Empty keeps them unbounded by a ceiling, which
+    # is deprecated: from v0.3.0 a client with no ceiling is refused at
+    # /oauth/authorize. Set it wherever dcr.mode is not admin_only.
+    default_client_scope: ""
   session:
     cookie_name: authserver_session
     max_age: 24h

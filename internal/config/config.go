@@ -62,6 +62,22 @@ type OAuthConfig struct {
 	// flag picks between them. Defaults to true.
 	RequireScope bool `yaml:"require_scope"`
 
+	// DefaultClientScope is the space-separated scope ceiling assigned to
+	// clients created through dynamic registration (DCR) and CIMD, and only
+	// to those whose grants all keep a user in the loop. Neither door lets a
+	// client state its own ceiling — the registration request and the
+	// metadata document have no scope field — so the server supplies one;
+	// RFC 7591 §2 permits registering a client with a default scope set.
+	//
+	// Leaving it empty keeps the pre-v0.2.0 behavior: those clients are
+	// created without a ceiling, and /oauth/authorize bounds their requests by
+	// the resource catalog alone rather than refusing them. That is a
+	// deprecation window, not the end state — from v0.3.0 a client with no
+	// ceiling is refused with invalid_scope. The server warns at startup, and
+	// the admin UI carries a notice, while the value is empty and dcr.mode
+	// leaves registration open.
+	DefaultClientScope string `yaml:"default_client_scope"`
+
 	// StateMaxAge bounds the OIDC state cookie's lifetime: both the cookie's
 	// Max-Age attribute and the server-side freshness window checked at
 	// callback. Default 10m. A shorter value tightens the state replay window

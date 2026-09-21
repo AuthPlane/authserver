@@ -39,6 +39,10 @@ type SystemDeps struct {
 	// OIDC is a secret-bearing port (its OIDCConfig carries ClientSecret);
 	// read only .Enabled here.
 	OIDC output.OIDCConfigProvider
+	// OAuth backs the operator notices. Its DefaultClientScope is a policy
+	// value, not a secret — the notices report whether it is set, never what
+	// it contains.
+	OAuth output.OAuthConfigProvider
 }
 
 // systemHandler handles system status and configuration endpoints.
@@ -128,6 +132,27 @@ func (h *systemHandler) handleSystemConfig(w http.ResponseWriter, r *http.Reques
 		h.configError(w, r, "resolve oidc config", err)
 		return
 	}
+	// Nil-tolerant, unlike its siblings: OAuth was added to an exported struct
+	// that has no constructor, so an out-of-tree caller building a SystemDeps
+	// literal still compiles and would otherwise panic here. Notices are
+	// advisory, so degrading to none beats taking down /admin/system/config.
+	//
+	// Skipping the call entirely, not passing an empty scope: operatorNotices
+	// cannot tell "not configured" from "no provider wired", so feeding it ""
+	// would raise the "set oauth.default_client_scope" banner permanently at a
+	// caller who may well have set it — an unclearable false alarm, which is
+	// worse than the silence this is meant to degrade to.
+	var notices []noticeView
+	if h.deps.OAuth != nil {
+		oauthCfg, oauthErr := h.deps.OAuth.Config(ctx)
+		if oauthErr != nil {
+			h.configError(w, r, "resolve oauth config", oauthErr)
+			return
+		}
+		notices = operatorNotices(dcr.Mode, oauthCfg.DefaultClientScope)
+	} else {
+		notices = []noticeView{}
+	}
 
 	resp := systemConfigResponse{
 		Issuer:            issuer,
@@ -145,6 +170,7 @@ func (h *systemHandler) handleSystemConfig(w http.ResponseWriter, r *http.Reques
 		TokenExchange: tokenExchangeConfigView{Enabled: tx.Enabled, MaxChainDepth: tx.MaxChainDepth},
 		Agents:        agentsConfigView{Enabled: agents.AgentIdentityEnabled, JWKSListing: agents.EnableJWKSListing},
 		OIDC:          oidcConfigView{Enabled: oidc.Enabled},
+		Notices:       notices,
 	}
 
 	shared.WriteJSON(w, http.StatusOK, resp)
@@ -186,4 +212,48 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm %ds", minutes, seconds)
 	}
 	return fmt.Sprintf("%ds", seconds)
+}
+
+// operatorNotices returns the advisories that apply to this deployment.
+//
+// Kept as a free function over plain values so the rules are unit-testable
+// without standing up a handler, and so adding the next deprecation is a case
+// here rather than a change to the response shape.
+func operatorNotices(dcrMode, defaultClientScope string) []noticeView {
+	// Never nil: the field is always present in the JSON, so a client can
+	// render it without a null check.
+	notices := []noticeView{}
+
+	// dcr.mode gates both self-registration doors — CIMD refuses to
+	// auto-register under admin_only too — so a closed deployment has nothing
+	// to act on. "" is deliberately not in this set: config validation rejects
+	// it and both registration services fail closed on an unrecognized mode,
+	// so it registers nothing.
+	selfRegistrationOpen := dcrMode == "open" || dcrMode == "approved_redirects"
+
+	if selfRegistrationOpen && defaultClientScope == "" {
+		notices = append(notices, noticeView{
+			ID:       "oauth-default-client-scope-required-v0.3.0",
+			Severity: "warning",
+			Title:    "Set oauth.default_client_scope before v0.3.0",
+			Body: "Clients that register themselves through dynamic registration or " +
+				"CIMD cannot state their own scope ceiling, and this server has no " +
+				"default to give them, so they are created without one. Their requests " +
+				"are currently bounded only by the resource catalog. From v0.3.0 a " +
+				"client with no ceiling will be refused at /oauth/authorize with " +
+				"invalid_scope. Set oauth.default_client_scope " +
+				"(AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE) to the scopes a self-registered " +
+				"client may request. " +
+				"Three groups it will not cover, each of which needs a scope set from " +
+				"the Clients page: clients already registered, since the ceiling is " +
+				"assigned once at registration time; clients created through the admin " +
+				"API without a scope, since it is optional there; and self-registered " +
+				"clients asking for client_credentials, jwt-bearer or token-exchange, " +
+				"which are never given a ceiling by design. Closing dcr.mode stops new " +
+				"ones being created and clears this notice, but fixes none of the three.",
+			DocsURL: "https://docs.authplane.ai/reference/configuration",
+		})
+	}
+
+	return notices
 }

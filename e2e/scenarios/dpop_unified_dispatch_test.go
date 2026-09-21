@@ -197,7 +197,7 @@ func TestDPoP_UnifiedBrokerDispatch_JKTPersistsOnIssuance(t *testing.T) {
 	h.RegisterScope(rs.URI, "tools/echo", "Echo tool")
 	h.CreateUser(email, password)
 
-	webAppClientID := h.AdminCreatePublicClient("dpop-broker webapp", []string{"authorization_code"}, "tools/echo", nil)
+	webAppClientID := h.AdminCreatePublicClient("dpop-broker webapp", []string{"authorization_code"}, "tools/echo repo", nil)
 	mcpServerClientID, mcpSecret := h.AdminCreateAgentClient("dpop-broker actor MCP", []string{dpopGrantTypeTokenExchange}, "tools/echo repo", "MCP Server as Agent")
 
 	mcpClient := e2e.NewMCPClient(t, h, rs, webAppClientID, "http://localhost:9999/callback")

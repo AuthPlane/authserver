@@ -81,6 +81,7 @@ func staticSystemDeps() *apiadmin.SystemDeps {
 		ClientCredentials: static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{Enabled: false}),
 		Agents:            static.NewAgentsConfigProvider(output.AgentsConfig{EnableJWKSListing: true, AgentIdentityEnabled: false}),
 		OIDC:              static.NewOIDCConfigProvider(output.OIDCConfig{Enabled: true}),
+		OAuth:             static.NewOAuthConfigProvider(output.OAuthConfig{DefaultClientScope: "tools/read"}),
 	}
 }
 
@@ -123,5 +124,31 @@ func TestSystemConfig_ProviderError500(t *testing.T) {
 	status, _ := getConfig(t, ts.URL)
 	if status != http.StatusInternalServerError {
 		t.Fatalf("status: got %d, want 500", status)
+	}
+}
+
+// SystemDeps is exported and has no constructor, so an out-of-tree caller can
+// build one without the OAuth provider that was added for notices. The nil
+// path has to yield no notices rather than an empty scope: operatorNotices
+// cannot tell "not configured" from "no provider wired", so feeding it "" puts
+// a permanent "set oauth.default_client_scope" banner in front of a caller who
+// may already have set it, with no way to clear it.
+func TestSystemConfig_NilOAuthProvider_EmitsNoNotices(t *testing.T) {
+	deps := staticSystemDeps()
+	deps.OAuth = nil
+	// dcr.mode open is the combination that would otherwise raise the notice.
+	deps.DCRMode = static.NewDCRModeProvider("open", nil)
+
+	ts := newSystemServer(t, deps)
+	status, body := getConfig(t, ts.URL)
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 — a missing advisory provider must not 500", status)
+	}
+	notices, ok := body["notices"].([]any)
+	if !ok {
+		t.Fatalf("notices: got %T, want an array", body["notices"])
+	}
+	if len(notices) != 0 {
+		t.Fatalf("notices: got %v, want none when the OAuth provider is absent", notices)
 	}
 }

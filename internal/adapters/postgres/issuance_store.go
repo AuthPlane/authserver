@@ -29,7 +29,7 @@ type IssuanceStore struct {
 
 var _ output.IssuanceStore = (*IssuanceStore)(nil)
 
-const issuanceColumns = `id, subject_user_id, client_id, resource_id, scopes, backend_kind, revocable, issued_at, expires_at, revoked_at, jti, dpop_jkt, agent_id, agent_chain`
+const issuanceColumns = `id, subject_user_id, client_id, resource_id, scopes, backend_kind, revocable, issued_at, expires_at, revoked_at, jti, dpop_jkt, agent_id, agent_chain, consent_client_id, parent_jti`
 
 // Insert writes a new issuance row.
 func (s *IssuanceStore) Insert(ctx context.Context, i *resource.Issuance) error {
@@ -40,13 +40,14 @@ func (s *IssuanceStore) Insert(ctx context.Context, i *resource.Issuance) error 
 	chain := marshalAgentChain(i.AgentChain)
 	_, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`INSERT INTO issuances (`+issuanceColumns+`)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16)`,
 		i.ID, i.SubjectUserID, i.ClientID, i.ResourceID,
 		issuanceScopesArg(i.Scopes), string(i.BackendKind), i.Revocable,
 		toUTC(i.IssuedAt), toUTC(i.ExpiresAt),
 		i.RevokedAt,
 		nullableText(i.JTI), nullableText(i.DPoPJKT),
 		nullableText(i.AgentID), chain,
+		nullableText(i.ConsentClientID), nullableText(i.ParentJTI),
 	)
 	s.recordDB(ctx, "issuance_insert", start)
 	if err != nil {
@@ -139,12 +140,35 @@ func (s *IssuanceStore) RevokeFamily(ctx context.Context, userID, clientID, reso
 	defer span.End()
 	start := time.Now()
 
+	// Roots: minted under this grant. consent_client_id is what the mint
+	// was authorized against; rows from before it existed match on the
+	// acting client instead, which is the pre-lineage behavior. Roots are
+	// not filtered on revoked_at — a root revoked one at a time by an
+	// operator still has descendants to reach — only the UPDATE is.
+	//
+	// Descendants: parent_jti links a token to the subject token it was
+	// exchanged from, and the recursion follows it to the leaves. Chain
+	// depth is bounded at mint (token_exchange.max_chain_depth), so the
+	// recursion is too. UNION rather than UNION ALL: a cycle cannot be
+	// written (a token's parent is issued before it), but UNION makes the
+	// query terminate even if one somehow were.
 	tag, err := dbOrTx(ctx, s.pool).Exec(ctx,
-		`UPDATE issuances
+		`WITH RECURSIVE lineage(jti) AS (
+		    SELECT jti FROM issuances
+		     WHERE subject_user_id = $1 AND resource_id = $2 AND backend_kind = 'mint'
+		       AND jti IS NOT NULL
+		       AND (consent_client_id = $3
+		            OR (consent_client_id IS NULL AND client_id = $3))
+		    UNION
+		    SELECT i.jti FROM issuances i
+		      JOIN lineage l ON i.parent_jti = l.jti
+		     WHERE i.backend_kind = 'mint' AND i.jti IS NOT NULL
+		 )
+		 UPDATE issuances
 		    SET revoked_at = NOW()
-		  WHERE subject_user_id = $1 AND client_id = $2 AND resource_id = $3
+		  WHERE jti IN (SELECT jti FROM lineage)
 		    AND backend_kind = 'mint' AND revoked_at IS NULL`,
-		userID, clientID, resourceID,
+		userID, resourceID, clientID,
 	)
 	s.recordDB(ctx, "issuance_revoke_family", start)
 	if err != nil {
@@ -267,12 +291,15 @@ func scanIssuance(row interface{ Scan(...any) error }) (*resource.Issuance, erro
 		dpopJKT     *string
 		agentID     *string
 		chainRaw    []byte
+		consentCID  *string
+		parentJTI   *string
 	)
 	if err := row.Scan(
 		&i.ID, &i.SubjectUserID, &i.ClientID, &i.ResourceID,
 		&scopes, &backendKind, &i.Revocable,
 		&issuedAt, &expiresAt, &revokedAt,
 		&jti, &dpopJKT, &agentID, &chainRaw,
+		&consentCID, &parentJTI,
 	); err != nil {
 		return nil, err
 	}
@@ -296,6 +323,12 @@ func scanIssuance(row interface{ Scan(...any) error }) (*resource.Issuance, erro
 	}
 	if agentID != nil {
 		i.AgentID = *agentID
+	}
+	if consentCID != nil {
+		i.ConsentClientID = *consentCID
+	}
+	if parentJTI != nil {
+		i.ParentJTI = *parentJTI
 	}
 	chain, err := unmarshalAgentChain(chainRaw)
 	if err != nil {

@@ -57,22 +57,48 @@ type storeBundle struct {
 	providers    output.BrokerProviderStore
 	consents     output.ConsentGrantStore
 	brokerGrants output.BrokerGrantStore
+	issuances    output.IssuanceStore
 }
 
 func newDispatchSetup(t *testing.T) *dispatchSetup {
 	t.Helper()
-	return newDispatchSetupWithConfig(t, output.TokenExchangeConfig{
+	return newDispatchSetupWithConfig(t, defaultDispatchConfig())
+}
+
+func defaultDispatchConfig() output.TokenExchangeConfig {
+	return output.TokenExchangeConfig{
 		AllowSelfExchange: true,
 		MaxChainDepth:     5,
 		TokenExpiry:       15 * time.Minute,
-	})
+	}
 }
 
 func newDispatchSetupWithConfig(t *testing.T, cfg output.TokenExchangeConfig) *dispatchSetup {
+	return newDispatchSetupWithOverrides(t, cfg, dispatchOverrides{})
+}
+
+// dispatchOverrides lets a test interpose on the stores the service is
+// built with. Each wrap function receives the real store and returns what
+// the service should use; nil keeps the real one.
+type dispatchOverrides struct {
+	consents  func(output.ConsentGrantStore) output.ConsentGrantStore
+	issuances func(output.IssuanceStore) output.IssuanceStore
+}
+
+func newDispatchSetupWithOverrides(t *testing.T, cfg output.TokenExchangeConfig, ov dispatchOverrides) *dispatchSetup {
 	t.Helper()
 
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
+
+	var consents output.ConsentGrantStore = stores.ConsentGrant
+	if ov.consents != nil {
+		consents = ov.consents(consents)
+	}
+	var issuances output.IssuanceStore = stores.Issuance
+	if ov.issuances != nil {
+		issuances = ov.issuances(issuances)
+	}
 
 	dir := t.TempDir()
 	ks, err := keyfile.New(dir, obs)
@@ -85,11 +111,12 @@ func newDispatchSetupWithConfig(t *testing.T, cfg output.TokenExchangeConfig) *d
 	bundle := &storeBundle{
 		resources:    stores.Resource,
 		providers:    stores.BrokerProvider,
-		consents:     stores.ConsentGrant,
+		consents:     consents,
 		brokerGrants: stores.BrokerGrant,
+		issuances:    issuances,
 	}
 
-	mintIssuer := services.NewMintIssuer(jwksSvc, stores.Issuance, staticIssuerForTest(teIssuer), obs)
+	mintIssuer := services.NewMintIssuer(jwksSvc, issuances, staticIssuerForTest(teIssuer), obs)
 
 	enc := &dispatchEncryptor{}
 	stub := &dispatchStubAdapter{name: "oauth"}
@@ -107,7 +134,7 @@ func newDispatchSetupWithConfig(t *testing.T, cfg output.TokenExchangeConfig) *d
 	svc := services.NewTokenExchangeService(
 		stores.Client, stores.MachineToken, jwksSvc, jwksSvc, stores.Revocation,
 		staticIssuerForTest(teIssuer), static.NewTokenExchangeConfigProvider(cfg),
-		registry, stores.ConsentGrant, mintIssuer, brokerIssuer,
+		registry, consents, mintIssuer, brokerIssuer,
 		obs, auditSvc,
 	)
 
@@ -1771,3 +1798,355 @@ func TestDispatchMint_ScopedSubject_OperatorGateRejects(t *testing.T) {
 // brokerproto.Registry stores values of that interface type).
 var _ output.BrokerProtocol = (*dispatchStubAdapter)(nil)
 var _ brokerproto.Registry // referenced to prevent unused-import on early failures
+
+// -------------------------------------------------------------------
+// A subject token whose issuance row is revoked cannot seed
+// another hop. Consent revocation writes issuances.revoked_at and
+// nothing else, so without this check the chain below a revoked consent
+// would keep growing from any token minted before the revoke.
+// -------------------------------------------------------------------
+
+func TestTokenExchangeService_Dispatch_RevokedSubjectIssuance_Rejected(t *testing.T) {
+	setup := newDispatchSetup(t)
+	ctx := context.Background()
+
+	agent, _ := setup.makeAgentClient(t, "agent")
+	actor, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, []string{actor.ID})
+	setup.seedUser(t, "user-alice")
+	setup.seedConsentGrant(t, "user-alice", agent.ID, mintRes.ID, []string{"tasks.read"})
+
+	subjectClaims := identitySubjectClaims(agent.ID)
+	subjectClaims.Subject = "user-alice"
+	subjectToken := setup.mintSubjectToken(t, subjectClaims)
+	req := input.TokenExchangeRequest{
+		SubjectToken:     subjectToken,
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         actor.ID,
+		ClientSecret:     actorSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	}
+
+	// The subject token has a live issuance row: exchange succeeds and the
+	// new row carries the lineage the cascade will walk.
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := setup.stores.issuances.Insert(ctx, &resource.Issuance{
+		ID: subjectClaims.JTI, JTI: subjectClaims.JTI, SubjectUserID: "user-alice", ClientID: agent.ID,
+		ResourceID: mintRes.ID, Scopes: []string{"tasks.read"}, BackendKind: resource.BackendMint,
+		Revocable: true, IssuedAt: now, ExpiresAt: now.Add(time.Hour), ConsentClientID: agent.ID,
+	}); err != nil {
+		t.Fatalf("insert subject issuance: %v", err)
+	}
+	resp, err := setup.svc.Exchange(ctx, req)
+	if err != nil {
+		t.Fatalf("Exchange with live subject issuance: %v", err)
+	}
+	hop := parseClaims(t, resp.AccessToken)
+	row, err := setup.stores.issuances.GetByJTI(ctx, hop["jti"].(string))
+	if err != nil || row == nil {
+		t.Fatalf("exchanged token has no issuance row: %v %v", row, err)
+	}
+	if row.ParentJTI != subjectClaims.JTI {
+		t.Errorf("parent_jti = %q, want the subject token's jti %q", row.ParentJTI, subjectClaims.JTI)
+	}
+	if row.ConsentClientID != agent.ID {
+		t.Errorf("consent_client_id = %q, want the consenting client %q (not the actor %q)", row.ConsentClientID, agent.ID, actor.ID)
+	}
+	if row.ClientID != actor.ID {
+		t.Errorf("client_id = %q, want the acting client %q", row.ClientID, actor.ID)
+	}
+
+	// Revoke the subject token's row: the same request is now refused as
+	// invalid_grant, before any consent or policy check.
+	if err := setup.stores.issuances.Revoke(ctx, subjectClaims.JTI); err != nil {
+		t.Fatalf("revoke subject issuance: %v", err)
+	}
+	_, err = setup.svc.Exchange(ctx, req)
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("Exchange with revoked subject issuance: got %v, want ErrInvalidGrant", err)
+	}
+}
+
+// -------------------------------------------------------------------
+// The mint/revoke race. Every check in dispatchMint runs before the
+// issuance row is inserted, so a consent revocation landing in between
+// cascades over a table the new token is not in yet. The service re-reads
+// the grant and the subject token's row after the insert and revokes its
+// own row if either is gone. These make the race deterministic by
+// revoking from inside the store read the gate performs.
+// -------------------------------------------------------------------
+
+// revokeOnFirstGet returns the grant from the gate's read and revokes it
+// right after, so by the time the mint has written its row the grant is
+// gone — exactly what an operator's DELETE between the two would do.
+type revokeOnFirstGet struct {
+	output.ConsentGrantStore
+	fired bool
+}
+
+func (r *revokeOnFirstGet) Get(ctx context.Context, userID, clientID, resourceID string) (*resource.ConsentGrant, error) {
+	g, err := r.ConsentGrantStore.Get(ctx, userID, clientID, resourceID)
+	if err == nil && g != nil && !r.fired {
+		r.fired = true
+		if rerr := r.ConsentGrantStore.Revoke(ctx, g.ID); rerr != nil {
+			return nil, rerr
+		}
+	}
+	return g, err
+}
+
+func TestTokenExchangeService_Dispatch_ConsentRevokedDuringMint_RefusedAndRowRevoked(t *testing.T) {
+	interposer := &revokeOnFirstGet{}
+	setup := newDispatchSetupWithOverrides(t, defaultDispatchConfig(), dispatchOverrides{
+		consents: func(real output.ConsentGrantStore) output.ConsentGrantStore {
+			interposer.ConsentGrantStore = real
+			return interposer
+		},
+	})
+	ctx := context.Background()
+
+	agent, _ := setup.makeAgentClient(t, "agent")
+	actor, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, []string{actor.ID})
+	setup.seedUser(t, "user-alice")
+	setup.seedConsentGrant(t, "user-alice", agent.ID, mintRes.ID, []string{"tasks.read"})
+
+	subjectClaims := identitySubjectClaims(agent.ID)
+	subjectClaims.Subject = "user-alice"
+	_, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, subjectClaims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         actor.ID,
+		ClientSecret:     actorSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	})
+	var cre *domain.ConsentRequiredError
+	if !errors.As(err, &cre) {
+		t.Fatalf("exchange whose grant was revoked mid-mint: got %v, want ConsentRequiredError", err)
+	}
+	if !interposer.fired {
+		t.Fatal("test setup: the interposer never revoked the grant")
+	}
+
+	// No live row survived for this user: the one the mint wrote is revoked.
+	rows, err := setup.stores.issuances.ListForUser(ctx, "user-alice", time.Time{})
+	if err != nil {
+		t.Fatalf("list issuances: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("issuance rows = %d, want exactly the one the mint wrote", len(rows))
+	}
+	if rows[0].RevokedAt == nil {
+		t.Fatal("the issuance row written by a mint that was then refused is still live")
+	}
+}
+
+// The subject token's own row revoked between the subject check and the
+// insert: same shape, refused with invalid_grant.
+type revokeSubjectOnFirstGet struct {
+	output.IssuanceStore
+	subjectJTI string
+	fired      bool
+}
+
+func (r *revokeSubjectOnFirstGet) GetByJTI(ctx context.Context, jti string) (*resource.Issuance, error) {
+	iss, err := r.IssuanceStore.GetByJTI(ctx, jti)
+	if err == nil && jti == r.subjectJTI && !r.fired {
+		r.fired = true
+		// Revoke after answering "live": the check passes, the mint
+		// proceeds, the re-check finds the row revoked.
+		if rerr := r.IssuanceStore.Revoke(ctx, jti); rerr != nil {
+			return nil, rerr
+		}
+	}
+	return iss, err
+}
+
+func TestTokenExchangeService_Dispatch_SubjectRevokedDuringMint_RefusedAndRowRevoked(t *testing.T) {
+	interposer := &revokeSubjectOnFirstGet{}
+	setup := newDispatchSetupWithOverrides(t, defaultDispatchConfig(), dispatchOverrides{
+		issuances: func(real output.IssuanceStore) output.IssuanceStore {
+			interposer.IssuanceStore = real
+			return interposer
+		},
+	})
+	ctx := context.Background()
+
+	agent, _ := setup.makeAgentClient(t, "agent")
+	actor, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, []string{actor.ID})
+	setup.seedUser(t, "user-alice")
+	setup.seedConsentGrant(t, "user-alice", agent.ID, mintRes.ID, []string{"tasks.read"})
+
+	subjectClaims := identitySubjectClaims(agent.ID)
+	subjectClaims.Subject = "user-alice"
+	interposer.subjectJTI = subjectClaims.JTI
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := interposer.IssuanceStore.Insert(ctx, &resource.Issuance{
+		ID: subjectClaims.JTI, JTI: subjectClaims.JTI, SubjectUserID: "user-alice", ClientID: agent.ID,
+		ResourceID: mintRes.ID, Scopes: []string{"tasks.read"}, BackendKind: resource.BackendMint,
+		Revocable: true, IssuedAt: now, ExpiresAt: now.Add(time.Hour), ConsentClientID: agent.ID,
+	}); err != nil {
+		t.Fatalf("insert subject issuance: %v", err)
+	}
+
+	_, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, subjectClaims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         actor.ID,
+		ClientSecret:     actorSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("exchange whose subject was revoked mid-mint: got %v, want ErrInvalidGrant", err)
+	}
+	if !interposer.fired {
+		t.Fatal("test setup: the interposer never revoked the subject row")
+	}
+	rows, err := interposer.IssuanceStore.ListForUser(ctx, "user-alice", time.Time{})
+	if err != nil {
+		t.Fatalf("list issuances: %v", err)
+	}
+	for _, r := range rows {
+		if r.RevokedAt == nil {
+			t.Errorf("issuance %s is live after the mint was refused", r.JTI)
+		}
+	}
+}
+
+// A store that cannot answer the re-check refuses the mint as a server
+// fault and revokes the row: "could not tell" does not hand the token out.
+type failAfterNGets struct {
+	output.IssuanceStore
+	allow int
+	calls int
+}
+
+func (f *failAfterNGets) GetByJTI(ctx context.Context, jti string) (*resource.Issuance, error) {
+	f.calls++
+	if f.calls > f.allow {
+		return nil, errors.New("issuance store unavailable")
+	}
+	return f.IssuanceStore.GetByJTI(ctx, jti)
+}
+
+func TestTokenExchangeService_Dispatch_RecheckStoreFails_RefusedAsServerFault(t *testing.T) {
+	// The first GetByJTI is checkRevocation's; the second is the re-check.
+	interposer := &failAfterNGets{allow: 1}
+	setup := newDispatchSetupWithOverrides(t, defaultDispatchConfig(), dispatchOverrides{
+		issuances: func(real output.IssuanceStore) output.IssuanceStore {
+			interposer.IssuanceStore = real
+			return interposer
+		},
+	})
+	ctx := context.Background()
+
+	agent, _ := setup.makeAgentClient(t, "agent")
+	actor, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, []string{actor.ID})
+	setup.seedUser(t, "user-alice")
+	setup.seedConsentGrant(t, "user-alice", agent.ID, mintRes.ID, []string{"tasks.read"})
+
+	subjectClaims := identitySubjectClaims(agent.ID)
+	subjectClaims.Subject = "user-alice"
+	_, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, subjectClaims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         actor.ID,
+		ClientSecret:     actorSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	})
+	if err == nil {
+		t.Fatal("exchange succeeded although the post-mint re-check could not read the store")
+	}
+	if errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("a store fault must not be reported as invalid_grant: %v", err)
+	}
+	rows, lerr := interposer.IssuanceStore.ListForUser(ctx, "user-alice", time.Time{})
+	if lerr != nil {
+		t.Fatalf("list: %v", lerr)
+	}
+	if len(rows) != 1 || rows[0].RevokedAt == nil {
+		t.Fatalf("the refused mint's row should be revoked: %+v", rows)
+	}
+}
+
+// checkRevocation itself: a store that cannot answer refuses the exchange
+// as a server fault, not invalid_grant.
+func TestTokenExchangeService_SubjectIssuanceLookupFails_ServerFault(t *testing.T) {
+	interposer := &failAfterNGets{allow: 0}
+	setup := newDispatchSetupWithOverrides(t, defaultDispatchConfig(), dispatchOverrides{
+		issuances: func(real output.IssuanceStore) output.IssuanceStore {
+			interposer.IssuanceStore = real
+			return interposer
+		},
+	})
+	agent, _ := setup.makeAgentClient(t, "agent")
+	actor, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, []string{actor.ID})
+	setup.seedUser(t, "user-alice")
+	setup.seedConsentGrant(t, "user-alice", agent.ID, mintRes.ID, []string{"tasks.read"})
+
+	subjectClaims := identitySubjectClaims(agent.ID)
+	subjectClaims.Subject = "user-alice"
+	_, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, subjectClaims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         actor.ID,
+		ClientSecret:     actorSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	})
+	if err == nil || errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("got %v, want a server fault", err)
+	}
+	rows, _ := interposer.IssuanceStore.ListForUser(context.Background(), "user-alice", time.Time{})
+	if len(rows) != 0 {
+		t.Fatalf("nothing should have been minted: %+v", rows)
+	}
+}
+
+// A self-exchange skips the consent gate, but the token is still the same
+// client's, for the same user, so its row names that client as the
+// consenting one and the cascade for (user, client, resource) reaches it.
+func TestTokenExchangeService_Dispatch_SelfExchange_CarriesLineageAndIsRevocable(t *testing.T) {
+	setup := newDispatchSetup(t) // AllowSelfExchange: true
+	ctx := context.Background()
+
+	agent, agentSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "tasks.read")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, nil)
+	setup.seedUser(t, "user-alice")
+
+	subjectClaims := identitySubjectClaims(agent.ID)
+	subjectClaims.Subject = "user-alice"
+	subjectClaims.Scope = "tasks.read"
+	resp, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, subjectClaims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         agent.ID,
+		ClientSecret:     agentSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	})
+	if err != nil {
+		t.Fatalf("self-exchange: %v", err)
+	}
+	jti := parseClaims(t, resp.AccessToken)["jti"].(string)
+	row, err := setup.stores.issuances.GetByJTI(ctx, jti)
+	if err != nil || row == nil {
+		t.Fatalf("no row: %v %v", row, err)
+	}
+	if row.ConsentClientID != agent.ID || row.ParentJTI != subjectClaims.JTI {
+		t.Errorf("lineage: consent=%q parent=%q, want consent=%q parent=%q",
+			row.ConsentClientID, row.ParentJTI, agent.ID, subjectClaims.JTI)
+	}
+
+	n, err := setup.stores.issuances.RevokeFamily(ctx, "user-alice", agent.ID, mintRes.ID)
+	if err != nil || n != 1 {
+		t.Fatalf("cascade for the client's own grant: n=%d err=%v, want 1", n, err)
+	}
+}

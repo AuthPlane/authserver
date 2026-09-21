@@ -489,6 +489,7 @@ func loadAdminFromEnv(cfg *AdminConfig) error {
 
 func loadOAuthFromEnv(cfg *OAuthConfig) error {
 	cfg.RequireScope = getEnvBool("AUTHPLANE_OAUTH_REQUIRE_SCOPE", cfg.RequireScope)
+	cfg.DefaultClientScope = getEnv("AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE", cfg.DefaultClientScope)
 	// Strict parse: a set-but-unparseable value is a boot failure, not a silent
 	// revert to the default (this is a security knob — see getEnvDurationE).
 	d, err := getEnvDurationE("AUTHPLANE_OAUTH_STATE_MAX_AGE", cfg.StateMaxAge)

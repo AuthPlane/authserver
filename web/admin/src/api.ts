@@ -74,6 +74,16 @@ export interface SubsystemStatus {
   driver?: string;
 }
 
+// Notice is one server-computed operator advisory: a deprecation, or a setting
+// whose behavior is scheduled to change. The server decides which apply.
+export interface Notice {
+  id: string;
+  severity: "info" | "warning";
+  title: string;
+  body: string;
+  docs_url?: string;
+}
+
 export interface SystemConfigResponse {
   issuer: string;
   storage: { driver: string };
@@ -86,6 +96,7 @@ export interface SystemConfigResponse {
   token_exchange: { enabled: boolean; max_chain_depth: number };
   agents: { enabled: boolean; jwks_listing: boolean };
   oidc: { enabled: boolean };
+  notices: Notice[];
 }
 
 // ─── Fetch Wrapper ───────────────────────────────────────────────────────────

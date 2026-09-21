@@ -120,6 +120,8 @@ The MCP 2026-07-28 specification deprecates DCR in favour of CIMD for clients wi
 
 Per §4, the caller must also be entitled to the token it asks about: either it issued the token, or it is a resource server authorized to act AS the Resource named in the token's `aud` (see [Runtime Client Binding](../guides/integrate/runtime-client-binding.md)). Callers that qualify for neither receive `{"active": false}` — the same body an invalid token produces, so the endpoint cannot confirm that a token exists.
 
+**Revocation sources reflected**: a token answers `active: false` once its JTI is denylisted (`/oauth/revoke`, refresh-token reuse, force-logout), once its machine-token row is revoked, and once its issuance row is revoked — which is how an admin single-issuance revoke and a consent-grant revocation land. A consent-grant revocation reaches the client's own token for the resource, every token exchanged from it at any depth, and the client's refresh families for the resource; see [what revocation reaches](../guides/upstream-providers/token-exchange-grant.md#what-revocation-reaches). Probed as AP-EXT-005.
+
 **No deviations.**
 
 ### Refresh Token Rotation
@@ -166,7 +168,7 @@ Refresh tokens rotate on every use (new token issued, old consumed). Reuse of a 
 
 **Coverage**:
 - `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
-- Subject token validation: signature, issuer, expiry, revocation check
+- Subject token validation: signature, issuer, expiry, revocation check — including a subject token whose issuance was revoked by a consent-grant revocation, refused with `invalid_grant`; the check is repeated after the mint so a revocation landing mid-exchange refuses the token rather than handing it out
 - Subject token types: `urn:ietf:params:oauth:token-type:access_token`, `urn:ietf:params:oauth:token-type:jwt`
 - Impersonation: no actor token, no `act` claim, `sub` preserved
 - Delegation: actor token present, nested `act` claim per §4.1

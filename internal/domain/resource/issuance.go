@@ -29,6 +29,21 @@ type Issuance struct {
 	DPoPJKT       string
 	AgentID       string
 	AgentChain    []string
+
+	// ConsentClientID is the client whose consent grant authorized this
+	// mint — on a token exchange, the subject token's client, which is the
+	// one the user faced at consent and the one the grant is keyed on.
+	// ClientID above is the acting client, which on a cross-client
+	// exchange is someone else. Empty when no consent gate ran: a fronted
+	// exchange, where the operator's declaration stands in for consent, or
+	// a grant with no user behind it. Consent revocation matches on this,
+	// falling back to ClientID for rows written before it existed.
+	ConsentClientID string
+	// ParentJTI is the jti of the subject token this one was derived from.
+	// Empty for a token that was not derived from another. Consent
+	// revocation follows it transitively, so revoking the grant at the
+	// root of a delegation chain reaches every hop below it.
+	ParentJTI string
 }
 
 // IsRevoked reports whether the issuance has been revoked.

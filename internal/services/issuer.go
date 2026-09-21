@@ -98,6 +98,17 @@ type IssueRequest struct {
 	// but persists it on the issuance row for audit symmetry.
 	DPoPJKT string
 
+	// ConsentClientID is the client whose consent grant authorized this
+	// mint: on a token exchange, the subject token's client. It is what
+	// consent revocation matches on, since ActorClientID is someone else
+	// on a cross-client exchange. Empty when no consent gate ran.
+	ConsentClientID string
+
+	// ParentJTI is the jti of the subject token this one is derived from.
+	// Consent revocation follows it from the root of a delegation chain
+	// to the leaves. Empty for a token not derived from another.
+	ParentJTI string
+
 	// --- Mint-only fields. BrokerIssuer ignores all of them. ---
 
 	// Audience overrides the audience claim derived from Resource.URI. When

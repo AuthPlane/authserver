@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -167,16 +168,36 @@ func checkGrantTypesEnabled(grantTypes, enabledGrants []string) []string {
 	return msgs
 }
 
+// validGrantTypes is every grant type the AS accepts on a client. It is a
+// value rather than a switch so that callers which must classify grants —
+// e.g. deciding whether a self-registered client keeps a user in the loop —
+// can enumerate it and be tested for exhaustiveness against it. Adding a
+// grant here without classifying it there is meant to fail a test, not to
+// pick up a silent default.
+var validGrantTypes = []string{
+	"authorization_code",
+	"refresh_token",
+	"client_credentials",
+	"urn:ietf:params:oauth:grant-type:token-exchange",
+	"urn:ietf:params:oauth:grant-type:jwt-bearer",
+}
+
+// ValidGrantTypes returns every grant type the AS accepts on a client.
+//
+// A function over a copy, not an exported slice: this is the authoritative
+// allowlist, and an exported var would let any package append to it or
+// overwrite an entry. Enumerability is what the exhaustiveness test needs;
+// write access is not, and the switch this replaced offered neither.
+func ValidGrantTypes() []string {
+	return slices.Clone(validGrantTypes)
+}
+
 // ValidateGrantType checks that the grant type is supported.
 func ValidateGrantType(gt string) error {
-	switch gt {
-	case "authorization_code", "refresh_token", "client_credentials",
-		"urn:ietf:params:oauth:grant-type:token-exchange",
-		"urn:ietf:params:oauth:grant-type:jwt-bearer":
+	if slices.Contains(validGrantTypes, gt) {
 		return nil
-	default:
-		return fmt.Errorf("unsupported grant_type: %q", gt)
 	}
+	return fmt.Errorf("unsupported grant_type: %q", gt)
 }
 
 // ValidateResponseType checks that the response type is supported.

@@ -136,6 +136,7 @@ func openAdminCLI() (*cliEnv, func(), error) {
 		ds.ConsentGrant(), ds.BrokerGrant(), ds.Issuance(),
 		obs.WithComponent("grant-admin"), auditSvc,
 	)
+	grantAdminSvc.WithRefreshFamilyCascade(ds.Token(), ds.Revocation(), ds.Resource())
 	issuanceAdminSvc := services.NewIssuanceAdminService(
 		ds.Issuance(),
 		obs.WithComponent("issuance-admin"), auditSvc,

@@ -210,6 +210,14 @@ func runServe() error {
 		FetchTimeout:          cfg.CIMD.FetchTimeout,
 	})
 
+	// Built here rather than alongside the other OAuth wiring below because
+	// DCR and CIMD read DefaultClientScope from it at registration time.
+	oauthConfigProvider := static.NewOAuthConfigProvider(output.OAuthConfig{
+		RequireScope:         cfg.OAuth.RequireScope,
+		IntrospectionEnabled: true,
+		DefaultClientScope:   cfg.OAuth.DefaultClientScope,
+	})
+
 	// 6a. Setup CIMD service (if enabled)
 	// CIMD receives DCR mode to enforce admin_only/approved_redirects.
 	var cimdSvc *services.CIMDService
@@ -223,6 +231,7 @@ func runServe() error {
 			cimdConfigProvider,
 			obs.WithComponent("cimd-svc"),
 			services.WithCIMDEnabledGrants(grantsProvider),
+			services.WithCIMDOAuthConfig(oauthConfigProvider),
 		)
 		obs.Logger.Info("CIMD support enabled", "dcr_mode", cfg.DCR.Mode)
 	}
@@ -231,6 +240,7 @@ func runServe() error {
 	dcrSvc := services.NewDCRService(
 		ds.Client(), dcrModeProvider, obs.WithComponent("dcr"), auditSvc,
 		services.WithDCREnabledGrants(grantsProvider),
+		services.WithDCROAuthConfig(oauthConfigProvider),
 	)
 
 	// 7. Setup user auth service
@@ -396,11 +406,6 @@ func runServe() error {
 	// (introspection_endpoint). IntrospectionEnabled is true because OSS always
 	// registers the introspection service (mirrors the prior deps.Introspect !=
 	// nil discovery condition).
-	oauthConfigProvider := static.NewOAuthConfigProvider(output.OAuthConfig{
-		RequireScope:         cfg.OAuth.RequireScope,
-		IntrospectionEnabled: true,
-	})
-
 	authzSvc := services.NewAuthorizeService(
 		ds.Client(), ds.Session(), ds.ConsentGrant(),
 		cimdSvc, resourceRegistry,
@@ -478,6 +483,9 @@ func runServe() error {
 	// Lets a resource server introspect a token minted for it. Without this
 	// the ownership check admits only the token's issuing client.
 	introspectSvc.WithResourceRegistry(resourceRegistry)
+	// Honors a revocation written to the issuance log — the consent
+	// cascade and the admin single-issuance revoke write nowhere else.
+	introspectSvc.WithIssuanceStore(ds.Issuance())
 
 	// 11c. Setup client credentials service (if enabled)
 	ccConfigProvider := static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{
@@ -527,6 +535,7 @@ func runServe() error {
 
 	// 11e. Enable agent identity claims (Authplane extension) on token services.
 	agentIdentitySvc := services.NewAgentIdentityService(ds.Client(), obs.WithComponent("agent-identity"))
+	tokenSvc.WithAgentIdentity(agentIdentitySvc)
 	if clientCredsSvc != nil {
 		clientCredsSvc.WithAgentIdentity(agentIdentitySvc)
 	}
@@ -881,6 +890,7 @@ func runServe() error {
 			ClientCredentials: ccConfigProvider,
 			TokenExchange:     txConfigProvider,
 			OIDC:              oidcConfig,
+			OAuth:             oauthConfigProvider,
 		}
 
 		keysDeps := &apiadmin.KeysDeps{
@@ -964,6 +974,7 @@ func runServe() error {
 			ds.ConsentGrant(), ds.BrokerGrant(), ds.Issuance(),
 			obs.WithComponent("grant-admin"), auditSvc,
 		)
+		grantAdminSvc.WithRefreshFamilyCascade(ds.Token(), ds.Revocation(), ds.Resource())
 		grantAdminDeps := &apiadmin.GrantAdminDeps{Grants: grantAdminSvc}
 		issuanceAdminSvc := services.NewIssuanceAdminService(
 			ds.Issuance(),
@@ -991,6 +1002,18 @@ func runServe() error {
 	// 15. Run with graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Startup validation: warn if self-registration is open but no scope
+	// ceiling is configured for the clients it creates.
+	//
+	// Deliberately here and not with the other boot-time warnings: the
+	// effective DCR mode is runtime state, restored from runtime_settings
+	// inside the admin block above and mutable afterwards through
+	// PATCH /admin/settings/dcr. Reading cfg.DCR.Mode at boot would suppress
+	// the warning on a deployment whose YAML says admin_only but which was
+	// flipped open through the admin UI — and the admin notice, which reads
+	// the live value, would then contradict it.
+	warnIfNoDefaultClientScope(context.Background(), obs.Logger, dcrModeProvider, cfg)
 
 	// Start LISTEN/NOTIFY listener if the signing driver supports it.
 	if keyResult.RunNotify != nil {
@@ -1171,6 +1194,72 @@ func warnIfCIMDPrivateAddressesAllowed(logger *slog.Logger, cimd config.CIMDConf
 			"This disables SSRF address filtering for CIMD and is a local-development " +
 			"setting; never enable it in production " +
 			"(see docs/guides/deploy/hardened-deployment.md).",
+	)
+}
+
+// warnIfNoDefaultClientScope emits a one-line startup deprecation warning when
+// clients can register themselves but oauth.default_client_scope is empty.
+//
+// Neither DCR nor CIMD lets a client state its own scope ceiling — the request
+// and the metadata document have no scope field — so the server assigns one
+// from this key. With it empty those clients are created without a ceiling, and
+// AuthorizeService still lets them through on the strength of the resource
+// catalog alone. That is the pre-v0.2.0 behavior, kept so this release breaks
+// nobody; v0.3.0 turns an absent ceiling into a denial.
+//
+// Warn, not fatal, for the same reason as CORS above: an operator may
+// legitimately run without it. Making it fatal would also invalidate
+// DefaultConfig(), so `authserver serve` with no --config would stop booting.
+func warnIfNoDefaultClientScope(
+	ctx context.Context,
+	logger *slog.Logger,
+	modes output.DCRModeProvider,
+	cfg *config.Config,
+) {
+	if cfg.OAuth.DefaultClientScope != "" {
+		return
+	}
+
+	// The live mode, not cfg.DCR.Mode: an operator may have changed it through
+	// the admin API, and that value outlives the restart. Same source the admin
+	// notice reads, so the two surfaces of this deprecation cannot disagree.
+	policy, err := modes.Get(ctx)
+	if err != nil {
+		logger.Warn("could not resolve the DCR mode to check oauth.default_client_scope; "+
+			"see the admin UI notice on GET /admin/system/config instead", "error", err)
+		return
+	}
+	mode := policy.Mode
+	// dcr.mode gates both doors: CIMD refuses to auto-register under admin_only
+	// too (CIMDService.VerifyCIMD), so cimd.enabled alone opens nothing. Warning
+	// on it regardless would fire on a closed deployment and then advise setting
+	// the mode it already has.
+	//
+	// "" is not in this set. Config.Validate rejects it, and both registration
+	// services fail closed on an unrecognized mode, so an empty mode registers
+	// nothing and has nothing to warn about.
+	dcrRegisters := mode == "open" || mode == "approved_redirects"
+	if !dcrRegisters {
+		return
+	}
+	logger.Warn(
+		"DEPRECATION: oauth.default_client_scope is empty while self-registration "+
+			"is enabled. Clients registering through DCR or CIMD cannot state their "+
+			"own scope ceiling, so they are created without one and their requests "+
+			"are currently bounded only by the resource catalog. From v0.3.0 a "+
+			"client with no ceiling will be refused at /oauth/authorize with "+
+			"invalid_scope. Set oauth.default_client_scope "+
+			"(AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE) to the scopes a self-registered "+
+			"client may request. Three groups it will not cover, each needing a scope "+
+			"granted through PATCH /admin/clients/{client_id}: clients already "+
+			"registered, since the ceiling is assigned once at registration; "+
+			"admin-created clients with no scope, since it is optional there; and "+
+			"self-registered clients asking for client_credentials, jwt-bearer or "+
+			"token-exchange, which are never assigned one by design. Setting "+
+			"dcr.mode=admin_only stops new ones appearing and silences this warning, "+
+			"but fixes none of the three.",
+		"dcr_mode", mode,
+		"cimd_enabled", cfg.CIMD.Enabled,
 	)
 }
 

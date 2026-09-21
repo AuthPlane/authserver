@@ -601,7 +601,7 @@ func TestClientCredentials_AdminClientNoScopes_ErrorPointsAtTheGrant(t *testing.
 	if !strings.Contains(err.Error(), "no registered scopes") {
 		t.Errorf("error_description = %q, want it to state the client has no registered scopes", err.Error())
 	}
-	if !strings.Contains(err.Error(), "PATCH /admin/clients/{client_id}") {
+	if !strings.Contains(err.Error(), "PATCH /admin/clients/{id}") {
 		t.Errorf("error_description = %q, want the PATCH remedy for an admin-provisioned client", err.Error())
 	}
 }

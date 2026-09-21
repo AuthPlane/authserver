@@ -45,15 +45,36 @@ type Client struct {
 	// registered before we asked for it — read it through EffectiveApplicationType,
 	// which applies the OIDC default rather than leaking the empty value.
 	ApplicationType string
-	// Scope is the space-separated per-client scope ceiling (RFC 7591). Only
-	// the admin surface sets it; dynamic registration and CIMD never do,
-	// because those doors create user-delegated clients whose scopes come from
-	// consent.
+	// Scope is the space-separated per-client scope ceiling (RFC 7591 §2).
+	// A request exceeding it is refused with invalid_scope (RFC 6749 §5.2).
 	//
-	// Only client_credentials and jwt-bearer read it, and for them an empty
-	// value is a ceiling of zero, not "no ceiling" — how each refuses is
-	// documented at the grant (services/client_credentials.go,
-	// services/jwt_bearer.go). authorization_code never consults it.
+	// Enforced on authorization_code (services/authorize.go),
+	// client_credentials (services/client_credentials.go), jwt-bearer
+	// (services/jwt_bearer.go) and refresh_token (services/token.go). On
+	// refresh the ceiling is read as it stands at refresh time, not as it
+	// stood at consent, so narrowing a live client shrinks what its existing
+	// refresh families can still mint.
+	//
+	// An empty value is a ceiling of zero on the two machine grants. On
+	// authorization_code and refresh_token it is not, until v0.3.0: those
+	// paths never consulted the ceiling before, so denying an absent one would
+	// break every client that has none — which is every client dynamic
+	// registration and CIMD ever created, since neither door lets a client
+	// state one. Until then an empty ceiling is left unenforced there, and
+	// logged on the authorize path.
+	//
+	// token_exchange has its own per-resource gate instead and does not read
+	// this field.
+	//
+	// The admin surface sets it directly. Dynamic registration and CIMD
+	// cannot: nothing in either door states a ceiling, so both stamp
+	// oauth.default_client_scope on the clients they create — and only on
+	// those whose grants all keep a user in the loop, since a ceiling reachable
+	// from a machine grant would be spendable with no consent behind it.
+	// oauth.default_client_scope is a startup warning rather than a boot
+	// requirement, so an empty ceiling is reachable in production. On the
+	// authorization_code path the ceiling bounds what consent may propose —
+	// the user narrows within it and can never widen past it.
 	Scope            string
 	IsAgent          bool   // true for agent clients (Authplane extension)
 	AgentDescription string // human-readable agent description (max 255 chars)

@@ -153,6 +153,15 @@ type IssuanceView struct {
 	DPoPJKT       string     `json:"dpop_jkt,omitempty"`
 	AgentID       string     `json:"agent_id,omitempty"`
 	AgentChain    []string   `json:"agent_chain"`
+	// ConsentClientID is the client whose consent grant authorized this
+	// mint. On a token exchange it is the subject token's client, not the
+	// acting client_id above. Revoking that client's grant for
+	// resource_id revokes this issuance. Empty when no consent gate ran.
+	ConsentClientID string `json:"consent_client_id,omitempty"`
+	// ParentJTI is the jti of the subject token this one was exchanged
+	// from. Revoking the parent's issuance, directly or through a consent
+	// grant, revokes this one. Empty for a first-hop token.
+	ParentJTI string `json:"parent_jti,omitempty"`
 }
 
 // IssuanceListResponse is the JSON body for GET /admin/issuances.
@@ -366,6 +375,9 @@ func IssuanceToView(i *resource.Issuance) IssuanceView {
 		DPoPJKT:       i.DPoPJKT,
 		AgentID:       i.AgentID,
 		AgentChain:    chain,
+
+		ConsentClientID: i.ConsentClientID,
+		ParentJTI:       i.ParentJTI,
 	}
 }
 

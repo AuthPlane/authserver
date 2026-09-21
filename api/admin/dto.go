@@ -36,8 +36,8 @@ type createClientResponse struct {
 	Scope                   string   `json:"scope"`
 	Status                  string   `json:"status"`
 	RegistrationSource      string   `json:"registration_source"`
-	IsAgent                 bool     `json:"agent,omitempty"`
-	AgentDescription        string   `json:"agent_description,omitempty"`
+	IsAgent                 bool     `json:"agent"`
+	AgentDescription        string   `json:"agent_description"`
 	IssuedAt                string   `json:"issued_at"`
 }
 
@@ -83,8 +83,11 @@ type clientView struct {
 	GrantTypes              []string                  `json:"grant_types"`
 	ResponseTypes           []string                  `json:"response_types"`
 	TokenEndpointAuthMethod string                    `json:"token_endpoint_auth_method"`
+	Scope                   string                    `json:"scope"` // space-separated ceiling, read only by client_credentials and jwt-bearer; empty means zero scopes for them, not unrestricted
 	Status                  client.Status             `json:"status"`
 	RegistrationSource      client.RegistrationSource `json:"registration_source"`
+	IsAgent                 bool                      `json:"agent"`             // set at registration; not editable via PATCH
+	AgentDescription        string                    `json:"agent_description"` // max 255 chars
 	CIMDURL                 string                    `json:"cimd_url"`
 	IssuedAt                time.Time                 `json:"issued_at"`
 	UpdatedAt               time.Time                 `json:"updated_at"`
@@ -99,8 +102,11 @@ func newClientView(c *client.Client) clientView {
 		GrantTypes:              c.GrantTypes,
 		ResponseTypes:           c.ResponseTypes,
 		TokenEndpointAuthMethod: c.TokenEndpointAuthMethod,
+		Scope:                   c.Scope,
 		Status:                  c.Status,
 		RegistrationSource:      c.RegistrationSource,
+		IsAgent:                 c.IsAgent,
+		AgentDescription:        c.AgentDescription,
 		CIMDURL:                 c.CIMDURL,
 		IssuedAt:                c.IssuedAt,
 		UpdatedAt:               c.UpdatedAt,
@@ -264,6 +270,23 @@ type systemConfigResponse struct {
 	TokenExchange     tokenExchangeConfigView     `json:"token_exchange"`
 	Agents            agentsConfigView            `json:"agents"`
 	OIDC              oidcConfigView              `json:"oidc"`
+
+	// Notices are server-computed operator advisories about this deployment's
+	// configuration — deprecations, and settings whose behavior is scheduled
+	// to change. Always present, empty when there is nothing to say. The
+	// server decides which apply so the UI stays a renderer and the rules stay
+	// testable in Go.
+	Notices []noticeView `json:"notices"`
+}
+
+// noticeView is one operator advisory. ID is stable so a client can dismiss or
+// link to a specific one; Severity is "info" | "warning".
+type noticeView struct {
+	ID       string `json:"id"`
+	Severity string `json:"severity"`
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	DocsURL  string `json:"docs_url,omitempty"`
 }
 
 type storageConfigView struct {

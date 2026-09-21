@@ -1354,6 +1354,12 @@ components:
     ClientView:
       type: object
       properties:
+        agent:
+          type: boolean
+          description: set at registration; not editable via PATCH
+        agent_description:
+          type: string
+          description: max 255 chars
         cimd_url:
           type: string
         grant_types:
@@ -1377,6 +1383,9 @@ components:
           type: array
           items:
             type: string
+        scope:
+          type: string
+          description: space-separated ceiling, read only by client_credentials and jwt-bearer; empty means zero scopes for them, not unrestricted
         status:
           type: string
         token_endpoint_auth_method:
@@ -1385,6 +1394,8 @@ components:
           type: string
           format: date-time
       required:
+        - agent
+        - agent_description
         - cimd_url
         - grant_types
         - id
@@ -1393,6 +1404,7 @@ components:
         - redirect_uris
         - registration_source
         - response_types
+        - scope
         - status
         - token_endpoint_auth_method
         - updated_at
@@ -1528,6 +1540,8 @@ components:
         token_endpoint_auth_method:
           type: string
       required:
+        - agent
+        - agent_description
         - client_id
         - client_name
         - grant_types
@@ -1717,6 +1731,9 @@ components:
           type: string
         client_id:
           type: string
+        consent_client_id:
+          type: string
+          description: ConsentClientID is the client whose consent grant authorized this mint. On a token exchange it is the subject token's client, not the acting client_id above. Revoking that client's grant for resource_id revokes this issuance. Empty when no consent gate ran.
         dpop_jkt:
           type: string
         expires_at:
@@ -1727,6 +1744,9 @@ components:
           type: string
         jti:
           type: string
+        parent_jti:
+          type: string
+          description: ParentJTI is the jti of the subject token this one was exchanged from. Revoking the parent's issuance, directly or through a consent grant, revokes this one. Empty for a first-hop token.
         resource_id:
           type: string
         revocable:
@@ -1781,6 +1801,25 @@ components:
       required:
         - keys
       description: listKeysResponse is the JSON body for GET /admin/keys.
+    NoticeView:
+      type: object
+      properties:
+        body:
+          type: string
+        docs_url:
+          type: string
+        id:
+          type: string
+        severity:
+          type: string
+        title:
+          type: string
+      required:
+        - body
+        - id
+        - severity
+        - title
+      description: noticeView is one operator advisory. ID is stable so a client can dismiss or link to a specific one; Severity is "info" | "warning".
     OidcConfigView:
       type: object
       properties:
@@ -2045,6 +2084,11 @@ components:
           $ref: '#/components/schemas/EncryptionConfigView'
         issuer:
           type: string
+        notices:
+          type: array
+          items:
+            $ref: '#/components/schemas/NoticeView'
+          description: Notices are server-computed operator advisories about this deployment's configuration — deprecations, and settings whose behavior is scheduled to change. Always present, empty when there is nothing to say. The server decides which apply so the UI stays a renderer and the rules stay testable in Go.
         oidc:
           $ref: '#/components/schemas/OidcConfigView'
         rate_limit:
@@ -2062,6 +2106,7 @@ components:
         - dpop
         - encryption
         - issuer
+        - notices
         - oidc
         - rate_limit
         - signing

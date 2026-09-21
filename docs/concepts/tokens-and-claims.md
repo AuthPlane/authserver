@@ -242,7 +242,7 @@ performed the exchange:
 }
 ```
 
-This tells downstream services: "This token belongs to user X, but MCP server Y is the one acting." The `actor_type` field distinguishes AI agents (`"agent"`) from conventional services (`"service"`); it is derived from the acting client's `is_agent` flag.
+This tells downstream services: "This token belongs to user X, but MCP server Y is the one acting." The `actor_type` field distinguishes AI agents (`"agent"`) from conventional services (`"service"`); it is derived from the acting client's `is_agent` flag — a flag the client can choose for itself at registration (see [Agent identity claims](#agent-identity-claims) below).
 
 ### Multi-hop delegation
 
@@ -300,7 +300,12 @@ agent instance.
 agents in the workflow (first = originator, last = current).
 
 Capped at 8 entries. Additive only — previous entries can't be modified.
-Fully optional — tokens without agent info omit these claims entirely. See
+Fully optional — tokens without agent info omit these claims entirely.
+
+Both claims **identify** the agent; neither attests that it was vetted. A
+client can set its own `agent: true` when it registers through
+[DCR](glossary.md#glossary-dcr), so use them for attribution and audit, not as
+an authorization signal. See
 [Delegation and agent chains](delegation-and-agent-chains.md) for the full
 treatment.
 
@@ -354,6 +359,7 @@ Client presents subject_token + grant_type=token-exchange
 - Admin revokes client → all families revoked
 - Refresh token replayed → entire family revoked (theft detection)
 - Machine token → revoked individually by JTI
+- Consent grant revoked → the client's tokens for that resource, every token exchanged from them at any depth, and the client's refresh families for it — see [what revocation reaches](../guides/upstream-providers/token-exchange-grant.md#what-revocation-reaches) for what a resource server sees and when
 
 ---
 

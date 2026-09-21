@@ -10,6 +10,7 @@ import Tag from "../components/Tag";
 import Mono from "../components/Mono";
 import Table from "../components/Table";
 import InfoBox from "../components/InfoBox";
+import Notices from "../components/Notices";
 
 // Event color mapping for audit events
 function eventColor(event: string): string {
@@ -78,6 +79,8 @@ export default function Overview() {
           <strong style={{ color: C.danger }}>Error:</strong> {error}
         </InfoBox>
       )}
+
+      <Notices notices={config?.notices} />
 
       {/* Status cards —  dropped the legacy "Connectors" + "Vault
           Connections" cards. The replacement narrows the row to 3 cells:

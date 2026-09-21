@@ -5,12 +5,16 @@ package services_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
@@ -35,6 +39,9 @@ type tokenTestSetup struct {
 	jwksSvc  *services.JWKSService
 	auditSvc *services.AuditService
 	h        *testdata.TestHelper
+	// obs is the provider the service was built from. Exposed so a test can
+	// swap a collectable instrument onto obs.Metrics before driving a grant.
+	obs *observability.Provider
 }
 
 // tokenTestOverrides lets a test substitute the stores or the observability
@@ -118,6 +125,7 @@ func newTokenTestSetupWithOverrides(t *testing.T, tokenConfig output.TokenConfig
 		jwksSvc:  jwksSvc,
 		auditSvc: auditSvc,
 		h:        &testdata.TestHelper{Stores: stores},
+		obs:      obs,
 	}
 }
 
@@ -1032,6 +1040,247 @@ func TestRefresh_ScopeWideningRejected(t *testing.T) {
 	}
 }
 
+// narrowClientCeiling rewrites the client's scope ceiling in the store, the
+// way PATCH /admin/clients/{id} does, after the family was already issued.
+func (s *tokenTestSetup) narrowClientCeiling(t *testing.T, c *client.Client, ceiling string) {
+	t.Helper()
+	// Re-read first: the client row is optimistically locked, and the
+	// caller's copy may be behind after an earlier update.
+	current, err := s.h.Stores.Client.GetByID(context.Background(), c.ID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+	current.Scope = ceiling
+	current.UpdatedAt = time.Now().UTC()
+	if err := s.h.Stores.Client.Update(context.Background(), current); err != nil {
+		t.Fatalf("update client ceiling: %v", err)
+	}
+	*c = *current
+}
+
+// The family was granted "tools/query tools/create". The operator then
+// narrows the client to "tools/query". A refresh that names no scope comes
+// back narrowed to what remains, and the family carries on.
+func TestRefresh_CeilingNarrowedAfterGrant_OmittedScopeIsNarrowed(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+	setup.narrowClientCeiling(t, c, "tools/query")
+
+	resp, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+	})
+	if err != nil {
+		t.Fatalf("refresh under a narrowed ceiling: %v", err)
+	}
+	if resp.Scope != "tools/query" {
+		t.Errorf("scope: got %q, want %q (the current ceiling, not the frozen family scope)", resp.Scope, "tools/query")
+	}
+
+	// The rotated token stays narrowed: the ceiling is read on every refresh,
+	// not carried forward from the first narrowing.
+	again, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: resp.RefreshToken,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+	})
+	if err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+	if again.Scope != "tools/query" {
+		t.Errorf("rotated scope: got %q, want %q", again.Scope, "tools/query")
+	}
+}
+
+// Same narrowing, but the client asks for the scope it used to have. That is
+// refused the way /oauth/authorize would refuse it, with the ceiling named,
+// and the refresh token is not spent by the refusal.
+func TestRefresh_CeilingNarrowedAfterGrant_ExplicitScopeOutsideCeilingRefused(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+	setup.narrowClientCeiling(t, c, "tools/query")
+
+	_, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "tools/query tools/create", // inside the family, outside the ceiling
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("expected ErrInvalidScope, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "registered scopes") {
+		t.Errorf("error should name the ceiling as the reason, got: %v", err)
+	}
+
+	// Refused before the consume: the same token still refreshes within bounds.
+	resp, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "tools/query",
+	})
+	if err != nil {
+		t.Fatalf("refresh within the ceiling after a refused request: %v", err)
+	}
+	if resp.Scope != "tools/query" {
+		t.Errorf("scope: got %q, want %q", resp.Scope, "tools/query")
+	}
+}
+
+// A ceiling that no longer overlaps the family at all refuses the refresh
+// rather than minting a token with no scope.
+func TestRefresh_CeilingNarrowedToNothingInCommon_Refused(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+	setup.narrowClientCeiling(t, c, "tools/admin")
+
+	_, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("expected ErrInvalidScope, got: %v", err)
+	}
+}
+
+// An empty ceiling is the v0.2.x deprecation window on this path too: it
+// does not bound, so a client that has none keeps its family's scope.
+func TestRefresh_EmptyCeiling_FamilyScopeUnchanged(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+	if c.Scope != "" {
+		t.Fatalf("fixture client should have no ceiling, has %q", c.Scope)
+	}
+
+	resp, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		ClientSecret: secret,
+	})
+	if err != nil {
+		t.Fatalf("refresh with no ceiling: %v", err)
+	}
+	if resp.Scope != "tools/query tools/create" {
+		t.Errorf("scope: got %q, want the family scope %q", resp.Scope, "tools/query tools/create")
+	}
+}
+
+// A widening request is still refused by the family (RFC 6749 §6), and the
+// refusal no longer spends the token: it was moved ahead of the consume.
+func TestRefresh_ScopeWideningRejected_DoesNotConsumeToken(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+
+	_, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+		Scope:        "tools/query tools/admin",
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("expected ErrInvalidScope, got: %v", err)
+	}
+	if _, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	}); err != nil {
+		t.Fatalf("token should be unspent after a refused scope, refresh failed: %v", err)
+	}
+}
+
+// A ceiling widened after the grant does not widen what the family was
+// consented for: an omitted scope returns the family scope, an explicit
+// request beyond the family is refused by the family even though the
+// ceiling would allow it.
+func TestRefresh_CeilingWidenedAfterGrant_FamilyStillBounds(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+	setup.narrowClientCeiling(t, c, "tools/query tools/create tools/admin")
+
+	resp, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken, ClientID: c.ID, ClientSecret: secret,
+	})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if resp.Scope != "tools/query tools/create" {
+		t.Errorf("scope = %q, want the family scope, not the wider ceiling", resp.Scope)
+	}
+
+	_, err = setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: resp.RefreshToken, ClientID: c.ID, ClientSecret: secret,
+		Scope: "tools/query tools/create tools/admin", // inside the ceiling, outside the family
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("want ErrInvalidScope from the family bound, got %v", err)
+	}
+}
+
+// Narrowing is not sticky: a ceiling restored to cover the family gives
+// the family scope back on the next refresh. The consent recorded on the
+// family is what the user approved; the ceiling only cuts it.
+func TestRefresh_CeilingNarrowedThenRestored_FamilyScopeReturns(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+
+	setup.narrowClientCeiling(t, c, "tools/query")
+	narrowed, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken, ClientID: c.ID, ClientSecret: secret,
+	})
+	if err != nil || narrowed.Scope != "tools/query" {
+		t.Fatalf("narrowed refresh: scope=%q err=%v", narrowed.Scope, err)
+	}
+
+	setup.narrowClientCeiling(t, c, "tools/query tools/create")
+	restored, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: narrowed.RefreshToken, ClientID: c.ID, ClientSecret: secret,
+	})
+	if err != nil {
+		t.Fatalf("restored refresh: %v", err)
+	}
+	if restored.Scope != "tools/query tools/create" {
+		t.Errorf("scope = %q, want the family scope back once the ceiling covers it", restored.Scope)
+	}
+}
+
+// The ceiling is read from the client as it stands at refresh time: a
+// client that is suspended or deleted is refused regardless of scope.
+func TestRefresh_ClientDeletedAfterGrant_Refused(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+	if err := setup.h.Stores.Client.Delete(context.Background(), c.ID); err != nil {
+		t.Fatalf("delete client: %v", err)
+	}
+	_, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken, ClientID: c.ID, ClientSecret: secret,
+	})
+	if err == nil {
+		t.Fatal("refresh for a deleted client succeeded")
+	}
+}
+
+// Scope strings are sets: duplicates and order in the request do not
+// change the outcome or the response.
+func TestRefresh_RequestedScopeIsASet(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+	setup.narrowClientCeiling(t, c, "tools/create tools/query")
+
+	resp, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken, ClientID: c.ID, ClientSecret: secret,
+		Scope: "tools/create  tools/query tools/create",
+	})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	got := strings.Fields(resp.Scope)
+	sort.Strings(got)
+	if strings.Join(got, " ") != "tools/create tools/query" {
+		t.Errorf("scope = %q, want the two scopes once", resp.Scope)
+	}
+}
+
 func TestRefresh_ExpiredToken(t *testing.T) {
 	setup := newTokenTestSetup(t)
 	ctx := context.Background()
@@ -1526,6 +1775,7 @@ func newTokenTestSetupWithResources(t *testing.T, resources []services.ResourceI
 		jwksSvc:  jwksSvc,
 		auditSvc: auditSvc,
 		h:        &testdata.TestHelper{Stores: stores},
+		obs:      obs,
 	}
 }
 
@@ -2385,5 +2635,391 @@ func TestToken_ExchangeCode_BadResourceIsNotAnOracleForAnotherClient(t *testing.
 	}
 	if !errors.Is(err, domain.ErrInvalidClient) {
 		t.Fatalf("err = %v, want ErrInvalidClient", err)
+	}
+}
+
+// promoteToAgent flips the client to is_agent=true — the only configuration
+// AgentIdentityService keys off — and wires the agent-identity service onto
+// the token service under test.
+func promoteToAgent(t *testing.T, setup *tokenTestSetup, c *client.Client) {
+	t.Helper()
+	ctx := context.Background()
+	c.IsAgent = true
+	if err := setup.h.Stores.Client.Update(ctx, c); err != nil {
+		t.Fatalf("update client to is_agent: %v", err)
+	}
+	// Share the fixture's provider so an instrument swapped onto
+	// setup.obs.Metrics is the one this service records through.
+	setup.tokenSvc.WithAgentIdentity(
+		services.NewAgentIdentityService(setup.h.Stores.Client, setup.obs),
+	)
+}
+
+func verifyAccessTokenClaims(t *testing.T, setup *tokenTestSetup, accessToken string) *crypto.AccessTokenClaims {
+	t.Helper()
+	jwks, err := setup.jwksSvc.BuildJWKS(context.Background())
+	if err != nil {
+		t.Fatalf("build jwks: %v", err)
+	}
+	claims, err := crypto.VerifyAccessToken(accessToken, jwks)
+	if err != nil {
+		t.Fatalf("verify jwt: %v", err)
+	}
+	return claims
+}
+
+// TestToken_ExchangeCode_AgentClient_EmitsAgentID pins the agent-claim
+// contract on the authorization_code grant: a token issued to a client
+// registered with is_agent=true must carry agent_id.
+//
+// This is the first hop of a user-consented agent flow, and
+// docs/concepts/delegation-and-agent-chains.md documents agent_id as
+// available on agent tokens without scoping it to a subset of grants.
+func TestToken_ExchangeCode_AgentClient_EmitsAgentID(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+	promoteToAgent(t, setup, c)
+
+	resp, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+
+	claims := verifyAccessTokenClaims(t, setup, resp.AccessToken)
+	if claims.AgentID != c.ID {
+		t.Errorf("agent_id: got %q, want %q", claims.AgentID, c.ID)
+	}
+	// No RFC 8693 'act' chain exists on a first-hop authorization_code
+	// token, so agent_chain stays empty — the same shape client_credentials
+	// already emits for a hop-1 agent token.
+	if len(claims.AgentChain) != 0 {
+		t.Errorf("agent_chain: got %v, want empty", claims.AgentChain)
+	}
+}
+
+// TestToken_Refresh_AgentClient_EmitsAgentID pins the same contract across
+// rotation: a refreshed access token must not silently drop agent_id.
+func TestToken_Refresh_AgentClient_EmitsAgentID(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+	promoteToAgent(t, setup, c)
+
+	ctx := context.Background()
+	first, err := setup.tokenSvc.ExchangeCode(ctx, input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if first.RefreshToken == "" {
+		t.Fatal("refresh_token is empty")
+	}
+
+	refreshed, err := setup.tokenSvc.RefreshToken(ctx, input.RefreshTokenRequest{
+		RefreshToken: first.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	claims := verifyAccessTokenClaims(t, setup, refreshed.AccessToken)
+	if claims.AgentID != c.ID {
+		t.Errorf("agent_id after refresh: got %q, want %q", claims.AgentID, c.ID)
+	}
+}
+
+// TestToken_ExchangeCode_ConfidentialAgentClient_EmitsAgentID covers the
+// confidential branch of authenticateClient, which is the branch that
+// returns the loaded client the agent claims are now resolved from.
+func TestToken_ExchangeCode_ConfidentialAgentClient_EmitsAgentID(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, false)
+
+	// createSessionWithCode does not hand back the plaintext secret, so
+	// stamp a known one. It rides along on promoteToAgent's single Update —
+	// the client store uses optimistic locking, so a second write against
+	// the same stale struct would conflict.
+	const secret = "confidential-agent-secret"
+	hash, _ := crypto.HashBcrypt(secret)
+	c.SecretHash = hash
+	promoteToAgent(t, setup, c)
+
+	resp, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+
+	claims := verifyAccessTokenClaims(t, setup, resp.AccessToken)
+	if claims.AgentID != c.ID {
+		t.Errorf("agent_id: got %q, want %q", claims.AgentID, c.ID)
+	}
+}
+
+// TestToken_ExchangeCode_NonAgentClient_OmitsAgentID guards the other side:
+// wiring the agent-identity service must not stamp agent_id on ordinary
+// clients.
+func TestToken_ExchangeCode_NonAgentClient_OmitsAgentID(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+	setup.tokenSvc.WithAgentIdentity(
+		services.NewAgentIdentityService(setup.h.Stores.Client, setup.obs),
+	)
+
+	resp, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+
+	claims := verifyAccessTokenClaims(t, setup, resp.AccessToken)
+	if claims.AgentID != "" {
+		t.Errorf("agent_id on non-agent client: got %q, want empty", claims.AgentID)
+	}
+}
+
+// tokenMetricCollector wires a manual SDK reader to a real meter so a single
+// counter becomes inspectable from this package. Mirrors the in-package
+// collector used by the token-exchange observability tests; duplicated
+// because that one lives in `package services` and this suite is external.
+type tokenMetricCollector struct {
+	reader *sdkmetric.ManualReader
+	meter  metric.Meter
+}
+
+func newTokenMetricCollector(t *testing.T) *tokenMetricCollector {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	return &tokenMetricCollector{reader: reader, meter: provider.Meter("token-agent-metric-test")}
+}
+
+func (c *tokenMetricCollector) counter(t *testing.T, name string) metric.Int64Counter {
+	t.Helper()
+	ctr, err := c.meter.Int64Counter(name)
+	if err != nil {
+		t.Fatalf("build counter %q: %v", name, err)
+	}
+	return ctr
+}
+
+// total sums every data point for the named instrument. Zero when the
+// instrument never recorded.
+func (c *tokenMetricCollector) total(t *testing.T, instrumentName string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := c.reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("metric collect: %v", err)
+	}
+	var sum int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != instrumentName {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("instrument %q: data shape %T, want metricdata.Sum[int64]", instrumentName, m.Data)
+			}
+			for _, dp := range data.DataPoints {
+				sum += dp.Value
+			}
+		}
+	}
+	return sum
+}
+
+const agentTokensInstrument = "authplane_agent_tokens_issued_total"
+
+// TestToken_AgentTokenMetric_CountedOnceOnIssuanceOnly pins the counting
+// invariant at the grant level: authplane_agent_tokens_issued_total moves
+// exactly once per token the grant actually hands back, and not at all for a
+// request that resolves agent claims and then fails.
+//
+// The service-level test covers AgentIdentityService in isolation; nothing
+// exercised TokenService, so deleting either recordAgentTokenIssued call site
+// left the suite green. The negative case is the whole reason resolution was
+// split from RecordIssued — claims are resolved before PKCE verification, so
+// a bad verifier must not credit a token.
+func TestToken_AgentTokenMetric_CountedOnceOnIssuanceOnly(t *testing.T) {
+	t.Run("authorization_code counts once", func(t *testing.T) {
+		setup := newTokenTestSetup(t)
+		mc := newTokenMetricCollector(t)
+		setup.obs.Metrics.AgentTokensIssued = mc.counter(t, agentTokensInstrument)
+		c, _, code, verifier := setup.createSessionWithCode(t, true)
+		promoteToAgent(t, setup, c)
+
+		if _, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+			Code:         code,
+			RedirectURI:  "https://app.example.com/callback",
+			ClientID:     c.ID,
+			CodeVerifier: verifier,
+		}); err != nil {
+			t.Fatalf("exchange: %v", err)
+		}
+
+		if got := mc.total(t, agentTokensInstrument); got != 1 {
+			t.Errorf("%s = %d after one issuance, want 1", agentTokensInstrument, got)
+		}
+	})
+
+	t.Run("failed PKCE does not count", func(t *testing.T) {
+		setup := newTokenTestSetup(t)
+		mc := newTokenMetricCollector(t)
+		setup.obs.Metrics.AgentTokensIssued = mc.counter(t, agentTokensInstrument)
+		c, _, code, _ := setup.createSessionWithCode(t, true)
+		promoteToAgent(t, setup, c)
+
+		// Agent claims resolve before PKCE verification; a wrong verifier
+		// must still leave the counter untouched.
+		if _, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+			Code:         code,
+			RedirectURI:  "https://app.example.com/callback",
+			ClientID:     c.ID,
+			CodeVerifier: "wrong-verifier",
+		}); err == nil {
+			t.Fatal("expected PKCE failure")
+		}
+
+		if got := mc.total(t, agentTokensInstrument); got != 0 {
+			t.Errorf("%s = %d after a rejected request, want 0", agentTokensInstrument, got)
+		}
+	})
+
+	t.Run("refresh counts once per rotation", func(t *testing.T) {
+		setup := newTokenTestSetup(t)
+		mc := newTokenMetricCollector(t)
+		setup.obs.Metrics.AgentTokensIssued = mc.counter(t, agentTokensInstrument)
+		c, _, code, verifier := setup.createSessionWithCode(t, true)
+		promoteToAgent(t, setup, c)
+
+		first, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+			Code:         code,
+			RedirectURI:  "https://app.example.com/callback",
+			ClientID:     c.ID,
+			CodeVerifier: verifier,
+		})
+		if err != nil {
+			t.Fatalf("exchange: %v", err)
+		}
+		if _, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+			RefreshToken: first.RefreshToken,
+			ClientID:     c.ID,
+		}); err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+
+		if got := mc.total(t, agentTokensInstrument); got != 2 {
+			t.Errorf("%s = %d after issuance + rotation, want 2", agentTokensInstrument, got)
+		}
+	})
+
+	t.Run("non-agent client never counts", func(t *testing.T) {
+		setup := newTokenTestSetup(t)
+		mc := newTokenMetricCollector(t)
+		setup.obs.Metrics.AgentTokensIssued = mc.counter(t, agentTokensInstrument)
+		c, _, code, verifier := setup.createSessionWithCode(t, true)
+		setup.tokenSvc.WithAgentIdentity(
+			services.NewAgentIdentityService(setup.h.Stores.Client, setup.obs),
+		)
+
+		if _, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+			Code:         code,
+			RedirectURI:  "https://app.example.com/callback",
+			ClientID:     c.ID,
+			CodeVerifier: verifier,
+		}); err != nil {
+			t.Fatalf("exchange: %v", err)
+		}
+
+		if got := mc.total(t, agentTokensInstrument); got != 0 {
+			t.Errorf("%s = %d for a non-agent client, want 0", agentTokensInstrument, got)
+		}
+	})
+}
+
+// revokeFamilyOnRecheck answers the first GetFamily (the lookup at the top
+// of refreshToken) normally, and revokes the family just before answering
+// the second (the post-mint re-check) — the shape of a consent revocation
+// landing while the access token was being signed.
+type revokeFamilyOnRecheck struct {
+	output.TokenStore
+	calls int
+}
+
+func (r *revokeFamilyOnRecheck) GetFamily(ctx context.Context, id string) (*token.Family, error) {
+	r.calls++
+	if r.calls == 2 {
+		if _, err := r.TokenStore.RevokeFamily(ctx, id); err != nil {
+			return nil, err
+		}
+	}
+	return r.TokenStore.GetFamily(ctx, id)
+}
+
+// A refresh whose family is revoked between the consume and the post-mint
+// re-check is refused, and the issuance row the mint wrote — for a token
+// nobody receives — is revoked with it rather than left live in the log.
+func TestRefresh_FamilyRevokedDuringMint_RefusedAndRowRevoked(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	interposer := &revokeFamilyOnRecheck{TokenStore: stores.Token}
+	setup := newTokenTestSetupWithOverrides(t, static.NewTokenConfigProvider(output.TokenConfig{
+		AccessTokenExpiry:  15 * time.Minute,
+		RefreshTokenExpiry: 24 * time.Hour,
+	}), tokenTestOverrides{stores: stores, tokens: interposer})
+	// The mint writes an issuance row only when the session's resource
+	// resolves to a registered one.
+	testdata.CreateMintResource(t, stores, "res-mcp", "mcp", "https://mcp.example.com")
+	setup.tokenSvc.WithResourceRegistry(services.NewResourceRegistry(stores.Resource, stores.BrokerProvider, setup.obs))
+	ctx := context.Background()
+
+	initial, c, secret := setup.exchangeForTokensConfidential(t)
+	initialJTI := parseClaims(t, initial.AccessToken)["jti"].(string)
+
+	_, err := setup.tokenSvc.RefreshToken(ctx, input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken, ClientID: c.ID, ClientSecret: secret,
+	})
+	if !errors.Is(err, domain.ErrFamilyRevoked) {
+		t.Fatalf("refresh with the family revoked mid-mint: got %v, want ErrFamilyRevoked", err)
+	}
+	if interposer.calls < 2 {
+		t.Fatalf("test setup: the re-check never ran (GetFamily calls = %d)", interposer.calls)
+	}
+
+	rows, err := stores.Issuance.ListForUser(ctx, "user-42", time.Time{})
+	if err != nil {
+		t.Fatalf("list issuances: %v", err)
+	}
+	var sawRefreshRow bool
+	for _, row := range rows {
+		if row.JTI == initialJTI {
+			continue // the first-hop token; its family is revoked but that is not what this test is about
+		}
+		sawRefreshRow = true
+		if row.RevokedAt == nil {
+			t.Errorf("issuance %s was minted by a refresh that was then refused, but is still live", row.JTI)
+		}
+	}
+	if !sawRefreshRow {
+		t.Fatal("the refused refresh wrote no issuance row; the test is not exercising the residue")
 	}
 }

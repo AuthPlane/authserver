@@ -57,6 +57,7 @@ func (h *registerHandler) handleRegister(w http.ResponseWriter, r *http.Request)
 		ResponseTypes:           resp.ResponseTypes,
 		TokenEndpointAuthMethod: resp.TokenEndpointAuthMethod,
 		ApplicationType:         resp.ApplicationType,
+		Scope:                   resp.Scope,
 		Agent:                   resp.Agent,
 		AgentDescription:        resp.AgentDescription,
 	})

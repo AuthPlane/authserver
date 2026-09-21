@@ -188,3 +188,79 @@ func (f FlakyResourceResolver) Resolve(ctx context.Context, slugOrURI string) (*
 	}
 	return f.delegate.Resolve(ctx, slugOrURI)
 }
+
+// CreateIssuance writes a live Mint issuance row keyed by jti for a token
+// the AS minted to clientID for the user against resourceID. The row's id
+// is the jti, as MintIssuer writes it. consentClientID and parentJTI are
+// the lineage columns; pass "" for a first-hop token with no parent.
+func CreateIssuance(t *testing.T, stores *sqlite.Stores, jti, userID, clientID, resourceID, consentClientID, parentJTI string) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	iss := &resource.Issuance{
+		ID:              jti,
+		JTI:             jti,
+		SubjectUserID:   userID,
+		ClientID:        clientID,
+		ResourceID:      resourceID,
+		Scopes:          []string{"tools/echo"},
+		BackendKind:     resource.BackendMint,
+		Revocable:       true,
+		IssuedAt:        now,
+		ExpiresAt:       now.Add(time.Hour),
+		ConsentClientID: consentClientID,
+		ParentJTI:       parentJTI,
+	}
+	if err := stores.Issuance.Insert(context.Background(), iss); err != nil {
+		t.Fatalf("create issuance %s: %v", jti, err)
+	}
+}
+
+// RevokeIssuance marks the issuance row with the given jti as revoked, the
+// way the admin single-issuance revoke does.
+func RevokeIssuance(t *testing.T, stores *sqlite.Stores, jti string) {
+	t.Helper()
+	if err := stores.Issuance.Revoke(context.Background(), jti); err != nil {
+		t.Fatalf("revoke issuance %s: %v", jti, err)
+	}
+}
+
+// IssuanceRevoked reports whether the issuance row with the given jti
+// carries a revoked_at.
+func IssuanceRevoked(t *testing.T, stores *sqlite.Stores, jti string) bool {
+	t.Helper()
+	got, err := stores.Issuance.GetByJTI(context.Background(), jti)
+	if err != nil {
+		t.Fatalf("get issuance %s: %v", jti, err)
+	}
+	if got == nil {
+		t.Fatalf("get issuance %s: no row", jti)
+	}
+	return got.RevokedAt != nil
+}
+
+// BrokenIssuanceStore is an output.IssuanceStore whose every method fails
+// with Err. It stands in for a store that is down, for the paths that must
+// fail closed when the issuance log cannot be read.
+type BrokenIssuanceStore struct{ Err error }
+
+func (b BrokenIssuanceStore) Insert(context.Context, *resource.Issuance) error { return b.Err }
+func (b BrokenIssuanceStore) GetByID(context.Context, string) (*resource.Issuance, error) {
+	return nil, b.Err
+}
+func (b BrokenIssuanceStore) GetByJTI(context.Context, string) (*resource.Issuance, error) {
+	return nil, b.Err
+}
+func (b BrokenIssuanceStore) Revoke(context.Context, string) error { return b.Err }
+func (b BrokenIssuanceStore) RevokeFamily(context.Context, string, string, string) (int, error) {
+	return 0, b.Err
+}
+func (b BrokenIssuanceStore) ListForUser(context.Context, string, time.Time) ([]*resource.Issuance, error) {
+	return nil, b.Err
+}
+func (b BrokenIssuanceStore) ListForActor(context.Context, string, time.Time) ([]*resource.Issuance, error) {
+	return nil, b.Err
+}
+func (b BrokenIssuanceStore) ListForResource(context.Context, string, time.Time) ([]*resource.Issuance, error) {
+	return nil, b.Err
+}
+func (b BrokenIssuanceStore) PurgeExpired(context.Context, time.Time) (int, error) { return 0, b.Err }

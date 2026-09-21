@@ -667,9 +667,13 @@ func TestDispatchMint_Direct_NoLink_RegressionGuard(t *testing.T) {
 	if !reflect.DeepEqual(gotScopes, want) {
 		t.Errorf("scope = %v, want %v", gotScopes, want)
 	}
-	// Direct path MUST consult consent_grants — exactly once.
-	if got := f.consentStore.getN; got != 1 {
-		t.Errorf("consent_grants.Get called %d times on direct path; want 1", got)
+	// Direct path MUST consult consent_grants: once at the gate, and once
+	// more after the mint, which re-reads the grant so a revocation that
+	// landed while the token was being minted refuses it (the cascade ran
+	// over a table the new row was not in yet). Pinned at exactly two so a
+	// third read, or a dropped re-check, is a deliberate change.
+	if got := f.consentStore.getN; got != 2 {
+		t.Errorf("consent_grants.Get called %d times on direct path; want 2 (gate + post-mint re-check)", got)
 	}
 }
 

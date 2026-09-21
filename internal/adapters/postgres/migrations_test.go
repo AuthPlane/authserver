@@ -4,6 +4,7 @@ package postgres_test
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -175,4 +176,128 @@ func slicesEqualPG(a, b []string) bool {
 	sort.Strings(ac)
 	sort.Strings(bc)
 	return strings.Join(ac, ",") == strings.Join(bc, ",")
+}
+
+// Same contract as the SQLite runner test: every embedded version that is
+// not recorded gets applied, including one numbered below the highest
+// recorded — the v0.2.1 → v0.3.0 path, where 013 is on the row already and
+// 005–012 arrive later.
+func TestMigrate_AppliesEveryUnrecordedVersion(t *testing.T) {
+	ctx := context.Background()
+	obs := observability.NewNoop()
+
+	// Start from an empty schema: the container is shared across tests.
+	rawPool, err := pgxpool.New(ctx, pgContainerDSN)
+	if err != nil {
+		t.Fatalf("open raw pool: %v", err)
+	}
+	downSQL, err := migrations.Migrations.ReadFile("001_initial.down.sql")
+	if err != nil {
+		t.Fatalf("read down script: %v", err)
+	}
+	if _, err := rawPool.Exec(ctx, string(downSQL)); err != nil {
+		t.Fatalf("pre-clean down: %v", err)
+	}
+	rawPool.Close()
+
+	db, err := postgres.Open(ctx, pgContainerDSN, postgres.PoolConfig{MaxConns: 5}, obs)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("fresh migrate: %v", err)
+	}
+	embedded := embeddedPGVersions(t)
+	if got := recordedPGVersions(t, ctx, db.Pool); !slicesEqualIntPG(got, embedded) {
+		t.Fatalf("fresh install recorded %v, embedded set is %v", got, embedded)
+	}
+	if !pgColumnExists(t, ctx, db.Pool, "issuances", "parent_jti") {
+		t.Fatal("013 not applied on fresh install: issuances.parent_jti missing")
+	}
+
+	// Forget 004 and undo it, then migrate with 013 still recorded.
+	if _, err := db.Pool.Exec(ctx, `DELETE FROM schema_migrations WHERE version = 4`); err != nil {
+		t.Fatalf("forget 004: %v", err)
+	}
+	if _, err := db.Pool.Exec(ctx, `ALTER TABLE clients DROP COLUMN application_type`); err != nil {
+		t.Fatalf("undo 004: %v", err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate with a lower version pending: %v", err)
+	}
+	if !pgColumnExists(t, ctx, db.Pool, "clients", "application_type") {
+		t.Fatal("pending lower version 004 was not applied while 013 was recorded")
+	}
+	if got := recordedPGVersions(t, ctx, db.Pool); !slicesEqualIntPG(got, embedded) {
+		t.Fatalf("after re-apply recorded %v, want %v", got, embedded)
+	}
+
+	// Nothing pending: must not re-run 013 (the ADD COLUMN would fail).
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("no-op migrate re-applied something: %v", err)
+	}
+}
+
+func recordedPGVersions(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []int {
+	t.Helper()
+	rows, err := pool.Query(ctx, `SELECT version FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		t.Fatalf("query schema_migrations: %v", err)
+	}
+	defer rows.Close()
+	var out []int
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func embeddedPGVersions(t *testing.T) []int {
+	t.Helper()
+	entries, err := migrations.Migrations.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+	var out []int
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".up.sql") {
+			continue
+		}
+		var v int
+		if _, err := fmt.Sscanf(e.Name(), "%d_", &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func pgColumnExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table, column string) bool {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+		table, column).Scan(&n); err != nil {
+		t.Fatalf("information_schema: %v", err)
+	}
+	return n > 0
+}
+
+func slicesEqualIntPG(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

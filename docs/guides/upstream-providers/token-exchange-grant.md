@@ -68,6 +68,32 @@ curl -X POST "http://localhost:9001/admin/resources/github/policy/exchange/allow
 >
 > When `resource` is omitted (legacy fall-through), the only exchange that can be authorized is a self-exchange: `allow_self_exchange: true` allows it, `false` denies it. An acting `client_id` that differs from the subject token's is refused outright on this path — there is no per-resource policy in play without a `resource`, so nothing there can authorize a delegation. Name the resource to get the operator gate. Either refusal yields `access_denied`.
 
+## What revocation reaches
+
+Read this before you build on delegation. An exchanged token is a JWT: a resource server that verifies it locally cannot see a revocation, so the window it stays usable is its TTL. What the AS does when consent is withdrawn, and what your resource servers have to do to see it, is this:
+
+**When a user's consent grant for a resource is revoked** ([`DELETE /admin/grants/consent/{id}`](../../reference/http-api.md#http-admin-grants-consent-id-delete) or `authserver admin grant revoke-consent`):
+
+- **No new mints, at any hop.** Every exchange re-checks the grant at mint time, so nothing further down the chain can be issued.
+- **Every token that exists because of the grant is revoked**: the client's own access token for the resource, every token exchanged from it, and every token exchanged from those — the AS records which token each one was derived from and follows that to the leaves. A second app's grant for the same resource is not touched, and neither are the tokens exchanged from *its* token.
+- **The client's refresh-token families for that resource are revoked** and their access-token `jti`s denylisted, so the client cannot mint a fresh first hop either.
+- **`/oauth/introspect` answers `active: false`** for all of them from that moment. A revoked token presented as a `subject_token` to `/oauth/token` is refused with `invalid_grant`.
+- The audit row `consent_grant.revoked_admin` reports `revoked_issuances=<n> revoked_families=<n>`, and carries `cascade=failed` or `family_cascade=failed` if either half could not be completed — alert on those.
+
+**What a resource server sees** depends on how it verifies:
+
+- **Local JWT verification only**: nothing, until `exp`. Exchanged tokens live **1 hour** by default (`token_exchange.token_expiry`); user access tokens 15 minutes (`dcr.default_token_expiry`).
+- **Introspection**: the revocation, on the next check. Every official SDK can wire RFC 7662 introspection in as a revocation check next to local verification (`IntrospectionRevocation` in the TypeScript and Python SDKs; auto-wired in Go when AS credentials are supplied).
+
+**What it does not reach**:
+
+- A resource server that verifies JWTs locally and never introspects, until `exp` — the JWT is unchanged.
+- An exchange that named no `resource` (the resource-less self-exchange, which re-audiences a client's own token to the issuer). It consults no consent grant and writes no issuance row, so it is neither gated by nor revoked with one. Its subject token is still checked for revocation, so once the client's own token is revoked no further such exchange is possible.
+- An admin revoke of a single issuance (`DELETE /admin/issuances/{id}`) revokes that token only; tokens already exchanged **from** it are not followed. Revoke the consent grant to reach a chain.
+- **An authorization code issued before the revoke.** Consent is recorded when the code is issued, and redeeming the code does not re-read the grant. A code lives 10 minutes, so a client holding one when the grant is revoked can still redeem it within that window and receive a token and refresh family the cascade did not see. Revoking the grant again after the window closes reaches them; so does the next release, which re-checks the grant at redemption. Until then, for a revocation that must be immediate, revoke the client's families too (`authserver admin user force-logout` reaches every family the user holds).
+
+**Recommendation for high-risk scopes**: keep `token_exchange.token_expiry` short and turn introspection on in the resource servers that hold those scopes. TTL bounds the window for servers that verify locally; introspection closes it for the ones that ask.
+
 ## Scenario A — Brokered vend (MCP server gets a user's upstream token)
 
 This is the most common shape. The MCP server forwards the user's AS-issued access token as `subject_token` and names a Broker resource as `resource=<slug>`. The AS returns the **actual upstream provider token** (e.g. `gho_…`), not an AS-signed JWT. End-to-end recipe is in [Connecting upstream providers](connecting-providers.md); the wire call is verified against [`POST /oauth/token`](../../reference/http-api.md#http-public-oauth-token):

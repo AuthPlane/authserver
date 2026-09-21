@@ -17,6 +17,7 @@ import (
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/audit"
+	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/domain/scope"
 	"github.com/authplane/authserver/internal/domain/session"
 	"github.com/authplane/authserver/internal/domain/token"
@@ -55,6 +56,10 @@ type TokenService struct {
 	// issuance row (which is the  /  audit-gap that surfaced as
 	// "Issuances list is empty" in the Admin UI).
 	resourceRegistry *ResourceRegistry
+
+	// agentIdentity resolves the agent_id / agent_chain claims for the
+	// issuing client. Optional: when nil, tokens carry neither claim.
+	agentIdentity *AgentIdentityService
 }
 
 // JWKSSigningKeyProvider provides signing keys for JWT issuance.
@@ -123,6 +128,16 @@ func (s *TokenService) WithTokenTransactions(tm output.TransactionManager) {
 // that gap without changing NewTokenService's signature.
 func (s *TokenService) WithResourceRegistry(r *ResourceRegistry) {
 	s.resourceRegistry = r
+}
+
+// WithAgentIdentity enables agent identity claim attachment on the
+// authorization_code and refresh_token grants, matching what
+// client_credentials, token exchange and jwt-bearer already do. Without
+// it, a token issued to a client registered with is_agent=true carries no
+// agent_id — which is the first hop of a user-consented agent flow, so
+// resource servers reading agent_id saw nothing on the primary flow.
+func (s *TokenService) WithAgentIdentity(ai *AgentIdentityService) {
+	s.agentIdentity = ai
 }
 
 // ExchangeCode exchanges an authorization code + PKCE verifier for tokens.
@@ -212,9 +227,15 @@ func (s *TokenService) exchangeCode(ctx context.Context, req input.ExchangeCodeR
 	}
 
 	// 5. Authenticate client.
-	if authErr := s.authenticateClient(ctx, span, sess.ClientID, req.ClientSecret); authErr != nil {
+	authedClient, authErr := s.authenticateClient(ctx, span, sess.ClientID, req.ClientSecret)
+	if authErr != nil {
 		return nil, authErr
 	}
+
+	// Resolve the agent claims off the client just authenticated. Reading
+	// the loaded client rather than re-fetching keeps this infallible, so
+	// no new failure mode lands downstream of the consume above.
+	agentClaims := extractAgentIdentityClaimsForClient(ctx, s.agentIdentity, authedClient, nil)
 
 	// 6. Verify PKCE.
 	if pkceErr := crypto.VerifyS256(req.CodeVerifier, sess.CodeChallenge); pkceErr != nil {
@@ -337,11 +358,12 @@ func (s *TokenService) exchangeCode(ctx context.Context, req input.ExchangeCodeR
 	now := time.Now().UTC()
 	expiry := now.Add(tokenCfg.AccessTokenExpiry)
 	mintResp, err := s.mintIssuer.Issue(ctx, s.buildMintRequest(ctx, now, expiry, mintParams{
-		UserID:   sess.UserID,
-		ClientID: sess.ClientID,
-		Scope:    sess.Scope,
-		Resource: sess.Resource,
-		DPoPJKT:  dpopJKT,
+		UserID:        sess.UserID,
+		ClientID:      sess.ClientID,
+		Scope:         sess.Scope,
+		Resource:      sess.Resource,
+		DPoPJKT:       dpopJKT,
+		AgentIdentity: agentClaims,
 	}))
 	if err != nil {
 		span.RecordError(err)
@@ -405,6 +427,7 @@ func (s *TokenService) exchangeCode(ctx context.Context, req input.ExchangeCodeR
 	s.metrics.TokensIssued.Add(ctx, 1, otelmetric.WithAttributes(
 		attribute.String("grant_type", "authorization_code"),
 	))
+	s.recordAgentTokenIssued(ctx, agentClaims)
 	s.metrics.TokenIssuanceDuration.Record(ctx, time.Since(start).Seconds(), otelmetric.WithAttributes(
 		attribute.String("grant_type", "authorization_code"),
 	))
@@ -482,7 +505,8 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 		span.SetStatus(codes.Error, "client_id mismatch")
 		return nil, domain.ErrInvalidClient
 	}
-	if authErr := s.authenticateClient(ctx, span, family.ClientID, req.ClientSecret); authErr != nil {
+	authedClient, authErr := s.authenticateClient(ctx, span, family.ClientID, req.ClientSecret)
+	if authErr != nil {
 		return nil, authErr
 	}
 
@@ -493,6 +517,28 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 		span.RecordError(resErr)
 		span.SetStatus(codes.Error, "requested resource not authorized by this family")
 		return nil, resErr
+	}
+
+	// Resolve the agent claims off the client just authenticated, before the
+	// consume below, for the same reason the token config is resolved here:
+	// nothing that can fail may run after ConsumeRefreshToken has burned the
+	// old token. Reading the already-loaded client keeps this infallible and
+	// costs no extra client-store round trip.
+	agentClaims := extractAgentIdentityClaimsForClient(ctx, s.agentIdentity, authedClient, nil)
+
+	// Scope, bounded twice: by what the family was granted at consent
+	// (RFC 6749 §6) and by the client's ceiling as it stands now. The family
+	// froze its scope at the original authorization; an operator who has
+	// since narrowed the client through PATCH /admin/clients/{id} expects the
+	// narrowing to bind here too, not only at /oauth/authorize. Resolved
+	// before the consume so a refused scope leaves the refresh token
+	// unspent — the client can retry within bounds rather than losing the
+	// family to a typo.
+	effectiveScope, scopeErr := refreshScope(req.Scope, family.Scope, authedClient)
+	if scopeErr != nil {
+		span.RecordError(scopeErr)
+		span.SetStatus(codes.Error, scopeErr.Error())
+		return nil, scopeErr
 	}
 
 	// Resolve the token lifetimes before the refresh token is consumed below:
@@ -558,19 +604,6 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 		}
 	}
 
-	// 5. Scope narrowing: if requested scope is provided, it must be a subset.
-	effectiveScope := family.Scope
-	if req.Scope != "" {
-		requested := scope.Parse(req.Scope)
-		original := scope.Parse(family.Scope)
-		if !requested.IsSubset(original) {
-			span.RecordError(domain.ErrInvalidScope)
-			span.SetStatus(codes.Error, "scope not subset")
-			return nil, domain.ErrInvalidScope
-		}
-		effectiveScope = requested.String()
-	}
-
 	// 6. Validate DPoP proof if present (RFC 9449).
 	var dpopJKT string
 	if req.DPoPProof != "" {
@@ -588,11 +621,12 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 	now := time.Now().UTC()
 	expiry := now.Add(tokenCfg.AccessTokenExpiry)
 	mintResp, err := s.mintIssuer.Issue(ctx, s.buildMintRequest(ctx, now, expiry, mintParams{
-		UserID:   family.UserID,
-		ClientID: family.ClientID,
-		Scope:    effectiveScope,
-		Resource: family.Resource,
-		DPoPJKT:  dpopJKT,
+		UserID:        family.UserID,
+		ClientID:      family.ClientID,
+		Scope:         effectiveScope,
+		Resource:      family.Resource,
+		DPoPJKT:       dpopJKT,
+		AgentIdentity: agentClaims,
 	}))
 	if err != nil {
 		span.RecordError(err)
@@ -615,6 +649,16 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 	if !family.IsActive() {
 		span.RecordError(domain.ErrFamilyRevoked)
 		span.SetStatus(codes.Error, "family revoked during refresh")
+		// The token minted above is never returned, but its issuance row
+		// was written before the revocation's cascade could see it and
+		// its jti was tracked after the denylist ran. Revoke the row so
+		// the issuance log does not show a live token nobody holds.
+		if mintResp.IssuanceID != "" && s.mintIssuer != nil && s.mintIssuer.issuances != nil {
+			if rerr := s.mintIssuer.issuances.Revoke(ctx, mintResp.IssuanceID); rerr != nil {
+				s.logger.ErrorContext(ctx, "refresh refused after mint but its issuance row could not be revoked",
+					"jti", mintResp.IssuanceID, "family_id", family.ID, "error", rerr)
+			}
+		}
 		return nil, domain.ErrFamilyRevoked
 	}
 
@@ -634,6 +678,7 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 	)
 
 	s.metrics.TokensRefreshed.Add(ctx, 1)
+	s.recordAgentTokenIssued(ctx, agentClaims)
 	s.metrics.TokenIssuanceDuration.Record(ctx, time.Since(start).Seconds(), otelmetric.WithAttributes(
 		attribute.String("grant_type", "refresh_token"),
 	))
@@ -654,39 +699,86 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 // --- Extracted helpers ---
 
 // authenticateClient looks up a client by ID, verifies it is active,
-// and verifies the client secret for confidential clients.
-func (s *TokenService) authenticateClient(ctx context.Context, span trace.Span, clientID, clientSecret string) error {
+// and verifies the client secret for confidential clients. The loaded
+// client is returned so callers can read it without a second store
+// round trip — matching ClientCredentialsService, TokenExchangeService
+// and JWTBearerService, whose authenticateClient already does this.
+// refreshScope resolves the scope a refreshed access token carries.
+//
+// The family bounds the request the way RFC 6749 §6 describes: a requested
+// scope wider than the original grant is refused. The client's current
+// ceiling then bounds the result. An explicit request outside the ceiling is
+// refused, matching what /oauth/authorize would say to the same request; an
+// omitted request is narrowed to the intersection, so a session an operator
+// has since restricted continues with what remains rather than being cut
+// off. An intersection with nothing left is refused, since a token carrying
+// no scope hides the cause behind a string of 403s.
+//
+// An empty ceiling does not bound, for the same reason as on the authorize
+// path: clients created through dynamic registration or CIMD before
+// oauth.default_client_scope existed have none, and refusing them here
+// would end every one of their sessions on upgrade. v0.3.0 closes that.
+func refreshScope(requested, familyScope string, c *client.Client) (string, error) {
+	granted := scope.Parse(familyScope)
+	ceiling := scope.Parse(c.Scope)
+
+	if requested != "" {
+		asked := scope.Parse(requested)
+		if !asked.IsSubset(granted) {
+			return "", domain.ErrInvalidScope
+		}
+		if !ceiling.IsEmpty() && !asked.IsSubset(ceiling) {
+			return "", scopeDenialError(c, ceiling)
+		}
+		return asked.String(), nil
+	}
+
+	// Nothing requested: the family's scope stands unless the ceiling cuts
+	// it. Returned as stored rather than re-serialized, so the wire value
+	// keeps the order the consent recorded — the same string this path has
+	// always echoed.
+	if ceiling.IsEmpty() || granted.IsSubset(ceiling) {
+		return familyScope, nil
+	}
+	narrowed := granted.Intersect(ceiling)
+	if narrowed.IsEmpty() {
+		return "", scopeDenialError(c, ceiling)
+	}
+	return narrowed.String(), nil
+}
+
+func (s *TokenService) authenticateClient(ctx context.Context, span trace.Span, clientID, clientSecret string) (*client.Client, error) {
 	c, err := s.clients.GetByID(ctx, clientID)
 	if err != nil {
 		span.RecordError(domain.ErrInvalidClient)
 		span.SetStatus(codes.Error, "client not found")
-		return domain.ErrInvalidClient
+		return nil, domain.ErrInvalidClient
 	}
 
 	if !c.IsActive() {
 		span.RecordError(domain.ErrClientSuspended)
 		span.SetStatus(codes.Error, "client suspended")
-		return domain.ErrClientSuspended
+		return nil, domain.ErrClientSuspended
 	}
 
 	if !c.IsPublic() {
 		if clientSecret == "" {
 			span.RecordError(domain.ErrInvalidClient)
 			span.SetStatus(codes.Error, "missing client_secret")
-			return domain.ErrInvalidClient
+			return nil, domain.ErrInvalidClient
 		}
 		if err := crypto.CompareClientSecret(c.SecretHash, clientSecret); err != nil {
 			span.RecordError(domain.ErrInvalidClient)
 			span.SetStatus(codes.Error, "invalid client_secret")
-			return domain.ErrInvalidClient
+			return nil, domain.ErrInvalidClient
 		}
 	} else if clientSecret != "" {
 		span.RecordError(domain.ErrInvalidClient)
 		span.SetStatus(codes.Error, "public client sent secret")
-		return domain.ErrInvalidClient
+		return nil, domain.ErrInvalidClient
 	}
 
-	return nil
+	return c, nil
 }
 
 // mintParams holds the per-request inputs TokenService passes through to
@@ -699,6 +791,11 @@ type mintParams struct {
 	Scope    string
 	Resource string
 	DPoPJKT  string // JWK thumbprint for DPoP binding (RFC 9449); empty = standard Bearer
+
+	// AgentIdentity is the agent_id / agent_chain pair resolved from the
+	// authenticated client. nil when the client is not an agent or the
+	// service was not wired with an AgentIdentityService.
+	AgentIdentity *AgentIdentityClaims
 }
 
 // validateRequestedResource enforces RFC 8707 §2.2 at the token endpoint: a
@@ -775,11 +872,20 @@ func resourceIdentityEqual(a, b string) bool {
 // and refresh-token grants fall back to the previously behavior of
 // emitting the audience-only IssueRequest with no audit row written.
 //
-// AgentIdentity is intentionally nil for ExchangeCode / RefreshToken: the
-// existing AgentIdentityService is consulted only by TokenExchange and
-// JWTBearer ( fold those into MintIssuer too). Standard grants
-// preserve their previously JWT shape — agent_id / agent_chain remain
-// empty when the issuing client is not in an agent flow.
+// p.AgentIdentity is resolved by the caller, off the client authenticateClient
+// already loaded, so a client registered with is_agent=true gets agent_id on
+// its authorization_code and refresh_token access tokens — the first hop of a
+// user-consented agent flow.
+//
+// Neither grant builds an RFC 8693 'act' chain, so agent_chain stays empty
+// here. It is populated only where an 'act' claim exists: token exchange
+// builds one per delegation hop, and jwt-bearer sets a single-entry 'act'
+// carrying the asserting IdP as provenance (see jwt_bearer.go) — which is
+// not a delegation chain despite feeding the same field.
+//
+// client_credentials, jwt-bearer and token exchange resolve the same claims,
+// but still by client id — rotating them onto the already-authenticated
+// client is a follow-up, not part of this fix.
 func (s *TokenService) buildMintRequest(ctx context.Context, now, expiry time.Time, p mintParams) IssueRequest {
 	var audience []string
 	if p.Resource != "" {
@@ -790,10 +896,16 @@ func (s *TokenService) buildMintRequest(ctx context.Context, now, expiry time.Ti
 		SubjectUserID: p.UserID,
 		ActorClientID: p.ClientID,
 		Scopes:        strings.Fields(p.Scope),
+		AgentIdentity: p.AgentIdentity,
 		DPoPJKT:       p.DPoPJKT,
-		Audience:      audience,
-		NotBefore:     now,
-		Expiry:        expiry,
+		// The client the user consented to is the one being issued to:
+		// this is the first hop, the token the rest of a chain derives
+		// from. Recorded so consent revocation seeds on it by the same
+		// column as every later hop, not by the legacy client_id fallback.
+		ConsentClientID: p.ClientID,
+		Audience:        audience,
+		NotBefore:       now,
+		Expiry:          expiry,
 	}
 
 	// Resolve the resource to a typed pointer so MintIssuer.Issue can
@@ -814,6 +926,24 @@ func (s *TokenService) buildMintRequest(ctx context.Context, now, expiry time.Ti
 		}
 	}
 	return req
+}
+
+// recordAgentTokenIssued counts an agent token once the grant has actually
+// issued one. It sits next to TokensIssued / TokensRefreshed so the
+// agent-scoped counter can never exceed the total-token counter for the same
+// requests.
+//
+// Both grants resolve their agent claims well before they finish: ahead of
+// PKCE verification and DPoP in exchangeCode, and ahead of the refresh-token
+// consume in refreshToken. Either can still fail after minting — a failed
+// refresh-family transaction, a family revoked mid-flight — so counting at
+// resolution, or even right after MintIssuer returns, would credit tokens the
+// caller never receives.
+func (s *TokenService) recordAgentTokenIssued(ctx context.Context, agentClaims *AgentIdentityClaims) {
+	if s.agentIdentity == nil || agentClaims == nil {
+		return
+	}
+	s.agentIdentity.RecordIssued(ctx, len(agentClaims.AgentChain) > 0)
 }
 
 // createRefreshToken generates a random refresh token, hashes it, and stores it.

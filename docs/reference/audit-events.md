@@ -18,7 +18,7 @@ The `Detail` column lists the keys you can expect to see in the canonical `key=v
 | `token.introspected` | `jti issuing_client` (actor blank; `client_id` carries the *requesting* client, which is not always the token's owner) | `IntrospectToken` in `internal/services/introspection.go` | `WHERE action='token.introspected'` |
 | `token.introspect_denied` | `reason [jti]` | `recordDenial` in `internal/services/introspection.go` | `WHERE action='token.introspect_denied' AND detail LIKE '%reason=caller_not_authorized_for_token%'` |
 | `token.exchanged` | `jti sub subject_client actor_client type scopes` (basic) · `jti sub subject_client actor_client type=mint_dispatch resource scopes chain_kind via_link` (registry mint) · `jti sub subject_client actor_client type=broker_dispatch resource scopes chain_kind via_link` (registry broker) | `internal/services/token_exchange.go:462,1112,1431,1633,1692` | `WHERE action='token.exchanged' AND detail LIKE '%type=broker_dispatch%'` |
-| `token.exchange_denied` | `reason` | `internal/services/token_exchange.go:638` | `WHERE action='token.exchange_denied' AND detail LIKE '%reason=invalid_subject_token%'` |
+| `token.exchange_denied` | `reason` — includes `subject_token_revoked_during_mint`, `consent_revoked_during_mint`, `subject_recheck_failed` and `consent_recheck_failed`, the four ways the post-mint re-check refuses a token whose authorization changed while it was being minted | `internal/services/token_exchange.go:771` | `WHERE action='token.exchange_denied' AND detail LIKE '%reason=invalid_subject_token%'` |
 | `client_credentials.issued` | `jti scopes` | `internal/services/client_credentials.go:319` | `WHERE action='client_credentials.issued'` |
 | `client_credentials.denied` | `reason` | `internal/services/client_credentials.go:380` | `WHERE action='client_credentials.denied' AND detail LIKE '%reason=invalid_client%'` |
 | `jwt_bearer.issued` | `jti idp scopes` | `internal/services/jwt_bearer.go:468` | `WHERE action='jwt_bearer.issued'` |
@@ -29,7 +29,7 @@ The `Detail` column lists the keys you can expect to see in the canonical `key=v
 | `broker_grant.revoked_admin` | `id user_id broker_provider_id` | `internal/services/grant_admin.go:217` | `WHERE action='broker_grant.revoked_admin'` |
 | `consent.granted` | `resource scopes` (or empty if no resource) | `internal/services/consent.go:288` | `WHERE action='consent.granted'` |
 | `consent.denied` | `session` | `internal/services/consent.go:310` | `WHERE action='consent.denied'` |
-| `consent_grant.revoked_admin` | `id user_id client_id resource_id` | `internal/services/grant_admin.go:159` | `WHERE action='consent_grant.revoked_admin'` |
+| `consent_grant.revoked_admin` | `id user_id client_id resource_id revoked_issuances revoked_families [cascade=failed] [family_cascade=failed]` — `revoked_issuances` counts the client's own tokens for the resource plus every token exchanged from them; `revoked_families` the client's refresh families for it; either `failed` marker means live tokens were missed and the row is worth alerting on | `internal/services/grant_admin.go:224` | `WHERE action='consent_grant.revoked_admin' AND detail LIKE '%failed%'` |
 | `client.registered` | `source=dcr` | `internal/services/dcr.go:167` | `WHERE action='client.registered'` |
 | `client.created_admin` | `name` | `internal/services/admin.go:160` | `WHERE action='client.created_admin'` |
 | `client.secret_rotated` | `(empty)` | `internal/services/admin.go:221` | `WHERE action='client.secret_rotated'` |
@@ -100,6 +100,7 @@ absence marks a request that failed before the token was understood.
 | `caller_not_authorized_for_token` | The caller neither issued the token nor is authorized to act AS a Resource the token names in `aud`. **This is the probing signal**; pair it with `client_id` to see who is asking. |
 | `ambiguous_runtime_binding` | Two Resources answer to one slug or URI in the token's `aud`, so the AS will not guess which was meant. An operator mistake, not a caller one — kept apart from the probing signal so a misconfiguration does not read as a scan. |
 | `token_revoked` / `machine_token_revoked` | The token's `jti` is revoked. |
+| `issuance_revoked` | The token's issuance row is revoked — by a consent-grant revocation (the token, or a token it was exchanged from, was minted under that grant) or by an admin single-issuance revoke. |
 | `issuing_client_inactive` | The client the token was issued to is suspended, revoked or gone. |
 | `subject_inactive` | The user the token represents is disabled or gone. |
 

@@ -11,7 +11,7 @@ import (
 	"github.com/authplane/authserver/internal/ports/output"
 )
 
-// IssuanceStoreSuiteDeps bundles the stores and helpers an 
+// IssuanceStoreSuiteDeps bundles the stores and helpers an
 // IssuanceStore integration suite needs. The suite seeds its own users
 // and Mint resources; ExplainQueryPlan is a backend-specific shim that
 // returns the planner output as a single string the suite greps for
@@ -254,6 +254,324 @@ func RunIssuanceStoreTests(t *testing.T, newDeps func(*testing.T) IssuanceStoreS
 		}
 	})
 
+	// The consent-revocation cascade. The grant is (user, app A,
+	// resource R). Rows are written the way token exchange writes them:
+	// client_id is the acting client, consent_client_id is A, parent_jti is
+	// the token the row was exchanged from.
+	t.Run("RevokeFamily_MatchesConsentClientNotActor", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-lin")
+		r := seedMintResource(t, deps.Resources, "r-lin", "lin")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		// Service X exchanged app A's user token for R. The acting client
+		// is X; the consent that authorized it belongs to A.
+		hop1 := newMintIssuance("iss-lin-hop1", "u-lin", "client-X", r.ID, now)
+		hop1.ConsentClientID = "client-A"
+		hop1.ParentJTI = "jti-user-token-no-row"
+		if err := deps.Issuances.Insert(ctx, hop1); err != nil {
+			t.Fatalf("insert hop1: %v", err)
+		}
+		// A sibling grant (user, app B, R) minted its own token through the
+		// same service. Revoking A's consent must not touch it.
+		sibling := newMintIssuance("iss-lin-sibling", "u-lin", "client-X", r.ID, now)
+		sibling.ConsentClientID = "client-B"
+		if err := deps.Issuances.Insert(ctx, sibling); err != nil {
+			t.Fatalf("insert sibling: %v", err)
+		}
+
+		n, err := deps.Issuances.RevokeFamily(ctx, "u-lin", "client-A", r.ID)
+		if err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("rows revoked = %d, want 1", n)
+		}
+		assertRevoked(t, deps.Issuances, hop1.JTI, true)
+		assertRevoked(t, deps.Issuances, sibling.JTI, false)
+	})
+
+	t.Run("RevokeFamily_FollowsParentJTIAcrossResources", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-chain")
+		r1 := seedMintResource(t, deps.Resources, "r-chain-1", "chain-1")
+		r2 := seedMintResource(t, deps.Resources, "r-chain-2", "chain-2")
+		r3 := seedMintResource(t, deps.Resources, "r-chain-3", "chain-3")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		// A's user token → X exchanges for R1 (under A's consent)
+		//               → Y exchanges X's token for R2 (under X's consent)
+		//               → Z exchanges Y's token for R3 (under Y's consent)
+		hop1 := newMintIssuance("iss-ch-1", "u-chain", "client-X", r1.ID, now)
+		hop1.ConsentClientID = "client-A"
+		hop1.ParentJTI = "jti-root"
+		hop2 := newMintIssuance("iss-ch-2", "u-chain", "client-Y", r2.ID, now.Add(time.Second))
+		hop2.ConsentClientID = "client-X"
+		hop2.ParentJTI = hop1.JTI
+		hop3 := newMintIssuance("iss-ch-3", "u-chain", "client-Z", r3.ID, now.Add(2*time.Second))
+		hop3.ConsentClientID = "client-Y"
+		hop3.ParentJTI = hop2.JTI
+		// An unrelated token for R2 under the same consent X holds, derived
+		// from a different root. Revoking A's grant must leave it alone:
+		// X's consent for R2 is not what was revoked.
+		other := newMintIssuance("iss-ch-other", "u-chain", "client-Y", r2.ID, now)
+		other.ConsentClientID = "client-X"
+		other.ParentJTI = "jti-some-other-root"
+		for _, row := range []*resource.Issuance{hop1, hop2, hop3, other} {
+			if err := deps.Issuances.Insert(ctx, row); err != nil {
+				t.Fatalf("insert %s: %v", row.ID, err)
+			}
+		}
+
+		n, err := deps.Issuances.RevokeFamily(ctx, "u-chain", "client-A", r1.ID)
+		if err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if n != 3 {
+			t.Fatalf("rows revoked = %d, want 3 (the whole chain)", n)
+		}
+		assertRevoked(t, deps.Issuances, hop1.JTI, true)
+		assertRevoked(t, deps.Issuances, hop2.JTI, true)
+		assertRevoked(t, deps.Issuances, hop3.JTI, true)
+		assertRevoked(t, deps.Issuances, other.JTI, false)
+
+		// Idempotent: a second revoke of the same grant changes nothing.
+		n, err = deps.Issuances.RevokeFamily(ctx, "u-chain", "client-A", r1.ID)
+		if err != nil {
+			t.Fatalf("second revoke: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("second revoke rows = %d, want 0", n)
+		}
+	})
+
+	// A root the operator already revoked one at a time is still a root
+	// for the walk: its descendants must not survive because of it.
+	t.Run("RevokeFamily_ReachesDescendantsOfAlreadyRevokedRoot", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-pre")
+		r1 := seedMintResource(t, deps.Resources, "r-pre-1", "pre-1")
+		r2 := seedMintResource(t, deps.Resources, "r-pre-2", "pre-2")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		hop1 := newMintIssuance("iss-pre-1", "u-pre", "client-X", r1.ID, now)
+		hop1.ConsentClientID = "client-A"
+		hop2 := newMintIssuance("iss-pre-2", "u-pre", "client-Y", r2.ID, now)
+		hop2.ConsentClientID = "client-X"
+		hop2.ParentJTI = hop1.JTI
+		for _, row := range []*resource.Issuance{hop1, hop2} {
+			if err := deps.Issuances.Insert(ctx, row); err != nil {
+				t.Fatalf("insert %s: %v", row.ID, err)
+			}
+		}
+		if err := deps.Issuances.Revoke(ctx, hop1.ID); err != nil {
+			t.Fatalf("pre-revoke hop1: %v", err)
+		}
+
+		n, err := deps.Issuances.RevokeFamily(ctx, "u-pre", "client-A", r1.ID)
+		if err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("rows revoked = %d, want 1 (hop2; hop1 was already revoked)", n)
+		}
+		assertRevoked(t, deps.Issuances, hop2.JTI, true)
+	})
+
+	// Rows written before the lineage columns existed carry no
+	// consent_client_id. For those the cascade matches the acting client,
+	// which is what it matched before, so an upgrade does not lose the
+	// self-exchange case that used to work.
+	t.Run("RevokeFamily_LegacyRowsMatchActingClient", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-legacy")
+		r := seedMintResource(t, deps.Resources, "r-legacy", "legacy")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		legacy := newMintIssuance("iss-legacy", "u-legacy", "client-A", r.ID, now)
+		// No ConsentClientID, no ParentJTI: a pre-013 row.
+		crossClient := newMintIssuance("iss-legacy-x", "u-legacy", "client-X", r.ID, now)
+		// Also legacy, but a cross-client mint: unreachable before, and
+		// still unreachable — there is nothing on the row to match.
+		for _, row := range []*resource.Issuance{legacy, crossClient} {
+			if err := deps.Issuances.Insert(ctx, row); err != nil {
+				t.Fatalf("insert %s: %v", row.ID, err)
+			}
+		}
+
+		n, err := deps.Issuances.RevokeFamily(ctx, "u-legacy", "client-A", r.ID)
+		if err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("rows revoked = %d, want 1", n)
+		}
+		assertRevoked(t, deps.Issuances, legacy.JTI, true)
+		assertRevoked(t, deps.Issuances, crossClient.JTI, false)
+	})
+
+	// Another user's tokens under the same client and resource are not the
+	// grant's, and a parent link never crosses users because a derived token
+	// carries its subject's sub — but the roots must still filter on it.
+	t.Run("RevokeFamily_DoesNotCrossUsers", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-one")
+		seedUser(t, deps.Users, "u-two")
+		r := seedMintResource(t, deps.Resources, "r-users", "users")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		mine := newMintIssuance("iss-u-one", "u-one", "client-X", r.ID, now)
+		mine.ConsentClientID = "client-A"
+		theirs := newMintIssuance("iss-u-two", "u-two", "client-X", r.ID, now)
+		theirs.ConsentClientID = "client-A"
+		for _, row := range []*resource.Issuance{mine, theirs} {
+			if err := deps.Issuances.Insert(ctx, row); err != nil {
+				t.Fatalf("insert %s: %v", row.ID, err)
+			}
+		}
+		n, err := deps.Issuances.RevokeFamily(ctx, "u-one", "client-A", r.ID)
+		if err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("rows revoked = %d, want 1", n)
+		}
+		assertRevoked(t, deps.Issuances, mine.JTI, true)
+		assertRevoked(t, deps.Issuances, theirs.JTI, false)
+	})
+
+	// A parent cycle cannot be written by the service (a parent is always
+	// issued before its child), but a corrupted table must not hang the
+	// cascade. UNION in the recursive CTE terminates it; every row in the
+	// cycle is revoked.
+	t.Run("RevokeFamily_TerminatesOnCorruptCycle", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-cyc")
+		r := seedMintResource(t, deps.Resources, "r-cyc", "cyc")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		a := newMintIssuance("iss-cyc-a", "u-cyc", "client-X", r.ID, now)
+		a.ConsentClientID = "client-A"
+		a.ParentJTI = "jti-iss-cyc-c" // points forward to c
+		b := newMintIssuance("iss-cyc-b", "u-cyc", "client-Y", r.ID, now)
+		b.ParentJTI = a.JTI
+		c := newMintIssuance("iss-cyc-c", "u-cyc", "client-Z", r.ID, now)
+		c.ParentJTI = b.JTI // closes the cycle a -> b -> c -> a
+		for _, row := range []*resource.Issuance{a, b, c} {
+			if err := deps.Issuances.Insert(ctx, row); err != nil {
+				t.Fatalf("insert %s: %v", row.ID, err)
+			}
+		}
+		done := make(chan struct{})
+		var n int
+		var err error
+		go func() {
+			n, err = deps.Issuances.RevokeFamily(ctx, "u-cyc", "client-A", r.ID)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("RevokeFamily did not terminate on a cyclic parent chain")
+		}
+		if err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if n != 3 {
+			t.Fatalf("rows revoked = %d, want 3", n)
+		}
+	})
+
+	// The deepest chain the server can mint (token_exchange.max_chain_depth
+	// caps at 10) is reached end to end.
+	t.Run("RevokeFamily_ReachesDepthTen", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-deep")
+		r := seedMintResource(t, deps.Resources, "r-deep", "deep")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		parent := ""
+		var jtis []string
+		for i := 0; i < 10; i++ {
+			row := newMintIssuance("iss-deep-"+string(rune('a'+i)), "u-deep", "client-"+string(rune('a'+i)), r.ID, now.Add(time.Duration(i)*time.Second))
+			if i == 0 {
+				row.ConsentClientID = "client-A"
+			}
+			row.ParentJTI = parent
+			if err := deps.Issuances.Insert(ctx, row); err != nil {
+				t.Fatalf("insert %s: %v", row.ID, err)
+			}
+			parent = row.JTI
+			jtis = append(jtis, row.JTI)
+		}
+		n, err := deps.Issuances.RevokeFamily(ctx, "u-deep", "client-A", r.ID)
+		if err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if n != 10 {
+			t.Fatalf("rows revoked = %d, want 10", n)
+		}
+		for _, j := range jtis {
+			assertRevoked(t, deps.Issuances, j, true)
+		}
+	})
+
+	// A descendant on another resource is reached even though the root
+	// filter names one resource: the walk follows parent_jti, not
+	// resource_id. Pinned separately from the chain test so a "helpful"
+	// resource filter on the recursive arm cannot slip in.
+	t.Run("RevokeFamily_DescendantOnOtherResourceReached", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-xres")
+		r1 := seedMintResource(t, deps.Resources, "r-xres-1", "xres-1")
+		r2 := seedMintResource(t, deps.Resources, "r-xres-2", "xres-2")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		root := newMintIssuance("iss-xres-root", "u-xres", "client-A", r1.ID, now)
+		root.ConsentClientID = "client-A"
+		leaf := newMintIssuance("iss-xres-leaf", "u-xres", "client-Y", r2.ID, now)
+		leaf.ConsentClientID = "client-A"
+		leaf.ParentJTI = root.JTI
+		for _, row := range []*resource.Issuance{root, leaf} {
+			if err := deps.Issuances.Insert(ctx, row); err != nil {
+				t.Fatalf("insert %s: %v", row.ID, err)
+			}
+		}
+		if n, err := deps.Issuances.RevokeFamily(ctx, "u-xres", "client-A", r1.ID); err != nil || n != 2 {
+			t.Fatalf("revoke family: n=%d err=%v, want 2", n, err)
+		}
+		assertRevoked(t, deps.Issuances, leaf.JTI, true)
+	})
+
+	t.Run("Insert_RoundtripsLineage", func(t *testing.T) {
+		deps := newDeps(t)
+		ctx := context.Background()
+		seedUser(t, deps.Users, "u-rt")
+		r := seedMintResource(t, deps.Resources, "r-rt", "rt")
+
+		row := newMintIssuance("iss-rt", "u-rt", "client-X", r.ID, time.Now().UTC().Truncate(time.Second))
+		row.ConsentClientID = "client-A"
+		row.ParentJTI = "jti-parent"
+		if err := deps.Issuances.Insert(ctx, row); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		got, err := deps.Issuances.GetByJTI(ctx, row.JTI)
+		if err != nil || got == nil {
+			t.Fatalf("get: %v %v", got, err)
+		}
+		if got.ConsentClientID != "client-A" || got.ParentJTI != "jti-parent" {
+			t.Errorf("lineage did not round-trip: consent=%q parent=%q", got.ConsentClientID, got.ParentJTI)
+		}
+	})
+
 	t.Run("ListForActor_UsesIndex", func(t *testing.T) {
 		deps := newDeps(t)
 		if deps.ExplainQueryPlan == nil {
@@ -418,5 +736,21 @@ func idAt(prefix string, n int) string {
 		return prefix + "-c"
 	default:
 		return prefix + "-x"
+	}
+}
+
+// assertRevoked fails the test unless the issuance with the given jti has
+// the expected revocation state.
+func assertRevoked(t *testing.T, store output.IssuanceStore, jti string, want bool) {
+	t.Helper()
+	got, err := store.GetByJTI(context.Background(), jti)
+	if err != nil {
+		t.Fatalf("get %s: %v", jti, err)
+	}
+	if got == nil {
+		t.Fatalf("get %s: no row", jti)
+	}
+	if (got.RevokedAt != nil) != want {
+		t.Errorf("%s revoked = %v, want %v", jti, got.RevokedAt != nil, want)
 	}
 }

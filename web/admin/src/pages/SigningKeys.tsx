@@ -146,8 +146,9 @@ export default function SigningKeys() {
                   : "Disabled — JWKS exposes signing keys only"}
               </div>
               <div style={{ fontSize: sz.sm, color: C.textDim, lineHeight: 1.6 }}>
-                When enabled, JWKS includes an <Mono>agents</Mono> array listing all registered agent clients.
-                Enable only if your MCP servers need to validate agent identity from JWKS.
+                When enabled, JWKS includes an <Mono>agents</Mono> array listing the active agent clients.
+                Enable only if your MCP servers need to discover registered agent clients from JWKS.
+                Listing means an active client registered with the agent flag — it does not vouch for the client.
               </div>
             </div>
           </div>

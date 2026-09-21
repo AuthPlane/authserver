@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -15,6 +16,7 @@ import (
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/domain/resource"
+	"github.com/authplane/authserver/internal/domain/scope"
 	"github.com/authplane/authserver/internal/domain/session"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/input"
@@ -34,6 +36,20 @@ type AuthorizeService struct {
 	logger        *slog.Logger
 	tracer        trace.Tracer
 	metrics       *observability.Metrics
+
+	// noCeilingLogged bounds the deprecation warning to once per client per
+	// process. /oauth/authorize is unauthenticated, so a per-request warn is
+	// something any holder of a public client_id can drive at the rate
+	// limiter's ceiling. The diagnostic value is in naming which clients rely
+	// on the old path, and that is a set, not a stream.
+	//
+	// A mutex-guarded map rather than a sync.Map: the cap has to be checked
+	// against the current size before inserting, which sync.Map cannot do
+	// atomically — len() under a lock can. It also avoids walking the whole
+	// map on every request just to count it. The lock is only taken on the
+	// no-ceiling path, which disappears at v0.3.0 along with the rest of this.
+	noCeilingMu     sync.Mutex
+	noCeilingLogged map[string]struct{}
 }
 
 // ResourceInfo holds resource configuration needed by the authorize and token services.
@@ -148,6 +164,21 @@ func (s *AuthorizeService) StartAuthorization(ctx context.Context, req input.Aut
 		req.Resource = resolved.URI
 	}
 
+	// The client's registered scope ceiling. When set it bounds the request,
+	// the same way it already does on client_credentials and jwt-bearer.
+	//
+	// When empty it does not, for now. This path never consulted the ceiling
+	// before, so treating empty as a ceiling of zero would deny every client
+	// that has none — which is every client ever created through dynamic
+	// registration or CIMD, since neither door lets a client state one and
+	// neither assigned one until oauth.default_client_scope existed. Setting
+	// that key opts a deployment in: clients registered after it lands get a
+	// ceiling and are bounded by it. Until v0.3.0 an empty ceiling is left
+	// unenforced here and logged; after that it denies, matching the other
+	// grants.
+	clientScopes := scope.Parse(c.Scope)
+	ceilingSet := !clientScopes.IsEmpty()
+
 	// Scope handling: when scope parameter is absent from the authorize request.
 	if req.Scope == "" {
 		// RequireScope only matters when scope is absent, so resolve the config
@@ -171,14 +202,88 @@ func (s *AuthorizeService) StartAuthorization(ctx context.Context, req input.Aut
 		// responses to an omitted scope.
 		// MCP clients (notably Claude Code) omit scope from authorize requests.
 		// Rather than issuing a zero-scope token (which causes opaque 403s on
-		// every tool call), substitute all registered scopes for the resource.
-		req.Scope = s.collectDefaultScopes(ctx, req.Resource)
-		if req.Scope != "" {
-			span.SetAttributes(attribute.Bool("scope.defaulted", true))
-			s.logger.WarnContext(ctx, "scope absent from authorize request, using defaults",
+		// every tool call), substitute the registered scopes for the resource —
+		// narrowed to what this client is allowed to ask for, so the default can
+		// never propose more than the client's own ceiling.
+		catalog, scopesErr := s.collectDefaultScopes(ctx, req.Resource)
+		if scopesErr != nil {
+			span.RecordError(scopesErr)
+			span.SetStatus(codes.Error, scopesErr.Error())
+			return nil, scopesErr
+		}
+		defaulted := scope.Parse(catalog)
+		if ceilingSet {
+			defaulted = defaulted.Intersect(clientScopes)
+		}
+		req.Scope = defaulted.String()
+		if req.Scope == "" {
+			// Nothing is left to propose. Refuse here: letting it through would
+			// send the user to log in and then to a consent screen with no
+			// checkboxes, which ConsentService rejects with no way forward —
+			// the user would have spent their password on a request that could
+			// never succeed. The subset check below cannot catch this, since
+			// the empty set is a subset of everything.
+			//
+			// Two different causes reach this, and saying the wrong one sends
+			// the operator to the wrong place: with a ceiling it is a genuine
+			// disjoint set, without one the resource simply declares no scopes.
+			// Three causes reach this, and naming the wrong one sends the
+			// operator somewhere the request never went. Without a resource,
+			// collectDefaultScopes aggregates the whole registry, so an empty
+			// result means nothing anywhere declares a scope — not that some
+			// particular resource does not.
+			var reason string
+			switch {
+			case ceilingSet:
+				reason = "the client's registered scopes and the resource's scopes do not overlap"
+			case req.Resource == "":
+				reason = "no registered resource declares any scope"
+			default:
+				reason = "the requested resource declares no scopes"
+			}
+			scopeErr := fmt.Errorf("%w: no scope is available to this client on the "+
+				"requested resource: %s", domain.ErrInvalidScope, reason)
+			span.RecordError(scopeErr)
+			span.SetStatus(codes.Error, scopeErr.Error())
+			return nil, scopeErr
+		}
+		span.SetAttributes(attribute.Bool("scope.defaulted", true))
+		s.logger.WarnContext(ctx, "scope absent from authorize request, using defaults",
+			"client_id", req.ClientID,
+			"resource", req.Resource,
+			"defaulted_scope", req.Scope,
+		)
+	}
+
+	// Fail closed when the request exceeds the client's registered scopes.
+	// Deliberately independent of resource=: the catalog check below needs a
+	// resource to check against, but the client's own ceiling does not.
+	// Mirrors client_credentials; RFC 6749 §5.2 names invalid_scope.
+	switch {
+	case ceilingSet:
+		if !scope.Parse(req.Scope).IsSubset(clientScopes) {
+			scopeErr := scopeDenialError(c, clientScopes)
+			span.RecordError(scopeErr)
+			span.SetStatus(codes.Error, scopeErr.Error())
+			return nil, scopeErr
+		}
+	case req.Scope != "":
+		// Deprecation window. The span attribute is per request — cheap, and
+		// sampled downstream. The log is once per client per process: an
+		// operator greps it to learn which clients still need a ceiling before
+		// v0.3.0, and that is a set rather than a stream. Repeating it per
+		// request would let anyone holding a public client_id flood the log
+		// from an unauthenticated endpoint.
+		span.SetAttributes(attribute.Bool("scope.ceiling_unset", true))
+		if s.shouldLogNoCeiling(req.ClientID) {
+			s.logger.WarnContext(ctx, "client has no registered scope ceiling, so the "+
+				"requested scope is bounded only by the resource catalog; from v0.3.0 "+
+				"this will be refused with invalid_scope. Set oauth.default_client_scope "+
+				"so self-registered clients get a ceiling, or grant this one scopes with "+
+				"PATCH /admin/clients/{client_id}",
 				"client_id", req.ClientID,
-				"resource", req.Resource,
-				"defaulted_scope", req.Scope,
+				"registration_source", string(c.RegistrationSource),
+				"requested_scope", req.Scope,
 			)
 		}
 	}
@@ -328,11 +433,15 @@ func (s *AuthorizeService) lookupClient(ctx context.Context, clientID string) (*
 // globally if resource is empty) as a space-separated string. It supplies the
 // pre-defined default value used when oauth.require_scope is false and the client
 // omits scope from the authorize request.
-func (s *AuthorizeService) collectDefaultScopes(ctx context.Context, resourceURI string) string {
+func (s *AuthorizeService) collectDefaultScopes(ctx context.Context, resourceURI string) (string, error) {
 	resources, err := s.registry.List(ctx)
 	if err != nil {
-		s.logger.WarnContext(ctx, "default scope collection: resource list failed, substituting no scopes", "error", err)
-		return ""
+		// Returned rather than swallowed. The caller refuses the request when
+		// this comes back empty, and a store outage must not reach the client
+		// as "your scopes do not overlap" — a permanent-looking error it will
+		// not retry. validateScopes propagates the same failure, so both paths
+		// agree this one is the server's fault.
+		return "", fmt.Errorf("collect default scopes: %w", err)
 	}
 
 	seen := make(map[string]bool)
@@ -353,7 +462,7 @@ func (s *AuthorizeService) collectDefaultScopes(ctx context.Context, resourceURI
 		}
 	}
 
-	return strings.Join(scopes, " ")
+	return strings.Join(scopes, " "), nil
 }
 
 func (s *AuthorizeService) validateScopes(ctx context.Context, scopeStr, resourceURI string) error {
@@ -388,4 +497,41 @@ func (s *AuthorizeService) validateScopes(ctx context.Context, scopeStr, resourc
 		}
 	}
 	return nil
+}
+
+// maxNoCeilingClientsLogged bounds the set behind the deprecation warning.
+// Open dynamic registration means client_ids are attacker-supplied, so an
+// unbounded map would be a memory amplifier on the same unauthenticated path
+// the log rate had to be bounded on.
+//
+// The cost of the bound, which is worth stating rather than discovering: past
+// this many distinct clients the warning goes dark for every *new* one, so an
+// operator loses the signal exactly when they have the most clients left to
+// migrate. That is the right trade on an unauthenticated path — an operator
+// with over a thousand ceiling-less clients has had the message — but it means
+// the log is a sample, not a census. See the CHANGELOG note on not sizing a
+// migration by counting these lines.
+const maxNoCeilingClientsLogged = 1024
+
+// shouldLogNoCeiling reports whether the deprecation warning is still owed for
+// this client in this process, recording it when so.
+//
+// The size check happens before the insert, not after: checking afterwards
+// silences the log while still storing the entry, which bounds nothing and is
+// the amplifier this exists to avoid.
+func (s *AuthorizeService) shouldLogNoCeiling(clientID string) bool {
+	s.noCeilingMu.Lock()
+	defer s.noCeilingMu.Unlock()
+
+	if _, seen := s.noCeilingLogged[clientID]; seen {
+		return false
+	}
+	if len(s.noCeilingLogged) >= maxNoCeilingClientsLogged {
+		return false
+	}
+	if s.noCeilingLogged == nil {
+		s.noCeilingLogged = make(map[string]struct{})
+	}
+	s.noCeilingLogged[clientID] = struct{}{}
+	return true
 }

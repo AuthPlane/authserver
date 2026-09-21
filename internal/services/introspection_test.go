@@ -48,6 +48,14 @@ type introspectEnv struct {
 	// tests off those packages, and the allowlist is a one-way ratchet.
 	addClient   func(t *testing.T, id, secret string, status client.Status)
 	addResource func(t *testing.T, id, slug, uri string, runtimeClientIDs ...string)
+
+	// withIssuances wires the issuance log into the service; addIssuance
+	// and revokeIssuance write it. Closures for the same Gate 0 reason.
+	withIssuances  func()
+	addIssuance    func(t *testing.T, jti, userID, clientID, resourceID string)
+	revokeIssuance func(t *testing.T, jti string)
+	// withBrokenIssuances wires an issuance store that cannot answer.
+	withBrokenIssuances func()
 }
 
 func newIntrospectEnv(t *testing.T) *introspectEnv {
@@ -118,6 +126,16 @@ func newIntrospectEnv(t *testing.T) *introspectEnv {
 		addResource: func(t *testing.T, id, slug, uri string, runtimeClientIDs ...string) {
 			t.Helper()
 			testdata.CreateMintResource(t, stores, id, slug, uri, runtimeClientIDs...)
+		},
+		withIssuances:       func() { svc.WithIssuanceStore(stores.Issuance) },
+		withBrokenIssuances: func() { svc.WithIssuanceStore(testdata.BrokenIssuanceStore{Err: errors.New("issuances unavailable")}) },
+		addIssuance: func(t *testing.T, jti, userID, clientID, resourceID string) {
+			t.Helper()
+			testdata.CreateIssuance(t, stores, jti, userID, clientID, resourceID, clientID, "")
+		},
+		revokeIssuance: func(t *testing.T, jti string) {
+			t.Helper()
+			testdata.RevokeIssuance(t, stores, jti)
 		},
 	}
 }
@@ -1124,5 +1142,81 @@ func TestIntrospect_AuditedRefusals_AreCredentialed(t *testing.T) {
 				t.Errorf("detail = %q, want reason=%s", denied[0].Detail, tc.reason)
 			}
 		})
+	}
+}
+
+// A token whose issuance row is revoked — by the consent cascade or the
+// admin single-issuance revoke, both of which write only that row — is
+// inactive. Previously introspection never read the row and such a
+// token stayed active until exp.
+func TestIntrospect_RevokedIssuance_Inactive(t *testing.T) {
+	env := newIntrospectEnv(t)
+	ctx := context.Background()
+	env.withIssuances()
+	env.addResource(t, "res-1", "res-1", "https://resource.example.com")
+
+	claims := validClaims()
+	signed := signTestToken(t, env.kp, claims)
+	env.addIssuance(t, claims.JTI, "user-1", env.clientID, "res-1")
+
+	// Live row: active, as before.
+	resp, err := env.svc.IntrospectToken(ctx, input.IntrospectRequest{
+		Token: signed, ClientID: env.clientID, ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken: %v", err)
+	}
+	if !resp.Active {
+		t.Fatal("live issuance: expected active=true")
+	}
+
+	env.revokeIssuance(t, claims.JTI)
+	resp, err = env.svc.IntrospectToken(ctx, input.IntrospectRequest{
+		Token: signed, ClientID: env.clientID, ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken after revoke: %v", err)
+	}
+	if resp.Active {
+		t.Fatal("revoked issuance: expected active=false")
+	}
+	wantDeniedFor(t, env.audit, "issuance_revoked")
+}
+
+// A token with no issuance row is unaffected by the wiring: the legacy
+// checks decide, and a valid one stays active.
+func TestIntrospect_NoIssuanceRow_LegacyChecksDecide(t *testing.T) {
+	env := newIntrospectEnv(t)
+	env.withIssuances()
+
+	claims := validClaims()
+	resp, err := env.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+		Token: signTestToken(t, env.kp, claims), ClientID: env.clientID, ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken: %v", err)
+	}
+	if !resp.Active {
+		t.Fatal("no row: expected active=true")
+	}
+}
+
+// An issuance store that cannot be read answers inactive as a server
+// fault — not active, and not an audited refusal of the caller.
+func TestIntrospect_IssuanceLookupFails_InactiveServerFault(t *testing.T) {
+	env := newIntrospectEnv(t)
+	env.withBrokenIssuances()
+
+	resp, err := env.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+		Token: signTestToken(t, env.kp, validClaims()), ClientID: env.clientID, ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken: %v", err)
+	}
+	if resp.Active {
+		t.Fatal("an unreadable issuance log must not answer active")
+	}
+	if got := env.deniedEvents(); len(got) != 0 {
+		t.Errorf("a server fault is not a refusal of the caller; audited %+v", got)
 	}
 }

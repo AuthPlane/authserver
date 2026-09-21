@@ -65,7 +65,8 @@ func TestConnectionVend_ViaTokenExchange_HappyPath(t *testing.T) {
 	h.CreateUser("alice@example.com", "password123")
 
 	// 2. Create web-app as public client (auth code + PKCE, no secret needed).
-	webAppClientID := h.AdminCreatePublicClient("conntx webapp", []string{"authorization_code"}, "tools/echo", nil)
+	// Ceiling covers both the Mint scope and the upstream scope requested below.
+	webAppClientID := h.AdminCreatePublicClient("conntx webapp", []string{"authorization_code"}, "tools/echo repo", nil)
 
 	// 3. Create MCP server as confidential client (for token exchange with client_secret).
 	mcpServerClientID, mcpSecret := h.AdminCreateConfidentialClient("conntx mcp server", []string{"urn:ietf:params:oauth:grant-type:token-exchange"}, "tools/echo")
@@ -185,7 +186,7 @@ func TestConnectionVend_ViaTokenExchange_NotConnected(t *testing.T) {
 	h.RegisterScope(rs.URI, "tools/echo", "Echo tool")
 	h.CreateUser("bob@example.com", "password123")
 
-	webAppClientID := h.AdminCreatePublicClient("conntx-notcon webapp", []string{"authorization_code"}, "tools/echo", nil)
+	webAppClientID := h.AdminCreatePublicClient("conntx-notcon webapp", []string{"authorization_code"}, "tools/echo repo", nil)
 	mcpServerClientID, mcpSecret := h.AdminCreateConfidentialClient("conntx-notcon mcp", []string{"urn:ietf:params:oauth:grant-type:token-exchange"}, "tools/echo")
 
 	mcpClient := e2e.NewMCPClient(t, h, rs, webAppClientID, "http://localhost:9999/callback")

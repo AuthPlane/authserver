@@ -27,7 +27,7 @@ helm install authplane ./charts/authplane \
 
 ```bash
 helm install authplane oci://ghcr.io/authplane/charts/authplane \
-  --version 0.4.0 \
+  --version 0.4.1 \
   -f values-production.yaml
 ```
 

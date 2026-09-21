@@ -53,6 +53,14 @@ admin:
 
 oauth:
   require_scope: true
+  # Ceiling assigned to clients that register themselves through DCR — an MCP
+  # client pointed at this demo has no other way to get one, and an empty
+  # ceiling will be refused at /oauth/authorize from v0.3.0 — today such a
+  # client still works, bounded by the resource catalog. These are the calculator
+  # scopes mcp-demo-server-start.sh creates. The google-calendar scope is
+  # deliberately absent: that resource is a Broker, and its scope is obtained
+  # through token exchange rather than through this client's authorize.
+  default_client_scope: "tools/add tools/multiply tools/consent_demo"
 
 rate_limit:
   enabled: true

@@ -67,6 +67,7 @@ func SelfCheck(cfg Config) []FeatureCheck {
 		validateClientCredentials(cfg),
 		validateDPoP(cfg),
 		validateDCR(cfg),
+		validateDefaultClientScope(cfg),
 		validateResources(cfg),
 		validateXAA(cfg),
 	}
@@ -500,4 +501,83 @@ func FormatMisconfiguredReport(bad []FeatureCheck) string {
 	}
 	b.WriteString("set the missing keys and restart the server.")
 	return b.String()
+}
+
+// scopeTokenCharset is the RFC 6749 §3.3 scope-token production:
+// 1*( %x21 / %x23-5B / %x5D-7E ) — printable ASCII minus space, quote and
+// backslash.
+func validScopeToken(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	for _, r := range tok {
+		switch {
+		case r == 0x21:
+		case r >= 0x23 && r <= 0x5B:
+		case r >= 0x5D && r <= 0x7E:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateDefaultClientScope checks that oauth.default_client_scope parses into
+// usable scope tokens.
+//
+// Nothing else validates it: the field is optional, so Validate() lets any
+// string through, and the value is stamped onto clients verbatim. A malformed
+// value therefore fails silently and late — every client registered afterwards
+// is refused at /oauth/authorize, while the startup warning and the admin
+// notice stay quiet because they only fire when the value is *empty*.
+//
+// The failure this is really aimed at is a comma-separated list. It is the
+// natural guess for an env var, and OAuth scope is space-separated, so
+// "a,b" parses as the single token "a,b" and matches no catalog entry. A comma
+// is legal in a scope token per the charset above, which is exactly why the
+// charset check alone would not catch it.
+func validateDefaultClientScope(cfg Config) FeatureCheck {
+	const name = "oauth.default_client_scope"
+	value := cfg.OAuth.DefaultClientScope
+	if value == "" {
+		// Supported: clients are then created without a ceiling, which
+		// AuthorizeService leaves unenforced until v0.3.0. The startup warning
+		// covers this case.
+		return FeatureCheck{Name: name, Status: FeatureDisabled, Detail: "not set"}
+	}
+
+	for _, tok := range strings.Fields(value) {
+		// A comma is inside the charset checked below, so this is a judgement
+		// about intent rather than validity: OAuth scope is space-separated,
+		// and a comma is the near-universal way to get that wrong. Only a
+		// comma — a semicolon is legal, far less plausible as a mistyped
+		// separator, and refusing it would be this check inventing a rule.
+		if strings.Contains(tok, ",") {
+			return FeatureCheck{
+				Name:       name,
+				Status:     FeatureMisconfigured,
+				MissingKey: "oauth.default_client_scope",
+				Remediation: fmt.Sprintf("scope %q contains a comma: OAuth scope is "+
+					"space-separated (RFC 6749 3.3), so this parses as one token and will match "+
+					"no registered scope. Write them separated by spaces. A comma is a legal "+
+					"scope character, so if this one is deliberate the value cannot be "+
+					"expressed here — use the admin API to set that client's scope directly", tok),
+			}
+		}
+		if !validScopeToken(tok) {
+			return FeatureCheck{
+				Name:       name,
+				Status:     FeatureMisconfigured,
+				MissingKey: "oauth.default_client_scope",
+				Remediation: fmt.Sprintf("scope %q is not a valid scope token: RFC 6749 3.3 allows "+
+					"printable ASCII except space, double quote and backslash", tok),
+			}
+		}
+	}
+
+	return FeatureCheck{
+		Name:   name,
+		Status: FeatureEnabled,
+		Detail: fmt.Sprintf("%d scope(s)", len(strings.Fields(value))),
+	}
 }

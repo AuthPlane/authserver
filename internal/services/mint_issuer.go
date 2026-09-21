@@ -192,6 +192,9 @@ func (m *MintIssuer) Issue(ctx context.Context, req IssueRequest) (*IssueRespons
 			JTI:           jti,
 			DPoPJKT:       req.DPoPJKT,
 			AgentID:       agentIDOf(req.AgentIdentity),
+
+			ConsentClientID: req.ConsentClientID,
+			ParentJTI:       req.ParentJTI,
 		}
 		iss.SetAgentChain(agentChainOf(req.AgentIdentity))
 		if err := m.issuances.Insert(ctx, iss); err != nil {

@@ -905,3 +905,40 @@ func TestAuthorize_ResourceStoreError_MapsToServerError(t *testing.T) {
 		t.Fatalf("store failure must be a non-domain error (maps to server_error), got domain error: %v", err)
 	}
 }
+
+// Same failure on the other path: with scope absent, ADR-012 asks the registry
+// for the resource's catalog to propose a default. That call used to swallow a
+// store error and return no scopes, which now means "nothing this client can
+// be granted" and is refused as invalid_scope — telling the client its
+// configuration is permanently wrong when the truth is a transient outage on
+// the server. Both paths must agree the server is at fault.
+func TestAuthorize_ResourceStoreError_ScopeAbsent_MapsToServerError(t *testing.T) {
+	stores := testdata.SetupTestStores(t)
+	obs := testObs()
+	const uri = "https://mcp.example.com"
+	registry := services.NewResourceRegistry(resourceStoreListErrs{uri: uri}, stores.BrokerProvider, obs)
+	svc := services.NewAuthorizeService(
+		stores.Client, stores.Session, stores.ConsentGrant,
+		nil, registry,
+		// RequireScope false, so an absent scope reaches the ADR-012 default.
+		static.NewOAuthConfigProvider(output.OAuthConfig{RequireScope: false}),
+		obs,
+	)
+	c := createTestClient(t, &testdata.TestHelper{Stores: stores})
+
+	req := validAuthorizeRequest(c)
+	req.Resource = uri
+	req.Scope = ""
+
+	_, err := svc.StartAuthorization(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error when the resource store fails while defaulting the scope")
+	}
+	if errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("store failure must not surface as invalid_scope — the client would read "+
+			"a retryable outage as a permanent misconfiguration; got: %v", err)
+	}
+	if domain.IsError(err) {
+		t.Fatalf("store failure must be a non-domain error (maps to server_error), got domain error: %v", err)
+	}
+}

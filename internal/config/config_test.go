@@ -1759,3 +1759,35 @@ func TestLoadXAAFromEnv(t *testing.T) {
 		t.Errorf("max_assertion_age = %v, want 30s", cfg.XAA.MaxAssertionAge)
 	}
 }
+
+// A Helm or Docker deployment configures the server entirely through the
+// environment, and docs/reference/env-vars.md promises every YAML setting has
+// an AUTHPLANE_* equivalent. Without this binding such a deployment could not
+// set the ceiling at all, and every client registering through DCR or CIMD
+// would be left without one.
+func TestEnvOverrideDefaultClientScope(t *testing.T) {
+	t.Setenv("AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE", "tools/read tools/write")
+	cfg := DefaultConfig()
+	if err := loadFromEnv(cfg); err != nil {
+		t.Fatalf("loadFromEnv: %v", err)
+	}
+	if cfg.OAuth.DefaultClientScope != "tools/read tools/write" {
+		t.Errorf("DefaultClientScope = %q, want %q",
+			cfg.OAuth.DefaultClientScope, "tools/read tools/write")
+	}
+}
+
+// Unset must leave the YAML value alone rather than blanking it — otherwise
+// the env layer would silently strip a ceiling an operator configured in the
+// file, which is the one direction that fails open.
+func TestEnvDefaultClientScopeUnsetKeepsYAMLValue(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.OAuth.DefaultClientScope = "from-yaml"
+	if err := loadFromEnv(cfg); err != nil {
+		t.Fatalf("loadFromEnv: %v", err)
+	}
+	if cfg.OAuth.DefaultClientScope != "from-yaml" {
+		t.Errorf("DefaultClientScope = %q, want the YAML value to survive an unset env var",
+			cfg.OAuth.DefaultClientScope)
+	}
+}

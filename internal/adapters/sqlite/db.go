@@ -127,11 +127,14 @@ func (d *DB) Migrate(ctx context.Context) error {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	// Get current version.
-	var current int
-	if err := d.DB.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
-		return fmt.Errorf("get current version: %w", err)
+	// Every version already recorded, not just the highest. A migration is
+	// pending when it is embedded and not in this set, so a version added
+	// on a patch line after a higher one shipped on the next minor is still
+	// applied on upgrade, and a version the patch line already applied is
+	// not applied twice. MAX(version) could do neither.
+	applied, err := d.appliedMigrations(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Discover available migrations.
@@ -154,7 +157,7 @@ func (d *DB) Migrate(ctx context.Context) error {
 		if _, err := fmt.Sscanf(e.Name(), "%d_", &v); err != nil {
 			continue
 		}
-		if v > current {
+		if !applied[v] {
 			pending = append(pending, mig{version: v, name: e.Name()})
 		}
 	}
@@ -190,6 +193,28 @@ func (d *DB) Migrate(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// appliedMigrations returns the set of versions recorded in
+// schema_migrations.
+func (d *DB) appliedMigrations(ctx context.Context) (map[int]bool, error) {
+	rows, err := d.DB.QueryContext(ctx, `SELECT version FROM schema_migrations`)
+	if err != nil {
+		return nil, fmt.Errorf("list applied migrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	applied := make(map[int]bool)
+	for rows.Next() {
+		var v int
+		if scanErr := rows.Scan(&v); scanErr != nil {
+			return nil, fmt.Errorf("scan applied migration: %w", scanErr)
+		}
+		applied[v] = true
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("list applied migrations: %w", rowsErr)
+	}
+	return applied, nil
 }
 
 // NewStores returns all store implementations sharing this DB connection.

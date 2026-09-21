@@ -2135,3 +2135,251 @@ func TestAdmin_BrokerProviders_RejectsConfigDataNull(t *testing.T) {
 		t.Fatalf("status: got %d, want 400: %s", resp.StatusCode, string(b))
 	}
 }
+
+// --- scope / agent / agent_description must be readable on client reads ---
+
+// TestAdmin_UpdateClient_200_ReturnsScope: the PATCH that writes the ceiling
+// must answer with the ceiling it wrote.
+func TestAdmin_UpdateClient_200_ReturnsScope(t *testing.T) {
+	env := newAdminTestServer(t)
+
+	createBody := map[string]any{
+		"client_name":                "Scope Readback",
+		"grant_types":                []string{"client_credentials"},
+		"token_endpoint_auth_method": "client_secret_basic",
+	}
+	createResp := env.doRequest(t, "POST", "/admin/clients", createBody)
+	defer func() { _ = createResp.Body.Close() }()
+	var created map[string]any
+	_ = json.NewDecoder(createResp.Body).Decode(&created)
+	clientID, ok := created["client_id"].(string)
+	if !ok {
+		t.Fatalf("create did not return a client_id: %v", created)
+	}
+
+	resp := env.doRequest(t, "PATCH", "/admin/clients/"+clientID, map[string]any{
+		"scope": "mcp:read mcp:write",
+	})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	if result["scope"] != "mcp:read mcp:write" {
+		t.Errorf("scope: got %v, want %q", result["scope"], "mcp:read mcp:write")
+	}
+
+	// UpdateClient returns the struct it mutated in memory, so the PATCH body
+	// alone cannot tell a persisted write from a dropped one. Re-read.
+	if got := getClientScope(t, env, clientID); got != "mcp:read mcp:write" {
+		t.Errorf("scope after re-read: got %v, want %q", got, "mcp:read mcp:write")
+	}
+
+	// Clearing the ceiling is a deliberate operator action (scope is a
+	// *string in updateClientRequest: "" clears, omission leaves unchanged)
+	// and the readback must show the clear took effect.
+	clearResp := env.doRequest(t, "PATCH", "/admin/clients/"+clientID, map[string]any{
+		"scope": "",
+	})
+	defer func() { _ = clearResp.Body.Close() }()
+	if clearResp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", clearResp.StatusCode)
+	}
+
+	var cleared map[string]any
+	_ = json.NewDecoder(clearResp.Body).Decode(&cleared)
+	if scope, present := cleared["scope"]; !present || scope != "" {
+		t.Errorf("scope: got %v (present=%v), want empty string", scope, present)
+	}
+
+	// An empty readback is also what a never-persisted field looks like, so
+	// this assertion only means something because the re-read above saw the
+	// ceiling actually stored first.
+	if got := getClientScope(t, env, clientID); got != "" {
+		t.Errorf("scope after re-read: got %v, want empty string", got)
+	}
+}
+
+// getClientScope re-reads a client through GET /admin/clients/{id} and returns
+// its scope, so a test can assert on stored state rather than on the value the
+// service echoed back from memory.
+func getClientScope(t *testing.T, env *adminTestEnv, clientID string) any {
+	t.Helper()
+	resp := env.doRequest(t, "GET", "/admin/clients/"+clientID, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-read status: got %d, want 200", resp.StatusCode)
+	}
+	var stored map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&stored)
+	return stored["scope"]
+}
+
+// seedAgentClient stores a client carrying scope, agent, and agent_description fields
+// and returns it. Seeded directly because agent status cannot be set by PATCH.
+func seedAgentClient(t *testing.T, env *adminTestEnv, name string) *client.Client {
+	t.Helper()
+	now := time.Now().UTC()
+	c := &client.Client{
+		ID:                      crypto.GenerateClientID(),
+		Name:                    name,
+		RedirectURIs:            []string{},
+		GrantTypes:              []string{"client_credentials"},
+		ResponseTypes:           []string{},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		Status:                  client.StatusActive,
+		RegistrationSource:      client.SourceAdmin,
+		Scope:                   "mcp:read",
+		IsAgent:                 true,
+		AgentDescription:        "Reads project docs",
+		IssuedAt:                now,
+		UpdatedAt:               now,
+	}
+	if err := env.stores.Stores.Client.Create(context.Background(), c); err != nil {
+		t.Fatalf("seed client: %v", err)
+	}
+	return c
+}
+
+func assertAgentFields(t *testing.T, got map[string]any) {
+	t.Helper()
+	if got["scope"] != "mcp:read" {
+		t.Errorf("scope: got %v, want %q", got["scope"], "mcp:read")
+	}
+	if got["agent"] != true {
+		t.Errorf("agent: got %v, want true", got["agent"])
+	}
+	if got["agent_description"] != "Reads project docs" {
+		t.Errorf("agent_description: got %v, want %q", got["agent_description"], "Reads project docs")
+	}
+}
+
+func TestAdmin_GetClient_ReturnsScopeAndAgentFields(t *testing.T) {
+	env := newAdminTestServer(t)
+	c := seedAgentClient(t, env, "Agent Get Readback")
+
+	resp := env.doRequest(t, "GET", "/admin/clients/"+c.ID, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	assertAgentFields(t, result)
+}
+
+func TestAdmin_ListClients_ReturnsScopeAndAgentFields(t *testing.T) {
+	env := newAdminTestServer(t)
+	c := seedAgentClient(t, env, "Agent List Readback")
+
+	resp := env.doRequest(t, "GET", "/admin/clients", nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	// The list surface writes a bare JSON array (handlers.go:131).
+	var clients []map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&clients)
+	var found map[string]any
+	for _, cv := range clients {
+		if cv["id"] == c.ID {
+			found = cv
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("seeded client %s not present in list response", c.ID)
+	}
+	assertAgentFields(t, found)
+}
+
+// TestAdmin_ClientView_EmptyFieldsStillPresent pins the contract decision that
+// the three fields carry no omitempty: an operator auditing ceilings must be
+// able to tell "this client has none" from "this server does not report it".
+func TestAdmin_ClientView_EmptyFieldsStillPresent(t *testing.T) {
+	env := newAdminTestServer(t)
+
+	now := time.Now().UTC()
+	c := &client.Client{
+		ID:                      crypto.GenerateClientID(),
+		Name:                    "Plain Client",
+		RedirectURIs:            []string{"https://app.example.com/callback"},
+		GrantTypes:              []string{"authorization_code"},
+		ResponseTypes:           []string{"code"},
+		TokenEndpointAuthMethod: "none",
+		Status:                  client.StatusActive,
+		RegistrationSource:      client.SourceDCR,
+		IssuedAt:                now,
+		UpdatedAt:               now,
+	}
+	if err := env.stores.Stores.Client.Create(context.Background(), c); err != nil {
+		t.Fatalf("seed client: %v", err)
+	}
+
+	resp := env.doRequest(t, "GET", "/admin/clients/"+c.ID, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	for _, key := range []string{"scope", "agent", "agent_description"} {
+		if _, present := result[key]; !present {
+			t.Errorf("%q missing: the read view must emit it even when empty", key)
+		}
+	}
+	if result["scope"] != "" {
+		t.Errorf("scope: got %v, want empty string", result["scope"])
+	}
+	if result["agent"] != false {
+		t.Errorf("agent: got %v, want false", result["agent"])
+	}
+	if result["agent_description"] != "" {
+		t.Errorf("agent_description: got %v, want empty string", result["agent_description"])
+	}
+}
+
+// TestAdmin_ClientView_NeverExposesSecret guards the invariant that justifies
+// clientView existing at all: it is the sanitized view.
+func TestAdmin_ClientView_NeverExposesSecret(t *testing.T) {
+	env := newAdminTestServer(t)
+
+	createBody := map[string]any{
+		"client_name":                "Secret Holder",
+		"grant_types":                []string{"client_credentials"},
+		"token_endpoint_auth_method": "client_secret_basic",
+	}
+	createResp := env.doRequest(t, "POST", "/admin/clients", createBody)
+	defer func() { _ = createResp.Body.Close() }()
+	var created map[string]any
+	_ = json.NewDecoder(createResp.Body).Decode(&created)
+	clientID, ok := created["client_id"].(string)
+	if !ok {
+		t.Fatalf("create did not return a client_id: %v", created)
+	}
+
+	resp := env.doRequest(t, "GET", "/admin/clients/"+clientID, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	var result map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	// A positive marker first: without this, a regression to a 404/500 error
+	// body (which also lacks secret fields) would pass the checks below
+	// vacuously.
+	if result["id"] != clientID {
+		t.Fatalf("id: got %v, want %q — response is not the created client", result["id"], clientID)
+	}
+	for _, key := range []string{"client_secret", "secret_hash", "client_secret_hash"} {
+		if _, present := result[key]; present {
+			t.Errorf("%q must never appear in a read response", key)
+		}
+	}
+}

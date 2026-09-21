@@ -183,3 +183,53 @@ func TestAgentIdentity_ASMetadata_Supported(t *testing.T) {
 		t.Errorf("authplane_agent_identity_supported = %v, want true", metadata["authplane_agent_identity_supported"])
 	}
 }
+
+// TestAgentIdentity_AuthorizationCode_AgentID verifies that an agent client
+// receives agent_id on the authorization_code grant, and keeps it across a
+// refresh.
+//
+// This is the first hop of a user-consented agent flow — the primary way an
+// agent obtains a user token — and was for a time the one flow that could
+// not carry the claim: AgentIdentityService was never attached to
+// TokenService, so no client configuration could produce it.
+func TestAgentIdentity_AuthorizationCode_AgentID(t *testing.T) {
+	scopes := []string{"tools/echo"}
+	h, servers := e2e.SetupE2E(t, e2e.HarnessConfig{
+		EnableAdminAPI: true,
+	}, scopes)
+	rs := servers[0]
+	h.RegisterScope(rs.URI, "tools/echo", "Echo tool")
+
+	const email = "alice-authcode-agent@example.com"
+	const password = "pass123"
+	h.CreateUser(email, password)
+
+	// A public, agent-flagged client driving the auth-code grant itself.
+	agentID := h.RegisterPublicAgentClient(
+		[]string{"authorization_code", "refresh_token"},
+		"tools/echo",
+		"Auth-code agent for E2E",
+	)
+
+	// FullFlow drives login and consent itself, so no separate consent seeding.
+	agentClient := e2e.NewMCPClient(t, h, rs, agentID, "http://localhost:9999/callback")
+	tokens := agentClient.FullFlow(email, password, "tools/echo", false)
+
+	claims := parseJWTClaims(t, tokens.AccessToken)
+	if claims["agent_id"] != agentID {
+		t.Errorf("authorization_code JWT agent_id = %v, want %q", claims["agent_id"], agentID)
+	}
+	// A first-hop token has no RFC 8693 'act' chain, so no agent_chain.
+	if chain, ok := claims["agent_chain"]; ok {
+		t.Errorf("authorization_code JWT agent_chain = %v, want absent", chain)
+	}
+
+	if tokens.RefreshToken == "" {
+		t.Fatal("expected a refresh token")
+	}
+	refreshed := h.RefreshToken(tokens.RefreshToken, agentID)
+	refreshedClaims := parseJWTClaims(t, refreshed.AccessToken)
+	if refreshedClaims["agent_id"] != agentID {
+		t.Errorf("refreshed JWT agent_id = %v, want %q", refreshedClaims["agent_id"], agentID)
+	}
+}

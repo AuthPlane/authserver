@@ -27,7 +27,7 @@ The simplest production path: one `authserver` binary, one systemd unit, one rev
 # Release assets are versioned tarballs: authserver_<version>_<os>_<arch>.tar.gz
 # Latest version: https://github.com/authplane/authserver/releases/latest
 # Verify the download before installing: see verifying-releases.md
-VERSION=0.2.0
+VERSION=0.2.1
 curl -fsSL "https://github.com/authplane/authserver/releases/download/v${VERSION}/authserver_${VERSION}_linux_amd64.tar.gz" \
   | tar -xz -C /tmp authserver
 install -m 0755 /tmp/authserver /usr/local/bin/authserver
@@ -258,7 +258,7 @@ Migrations are idempotent — repeated runs no-op when the schema is current.
 ```bash
 systemctl stop authserver
 cp /usr/local/bin/authserver /usr/local/bin/authserver.bak
-VERSION=0.2.0  # https://github.com/authplane/authserver/releases/latest
+VERSION=0.2.1  # https://github.com/authplane/authserver/releases/latest
 curl -fsSL "https://github.com/authplane/authserver/releases/download/v${VERSION}/authserver_${VERSION}_linux_amd64.tar.gz" \
   | tar -xz -C /tmp authserver
 install -m 0755 /tmp/authserver /usr/local/bin/authserver

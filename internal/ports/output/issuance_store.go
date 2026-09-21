@@ -50,11 +50,20 @@ type IssuanceStore interface {
 	// and refresh-token theft detection.
 	Revoke(ctx context.Context, id string) (e error)
 
-	// RevokeFamily marks every active Mint issuance for the
-	// (subject_user_id, client_id, resource_id) tuple as revoked and
-	// returns the count of rows updated. Filtered to backend_kind =
-	// 'mint' — Broker issuances are not revocable by the AS. Used by
-	// the consent revocation cascade.
+	// RevokeFamily marks as revoked every live Mint issuance that exists
+	// because of the consent grant (subject_user_id, client_id,
+	// resource_id), and returns the count of rows updated. Used by the
+	// consent revocation cascade.
+	//
+	// The roots are the rows minted under that grant: subject and resource
+	// match, and consent_client_id is the grant's client — or, for rows
+	// written before consent_client_id existed, the acting client_id is,
+	// which is what this matched before. From the roots it follows
+	// parent_jti transitively, so a token exchanged from a root token, and
+	// one exchanged from that, are revoked with it. Already-revoked rows
+	// still count as roots for the walk but are not counted in the
+	// result. Filtered to backend_kind = 'mint' — Broker issuances are not
+	// revocable by the AS.
 	RevokeFamily(ctx context.Context, userID, clientID, resourceID string) (int, error)
 
 	// ListForUser returns issuances for the user issued at or after

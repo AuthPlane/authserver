@@ -81,7 +81,7 @@ func TestUnifiedAdminSurface_FullLifecycle(t *testing.T) {
 	// allowlist can reference the MCP id at create time. The
 	// ResourceAdminService validates allowed_client_ids against the
 	// client store.
-	webAppClientID := h.AdminCreatePublicClient("unified-admin webapp", []string{"authorization_code"}, "tools/echo", nil)
+	webAppClientID := h.AdminCreatePublicClient("unified-admin webapp", []string{"authorization_code"}, "tools/echo repo", nil)
 	// token.GrantTypeTokenExchange inlined as its RFC 8693 URN
 	// to drop the internal/domain/token import.
 	mcpServerClientID, mcpSecret := h.AdminCreateConfidentialClient("unified-admin mcp",

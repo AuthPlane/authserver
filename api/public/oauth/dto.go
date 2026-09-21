@@ -102,7 +102,12 @@ type registerResponse struct {
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
 	// ApplicationType is always concrete, resolved through the OIDC default, so
 	// a client that omitted it learns what it was defaulted to.
-	ApplicationType  string `json:"application_type"`
+	ApplicationType string `json:"application_type"`
+	// Scope is the ceiling the server assigned to this client from
+	// oauth.default_client_scope. RFC 7591 §3.2.1 returns registered metadata,
+	// and a client that cannot see its own ceiling cannot tell an
+	// out-of-ceiling request apart from a server fault.
+	Scope            string `json:"scope,omitempty"`
 	Agent            bool   `json:"agent,omitempty"`
 	AgentDescription string `json:"agent_description,omitempty"`
 }

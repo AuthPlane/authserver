@@ -56,6 +56,7 @@ type IntrospectionService struct {
 	audit          AuditRecorder
 	issuerProvider output.IssuerProvider
 	resources      ResourceRuntimeResolver // optional: enables the resource-server ownership branch
+	issuances      output.IssuanceStore    // optional: revocation written by the consent cascade and admin revoke
 	logger         *slog.Logger
 	tracer         trace.Tracer
 	metrics        *observability.Metrics
@@ -100,6 +101,19 @@ func NewIntrospectionService(
 // Set in cmd/authserver/serve.go and in the e2e harness.
 func (s *IntrospectionService) WithResourceRegistry(r ResourceRuntimeResolver) {
 	s.resources = r
+}
+
+// WithIssuanceStore attaches the issuance log so introspection honors a
+// revocation written there: the consent-revocation cascade and the admin
+// DELETE /admin/issuances/{id} both set issuances.revoked_at and nothing
+// else. Before this, a token those paths revoked stayed active until exp.
+//
+// A token with no issuance row is not affected — rows are written only
+// when the mint resolved a registered resource — so the legacy
+// machine_tokens and JTI-denylist checks below still decide for those.
+// Set in cmd/authserver/serve.go and in the e2e harness.
+func (s *IntrospectionService) WithIssuanceStore(store output.IssuanceStore) {
+	s.issuances = store
 }
 
 // IntrospectToken validates a token and returns its active status and claims.
@@ -168,6 +182,24 @@ func (s *IntrospectionService) IntrospectToken(ctx context.Context, req input.In
 			"reason", reason,
 		)
 		return s.denyInactive(ctx, start, caller.ID, reason, claims.JTI), nil
+	}
+
+	// 4a. The issuance log is authoritative for a token that has a row in
+	// it. This is the one place the consent-revocation cascade and the
+	// admin single-issuance revoke are enforced: both write
+	// issuances.revoked_at and nothing else. A lookup failure answers
+	// inactive as a server fault, like the JTI-denylist check below —
+	// "could not tell" must not read as "not revoked".
+	if s.issuances != nil && claims.JTI != "" {
+		iss, issErr := s.issuances.GetByJTI(ctx, claims.JTI)
+		if issErr != nil {
+			s.logger.WarnContext(ctx, "introspection: issuance lookup failed", "jti", claims.JTI, "error", issErr)
+			return s.inactiveServerFault(ctx, start), nil
+		}
+		if iss != nil && iss.IsRevoked() {
+			s.logger.InfoContext(ctx, "introspection: issuance revoked", "jti", claims.JTI, "client_id", claims.ClientID)
+			return s.denyInactive(ctx, start, caller.ID, "issuance_revoked", claims.JTI), nil
+		}
 	}
 
 	// 4. Determine if this is a machine token by checking the machine token store.

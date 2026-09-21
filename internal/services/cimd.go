@@ -28,6 +28,10 @@ type CIMDService struct {
 	// grantsProvider resolves the grant types the AS honors, per request.
 	// nil ⇒ no enforcement (tests). Optional, injected via WithCIMDEnabledGrants.
 	grantsProvider output.EnabledGrantsProvider
+	// oauthConfig supplies the scope ceiling to assign, since a CIMD document
+	// carries no scope. nil ⇒ no ceiling assigned (tests). Optional, injected
+	// via WithCIMDOAuthConfig.
+	oauthConfig output.OAuthConfigProvider
 	// cimdConfig is the per-request config seam and the single source of truth
 	// for the fetch knobs (RequireHTTPS/CacheTTL/FetchTimeout) and the Enabled
 	// gate, both consumed at the top of VerifyCIMD. Required (a constructor
@@ -49,6 +53,15 @@ type CIMDServiceOpt func(*CIMDService)
 // provider returns — same fail-loud guarantee AdminService and DCRService have.
 func WithCIMDEnabledGrants(p output.EnabledGrantsProvider) CIMDServiceOpt {
 	return func(s *CIMDService) { s.grantsProvider = p }
+}
+
+// WithCIMDOAuthConfig injects the per-request OAuth config provider.
+// CIMDService reads DefaultClientScope from it and stamps that ceiling on the
+// clients it auto-registers: a CIMD document carries no scope, and an unset
+// ceiling denies every scope on the machine grants, and will do so on
+// authorize too from v0.3.0.
+func WithCIMDOAuthConfig(p output.OAuthConfigProvider) CIMDServiceOpt {
+	return func(s *CIMDService) { s.oauthConfig = p }
 }
 
 // NewCIMDService creates a new CIMD service.
@@ -201,6 +214,44 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 		existing.ResponseTypes = doc.ResponseTypes
 		existing.TokenEndpointAuthMethod = doc.TokenEndpointAuthMethod
 		existing.UpdatedAt = now
+		// An empty ceiling is deliberately not filled in here: this branch is
+		// only reachable when two registrations race — an existing CIMD client
+		// is served straight from the store without re-verifying its document
+		// (see AuthorizeService.lookupClient), so there is no periodic refresh
+		// to hang a backfill off — and filling it would re-arm a client whose
+		// ceiling an operator emptied on purpose.
+		//
+		// A ceiling that exists is cleared when the document's grants no longer
+		// qualify. The client hosts that document, so it chooses when it
+		// changes: without this, publishing authorization_code to earn a
+		// ceiling and then adding client_credentials would leave a
+		// self-registered machine client holding scopes with no consent behind
+		// them — exactly what the create path refuses. Unreachable today for
+		// the same reason as above, but the guard belongs with the invariant,
+		// not with the path that currently happens to be the only one.
+		//
+		// Neither direction is free, which is worth spelling out because this
+		// is unreachable today and whoever makes it reachable will inherit
+		// these lines rather than re-derive them.
+		//
+		// On the authorization_code path an empty ceiling is unenforced until
+		// v0.3.0, so clearing widens: the client goes from bounded by its
+		// ceiling to bounded by the resource catalog.
+		//
+		// On the machine grants an empty ceiling is deny-all, so clearing
+		// revokes — including a ceiling an operator set by hand through
+		// PATCH /admin/clients/{client_id}, which this cannot distinguish from
+		// one stamped from the default. Token requests that worked start
+		// failing with invalid_scope.
+		//
+		// It is kept because the alternative — a self-registered machine client
+		// holding scopes its own document says it should never have had — is
+		// worse than either. A periodic CIMD refresh must not inherit this
+		// as-is: it needs to tell a stamped ceiling from an operator-set one
+		// first.
+		if !isDelegatedOnly(doc.GrantTypes) {
+			existing.Scope = ""
+		}
 
 		if err := s.clients.Update(ctx, existing); err != nil {
 			span.RecordError(err)
@@ -211,6 +262,29 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 		return existing, nil
 	}
 
+	// The ceiling to assign. A CIMD document carries no scope, so the server
+	// supplies one (RFC 7591 §2). Resolved here rather than above the update
+	// branch: that branch never uses it, and a config-provider failure should
+	// not fail an update that does not need the value.
+	//
+	// This is reachable in production: oauth.default_client_scope is a startup
+	// warning, not a boot requirement, so an operator can run with it unset and
+	// every client registered here then carries no ceiling.
+	//
+	// Delegated grants only, for the same reason as DCR: a self-registering
+	// client must never be handed scopes usable on a grant that has no user
+	// and no consent bounding the token.
+	var defaultScope string
+	if s.oauthConfig != nil && isDelegatedOnly(doc.GrantTypes) {
+		oauthCfg, cfgErr := s.oauthConfig.Config(ctx)
+		if cfgErr != nil {
+			span.RecordError(cfgErr)
+			span.SetStatus(codes.Error, cfgErr.Error())
+			return nil, fmt.Errorf("resolve oauth config: %w", cfgErr)
+		}
+		defaultScope = oauthCfg.DefaultClientScope
+	}
+
 	// Create new client from CIMD document.
 	c := &client.Client{
 		ID:                      clientID, // For CIMD, client_id IS the URL.
@@ -219,6 +293,7 @@ func (s *CIMDService) VerifyCIMD(ctx context.Context, clientID string) (*client.
 		GrantTypes:              doc.GrantTypes,
 		ResponseTypes:           doc.ResponseTypes,
 		TokenEndpointAuthMethod: doc.TokenEndpointAuthMethod,
+		Scope:                   defaultScope,
 		Status:                  client.StatusActive,
 		RegistrationSource:      client.SourceCIMD,
 		CIMDURL:                 clientID,

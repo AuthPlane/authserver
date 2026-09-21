@@ -105,9 +105,48 @@ if len(claims.AgentChain) > 1 && isSensitiveTool(toolName) {
     return errors.New("sub-delegated agents cannot call sensitive tools")
 }
 
-// Rate limit by the root agent
-rateLimitKey := claims.AgentChain[0]
+// Rate limit by the calling agent. Key on agent_id, not agent_chain[0]:
+// agent_id is always a registered client id, while a chain entry is not
+// always one (see the jwt-bearer caveat below).
+rateLimitKey := claims.AgentID
 ```
+
+### When each claim is present
+
+Both claims live on **Authplane-signed (Mint) tokens**. A token exchange
+against a [Broker](broker-vs-mint.md) resource vends the upstream
+provider's own credential, which cannot carry Authplane claims — there,
+`agent_id` and `agent_chain` are recorded on the issuance row for
+forensics rather than on the wire.
+
+On Mint tokens, `agent_id` is present whenever the issuing client is
+registered with `is_agent: true`, whatever grant produced it —
+`authorization_code`, `refresh_token`, `client_credentials`, token
+exchange or `jwt-bearer`.
+
+`agent_chain` is derived from the nested `act` claim, so it appears only on
+tokens that carry one. A first-hop token — the agent acting directly, whether
+on its own behalf (`client_credentials`) or with the user's consent
+(`authorization_code`, and its `refresh_token` rotations) — carries `agent_id`
+and **no** `agent_chain`. The chain appears from the first Mint-backed token
+exchange onward.
+
+> **Caveat — `jwt-bearer`.** That grant sets `act` on every token to record
+> which IdP asserted the user, not to record delegation. For an agent client,
+> that provenance `act` still flows into `agent_chain`, so the entry you get is
+> the **asserting IdP's issuer URL**, not a `client_id`. Do not treat a
+> `jwt-bearer` token's `agent_chain` as a chain of agents, and do not feed
+> `agent_chain[0]` from one into a client-id-keyed lookup.
+
+So resource servers should read `agent_id` to answer "is the caller an agent,
+and which one", and treat an empty `agent_chain` as "no sub-delegation", never
+as "not an agent". Length-check before indexing, and — given the `jwt-bearer`
+caveat — do not assume every entry is a registered client id.
+
+Note that the `authplane_agent_identity_supported` flag in the AS metadata
+is an **advertisement only**: it tells clients the extension exists, but
+turning it off does not stop the claims from being emitted. Agent clients
+get `agent_id` either way.
 
 ## Chain depth limits
 
@@ -162,26 +201,67 @@ cause).
 
 ## Agent identity is opt-in
 
-Not every client is an agent. When you create a client:
+Not every client is an agent. The `agent: true` flag is what causes
+[`agent_id`](glossary.md#glossary-agent-id) to appear in issued tokens;
+non-agent clients (regular services, web apps) have no `agent_id` claim at
+all.
+
+Two registration surfaces set it. Through the admin API:
 
 ```bash
 curl -X POST http://localhost:9001/admin/clients \
   -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
   -d '{
     "client_name": "research-agent",
+    "redirect_uris": ["https://agent.example.com/callback"],
     "agent": true,
     "agent_description": "Searches the web and summarizes content"
   }'
 ```
 
-The `agent: true` flag is what causes [`agent_id`](glossary.md#glossary-agent-id)
-to appear in issued tokens. Non-agent clients (regular services, web apps)
-have no `agent_id` claim at all — the presence of the claim is itself the
-signal.
+Or through [Dynamic Client Registration](glossary.md#glossary-dcr), which
+accepts the same two fields:
+
+```bash
+curl -X POST http://localhost:9000/oauth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "research-agent",
+    "redirect_uris": ["https://agent.example.com/callback"],
+    "agent": true,
+    "agent_description": "Searches the web and summarizes content"
+  }'
+```
 
 The `is_agent` flag is set at registration and is **not editable** via
 `PATCH /admin/clients/{id}` — to change it, delete and re-register the
 client.
+
+### What `agent_id` tells you — and what it doesn't
+
+`agent_id` identifies the caller. It does not attest that anyone vetted that
+caller.
+
+`POST /oauth/register` is unauthenticated in every mode in which it is
+enabled: `open` (the default) and `approved_redirects` both accept anonymous
+registrations, and `admin_only` disables the endpoint rather than
+authenticating it. A client registering there picks its own `agent: true`.
+On any deployment that allows DCR, `agent_id` is therefore **self-asserted** —
+a stable, unique handle for the caller, not evidence that a human approved it
+as an agent.
+
+Treat it the way you treat `client_id`: a stable identifier for attribution,
+rate limiting and audit. `agent_chain` and `actor_type` inherit the same
+property: every entry carries whatever assurance its own origin had — a client
+registration, or for `jwt-bearer` hops the asserting IdP (see the caveat
+above).
+
+If you need to know how a client was registered, the server records it: every
+client carries a `registration_source` of `admin`, `dcr` or `cimd`, returned on
+`GET /admin/clients` and filterable there with `?source=dcr`. That distinction
+lives on the server, not in the token — a resource server that needs it has to
+get it from its own provisioning records, not from the JWT.
 
 ## Backward compatibility
 

@@ -95,6 +95,17 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("dcr.mode must be open, approved_redirects, or admin_only, got %q", c.DCR.Mode))
 	}
 
+	// oauth.default_client_scope is deliberately NOT required here, even
+	// though self-registered clients have no other source of a ceiling.
+	// Leaving it empty keeps the pre-v0.2.0 behavior — those clients are
+	// bounded by the resource catalog rather than refused — so a config that
+	// booted before still boots and still works. Requiring it would also make
+	// DefaultConfig() invalid, and `authserver serve` with no --config builds
+	// on that, so it would stop booting. The gap surfaces as a startup
+	// deprecation warning instead (warnIfNoDefaultClientScope in
+	// cmd/authserver/serve.go) and as an admin-UI notice, until v0.3.0 turns
+	// an absent ceiling into a denial.
+
 	// Session secret — required when issuer is not localhost (production)
 	if c.Session.Secret == "" && !isLocalhostIssuer(c.Server.Issuer) {
 		errs = append(errs, errors.New("session.secret is required when server.issuer is not localhost"))

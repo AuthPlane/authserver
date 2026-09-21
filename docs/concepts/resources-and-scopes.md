@@ -128,7 +128,7 @@ falls out of that.
 
 That is the whole rule, and the client's `scope` field falls out of it. Scope is
 a **per-client ceiling**, not a scope source, and only the admin surface sets it
-(`POST /admin/clients`, `PATCH /admin/clients/{client_id}`). A user-delegated
+(`POST /admin/clients`, `PATCH /admin/clients/{id}`). A user-delegated
 client has nothing for registration to grant — its scopes arrive from the user
 at consent time — so a `scope` member sent to `POST /oauth/register` is
 discarded and the response carries none. Clients ingested through CIMD land the

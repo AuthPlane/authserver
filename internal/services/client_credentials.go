@@ -517,28 +517,52 @@ func (s *ClientCredentialsService) isKnownResource(ctx context.Context, resource
 // has to travel in the error itself. The caller is the authenticated client
 // asking about its own registration, so naming it discloses nothing.
 //
-// The advice differs by door, which is why this takes the client. An
-// admin-provisioned client is a machine client missing a grant, and PATCH
-// fixes it. A dynamically registered client is a user-delegated client that
-// should not be using this grant at all, so it is sent to the admin surface
-// instead of being patched around the rule.
+// Called from client_credentials and from authorize, so the advice stays
+// grant-neutral. jwt-bearer enforces the ceiling too but does not use this —
+// it returns a bare ErrInvalidScope with no description.
 //
-// Order matters: the ceiling check runs first, so a dynamically registered
-// client that an operator later granted scopes to is diagnosed as overreaching
-// rather than blamed on the door it came through.
+// The advice differs by door, which is why this takes the client. An
+// admin-provisioned client with no ceiling was never granted one, and PATCH
+// fixes it. A self-registered machine client is never assigned one at all, so
+// it is sent to the admin surface rather than patched around the rule. A
+// self-registered delegated client should have been stamped with
+// oauth.default_client_scope at registration, so an empty ceiling there means
+// it predates that or an operator cleared it.
+//
+// Order matters: the ceiling check runs first, so a client that an operator
+// later granted scopes to is diagnosed as overreaching rather than blamed on
+// the door it came through.
+//
+// Only the first two cases are reachable in v0.2.0. Authorize calls this only
+// when a ceiling is set (case 1), and client_credentials only for a client
+// holding that grant (case 2). The empty-ceiling branches below are the
+// v0.3.0 path, when an absent ceiling starts being refused; they are written
+// now so the diagnosis lands with the change rather than after it.
 func scopeDenialError(c *client.Client, clientScopes scope.Set) error {
 	// ASCII only: RFC 6749 5.2 defines error_description as NQSCHAR.
 	switch {
 	case !clientScopes.IsEmpty():
 		return fmt.Errorf("%w: the requested scope exceeds the client's registered scopes",
 			domain.ErrInvalidScope)
-	case c.RegistrationSource == client.SourceDCR || c.RegistrationSource == client.SourceCIMD:
+	case (c.RegistrationSource == client.SourceDCR || c.RegistrationSource == client.SourceCIMD) &&
+		!isDelegatedOnly(c.GrantTypes):
+		// A self-registered machine client is never assigned a ceiling, by
+		// design: those scopes would be reachable with no user and no consent.
+		// PATCH is deliberately not offered — the answer is a pre-registered
+		// client, not scopes bolted onto this one.
 		return fmt.Errorf("%w: this client was created through dynamic registration, which "+
 			"issues user-delegated clients only; machine-to-machine clients must be "+
 			"pre-registered through the admin API", domain.ErrInvalidScope)
+	case c.RegistrationSource == client.SourceDCR || c.RegistrationSource == client.SourceCIMD:
+		// Delegated client whose ceiling is empty: it was registered before
+		// ceilings were assigned, or an operator cleared it.
+		return fmt.Errorf("%w: this client has no registered scopes; dynamically "+
+			"registered clients are assigned oauth.default_client_scope when they "+
+			"register, so re-register the client or grant scopes with "+
+			"PATCH /admin/clients/{client_id}", domain.ErrInvalidScope)
 	default:
 		return fmt.Errorf("%w: the client has no registered scopes; grant them with "+
-			"PATCH /admin/clients/{client_id}", domain.ErrInvalidScope)
+			"PATCH /admin/clients/{id}", domain.ErrInvalidScope)
 	}
 }
 

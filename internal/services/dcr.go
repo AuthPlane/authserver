@@ -29,9 +29,13 @@ type DCRService struct {
 	// grantsProvider resolves the grant types the AS honors, per request.
 	// nil ⇒ no enforcement (tests). Optional, injected via WithDCREnabledGrants.
 	grantsProvider output.EnabledGrantsProvider
-	logger         *slog.Logger
-	tracer         trace.Tracer
-	metrics        *observability.Metrics
+	// oauthConfig supplies the scope ceiling to assign, since a DCR client
+	// cannot state its own. nil ⇒ no ceiling assigned (tests). Optional,
+	// injected via WithDCROAuthConfig.
+	oauthConfig output.OAuthConfigProvider
+	logger      *slog.Logger
+	tracer      trace.Tracer
+	metrics     *observability.Metrics
 }
 
 var _ input.DCRPort = (*DCRService)(nil)
@@ -45,6 +49,16 @@ type DCRServiceOpt func(*DCRService)
 // lands as status=active.
 func WithDCREnabledGrants(p output.EnabledGrantsProvider) DCRServiceOpt {
 	return func(s *DCRService) { s.grantsProvider = p }
+}
+
+// WithDCROAuthConfig injects the per-request OAuth config provider. DCRService
+// reads DefaultClientScope from it and stamps that ceiling on every client it
+// registers: the RFC 7591 §2 door creates clients that cannot state a ceiling
+// of their own. An unset ceiling denies every scope on the machine grants,
+// and will do so on authorize too from v0.3.0; until then authorize leaves
+// it unenforced, which is this change's compatibility posture.
+func WithDCROAuthConfig(p output.OAuthConfigProvider) DCRServiceOpt {
+	return func(s *DCRService) { s.oauthConfig = p }
 }
 
 // NewDCRService creates a new DCR service.
@@ -67,6 +81,44 @@ func NewDCRService(
 		opt(s)
 	}
 	return s
+}
+
+// machineGrants are the grants that issue tokens with no user in the loop, so
+// no consent bounds what the token carries. For those the client's registered
+// scope is the only ceiling, which is why a self-registered client must not be
+// handed one.
+var machineGrants = []string{
+	"client_credentials",
+	"urn:ietf:params:oauth:grant-type:jwt-bearer",
+	"urn:ietf:params:oauth:grant-type:token-exchange",
+}
+
+// delegatedGrants are the grants that keep a user in the loop, so consent
+// bounds what the token carries and a default ceiling is safe to hand out.
+//
+// isDelegatedOnly does not read this list — it asks whether any machine grant
+// is present, so an unrecognized grant counts as delegated. The list exists so
+// that the classification is written down for every grant rather than implied
+// by that default: TestEveryGrantTypeIsClassified fails when a grant added to
+// client.ValidGrantTypes appears in neither list. Whoever adds the grant then
+// decides which it is, instead of inheriting whichever answer the default
+// happens to give.
+var delegatedGrants = []string{
+	"authorization_code",
+	"refresh_token",
+}
+
+// isDelegatedOnly reports whether every grant the client asked for keeps a user
+// in the loop. A client mixing delegated and machine grants counts as machine:
+// Scope is one field, so a ceiling granted for the delegated path would be
+// equally usable on the machine path.
+func isDelegatedOnly(grantTypes []string) bool {
+	for _, mg := range machineGrants {
+		if hasGrantType(grantTypes, mg) {
+			return false
+		}
+	}
+	return true
 }
 
 // RegisterClient creates a new client via DCR (RFC 7591).
@@ -131,6 +183,32 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 		return nil, fmt.Errorf("%w: %v", domain.ErrInvalidClient, err)
 	}
 
+	// Assign the scope ceiling. A DCR client cannot state its own, and an
+	// empty ceiling is the state v0.3.0 will refuse at authorize time, so the
+	// server supplies one (RFC 7591 §2).
+	//
+	// This is reachable in production: oauth.default_client_scope is a startup
+	// warning, not a boot requirement, so an operator can run with it unset and
+	// every client registered here then carries no ceiling — unenforced on
+	// authorize until v0.3.0, deny-all on the machine grants today. Handle the
+	// empty case; do not assume it only happens under test.
+	//
+	// Delegated grants only. Scope is a single field shared by every grant, so
+	// stamping a default on a client that can reach a machine grant would hand
+	// out those scopes with no user and no consent — anyone who can reach open
+	// DCR could mint them. A machine client keeps an empty ceiling and stays
+	// fail-closed until an operator grants scopes through the admin surface.
+	var defaultScope string
+	if s.oauthConfig != nil && isDelegatedOnly(params.GrantTypes) {
+		oauthCfg, cfgErr := s.oauthConfig.Config(ctx)
+		if cfgErr != nil {
+			span.RecordError(cfgErr)
+			span.SetStatus(codes.Error, cfgErr.Error())
+			return nil, fmt.Errorf("resolve oauth config: %w", cfgErr)
+		}
+		defaultScope = oauthCfg.DefaultClientScope
+	}
+
 	// Generate client_id.
 	now := time.Now().UTC()
 	c := &client.Client{
@@ -140,6 +218,7 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 		GrantTypes:              params.GrantTypes,
 		ResponseTypes:           params.ResponseTypes,
 		TokenEndpointAuthMethod: params.TokenEndpointAuthMethod,
+		Scope:                   defaultScope,
 		Status:                  client.StatusActive,
 		RegistrationSource:      client.SourceDCR,
 		IsAgent:                 params.IsAgent,
@@ -200,6 +279,7 @@ func (s *DCRService) RegisterClient(ctx context.Context, req input.RegisterClien
 		// Resolved, not raw: the response always states a concrete value, so a
 		// client that omitted the field learns what it was defaulted to.
 		ApplicationType:  c.EffectiveApplicationType(),
+		Scope:            c.Scope,
 		Agent:            c.IsAgent,
 		AgentDescription: c.AgentDescription,
 	}

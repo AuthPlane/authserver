@@ -1,9 +1,9 @@
 # Roadmap
 
-What is coming to Authplane after `v0.2.0`, by how far along it is. No dates:
+What is coming to Authplane after `v0.2.1`, by how far along it is. No dates:
 an item moves up the stages as it gets closer to a release, and the
 [CHANGELOG](CHANGELOG.md) records what shipped. Reviewed at every release —
-last reviewed at `v0.2.0` (2026-09-16).
+last reviewed at `v0.2.1` (2026-09-21).
 
 ## Stages
 
@@ -20,7 +20,7 @@ last reviewed at `v0.2.0` (2026-09-16).
 | Item | What | Standards | Topic | Stage |
 |---|---|---|---|---|
 | [Rust SDK](#rust-sdk) | Sixth resource-server SDK: core crate plus adapters for the official MCP Rust SDK and FastMCP Rust | RFC 9728, RFC 9449, RFC 8693, RFC 7662 | SDKs | **Ready to ship** |
-| [CIBA + Rich Authorization Requests](#ciba--rich-authorization-requests) | An agent asks a person for exactly the access it needs; the person can narrow it at approval | RFC 9396, OpenID CIBA Core 1.0 | Human-in-the-loop for agents | **Implementing** |
+| [CIBA + Rich Authorization Requests](#ciba--rich-authorization-requests) | An agent asks a person for exactly the access it needs; the person can narrow it at approval | RFC 9396, OpenID CIBA Core 1.0 | Human-in-the-loop for agents | **Ready to ship** |
 | [Enterprise features](#enterprise-features) | General enterprise functions requested by our users | — | Enterprise | **Implementing** |
 | [FAPI 2.0 Security Profile](#fapi-20-security-profile) | PAR, `private_key_jwt`, a per-client security profile; certification as the target | FAPI 2.0, RFC 9126, RFC 7523 §2.2 | Security profiles | **Designing** |
 | [Admin identities and an MCP admin surface](#admin-identities-and-an-mcp-admin-surface) | Real admin identities with capabilities, exposed over REST, CLI and an embedded MCP server | — | Administration | **Researching** |
@@ -37,8 +37,6 @@ verification, OAuth client). Three crates: `authplane-sdk` (core),
 `authplane-mcp` (adapter for the official MCP Rust SDK, `rmcp`) and
 `authplane-fastmcp` (adapter for FastMCP Rust). Conformance-catalog tests
 pass; release tooling is in place.
-
-## Implementing
 
 ### CIBA + Rich Authorization Requests
 
@@ -59,6 +57,8 @@ needs, and let the person narrow it before saying yes:
 The part no other authorization server does: the approver can **narrow the
 request at approval time** — grant less than was asked — and the token
 carries only what was granted.
+
+## Implementing
 
 ### Enterprise features
 

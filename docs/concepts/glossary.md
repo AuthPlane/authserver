@@ -31,25 +31,37 @@ authorization decisions (RFC 8693 §4.1 ¶6).
 A non-human caller — typically an LLM or autonomous program — that calls your
 MCP server. In authserver, an "agent client" is a registered OAuth client with
 `is_agent: true`. Agent clients get an `agent_id` claim stamped into their
-tokens, distinguishing them from generic services.
+tokens, distinguishing them from generic services. The flag is chosen at
+registration, including by clients registering themselves through
+[DCR](#glossary-dcr).
 
 **See also:** [Delegation and agent chains](delegation-and-agent-chains.md).
 
 ### glossary-agent-chain
 
-The ordered, flat list of agent client IDs that participated in a multi-hop
+The ordered, flat list of the actors that participated in a multi-hop
 workflow. First entry is the originator, last entry is the current actor.
 Stamped into the token as the `agent_chain` claim. Capped at 8 entries and
-additive — earlier entries cannot be edited by later hops.
+additive — earlier entries cannot be edited by later hops. Entries carry no
+more assurance than an [`agent_id`](#glossary-agent-id) does: they identify,
+they do not vouch. Do not assume every entry is an agent's client id:
+non-agent (service) hops appear in the chain too, and under the `jwt-bearer`
+grant an entry can be the asserting IdP's issuer URL rather than a client id
+— see the caveat in [Delegation and agent chains](delegation-and-agent-chains.md).
 
 **See also:** [Delegation and agent chains](delegation-and-agent-chains.md).
 
 ### glossary-agent-id
 
 The client ID of the agent making the current request, stamped into the token
-as the `agent_id` claim. Set server-side based on the client's `is_agent` flag
-— a client cannot inject its own `agent_id`. Non-agent clients have no
-`agent_id` claim at all.
+as the `agent_id` claim. Non-agent clients have no `agent_id` claim at all.
+
+The value is set server-side from the client's registered `is_agent` flag, so a
+client cannot put an arbitrary `agent_id` into its own token. It can, however,
+set that flag when it registers — [DCR](#glossary-dcr) accepts `agent: true`
+from an unauthenticated caller. `agent_id` identifies the caller; it does not
+attest that anyone vetted it. Use it for attribution, rate-limiting and audit,
+not as an authorization signal.
 
 **See also:** [Delegation and agent chains](delegation-and-agent-chains.md).
 
@@ -123,9 +135,11 @@ client which bound failed.
 
 Dynamic Client Registration (RFC 7591). The flow where a client `POST`s to
 `/oauth/register` with its metadata and gets back a `client_id` (and, for
-confidential clients, a `client_secret`). authserver supports `admin_only`,
-`approved_redirects`, and `open` DCR modes — defaulting to `admin_only` for
-strict deployments.
+confidential clients, a `client_secret`). authserver supports `open`,
+`approved_redirects` and `admin_only` DCR modes, defaulting to `open`. The
+endpoint is unauthenticated in the first two; `admin_only` disables it rather
+than authenticating it. Registration metadata is therefore self-asserted —
+including `agent: true`, see [`agent_id`](#glossary-agent-id).
 
 **See also:** [Architecture](architecture.md).
 
