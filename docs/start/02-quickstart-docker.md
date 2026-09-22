@@ -65,7 +65,9 @@ dcr:
 admin:
   enabled: true
   address: ":9001"
-  api_key: "${AUTHPLANE_ADMIN_API_KEY}"
+  # The key is passed as AUTHPLANE_ADMIN_API_KEY in `docker run` below. The
+  # file is read as-is: a "${VAR}" written here is NOT substituted and would
+  # become the literal key.
 
 # Every grant is on by default. Listed here so the choice is visible; set one
 # to false to turn it off. (See docs/concepts/resources-and-scopes.md for
@@ -91,12 +93,19 @@ the admin path is what the docs walk through.
 
 ```bash
 docker run -d --name authserver \
+  -e AUTHPLANE_ADMIN_API_KEY \
   -v $(pwd)/config.yaml:/config.yaml:ro \
   -v authserver-data:/data \
   -p 9000:9000 \
   -p 9001:9001 \
   authplane/authserver:latest serve --config /config.yaml
 ```
+
+> **If you followed an earlier version of this page** that put
+> `api_key: "${AUTHPLANE_ADMIN_API_KEY}"` in `config.yaml`: the server used
+> that string literally as the admin key, so anyone reading this page knew
+> it. Remove the line, pass the key with `-e` as above, and generate a new
+> one.
 
 ## 4. Create an admin user
 
