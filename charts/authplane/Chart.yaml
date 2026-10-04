@@ -2,8 +2,8 @@ apiVersion: v2
 name: authplane
 description: OAuth 2.1 Authorization Server for the Model Context Protocol (MCP)
 type: application
-version: 0.4.1
-appVersion: "0.2.1"
+version: 0.4.2
+appVersion: "0.2.2"
 kubeVersion: ">=1.26.0-0"
 home: https://github.com/authplane/authserver
 icon: https://raw.githubusercontent.com/authplane/authserver/main/web/admin/public/favicon.svg
@@ -49,9 +49,11 @@ annotations:
       description: "config.cimd.allow_private_addresses (default false)"
     - kind: changed
       description: "appVersion bumped to 0.2.1 (consent revocation reaches exchanged tokens; scope ceiling enforced on authorization_code and refresh_token); config.oauth.default_client_scope added"
+    - kind: changed
+      description: "appVersion bumped to 0.2.2 (security fixes in token exchange, client_credentials, jwt-bearer and refresh; migrations 014-016 run on upgrade; fronting links require the gateway to be declared, see the CHANGELOG upgrade notes)"
   artifacthub.io/images: |
     - name: authplane
-      image: authplane/authserver:0.2.1
+      image: authplane/authserver:0.2.2
   artifacthub.io/license: AGPL-3.0-or-later
 dependencies:
   - name: postgresql

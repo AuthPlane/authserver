@@ -32,7 +32,7 @@ import (
 // : aud=rest-api URI, sub=user, scope="AA BB",
 //
 //	   client_id=mcp-gw (the source slug — NOT the agent),
-//	   act.sub=mcp-gw, act.act.sub=<agent client_id>.
+//	   act.sub=mcp-gw, act.act.sub=<subject token's client_id>.
 //	5. Audit row carries chain_kind=fronted and via_link=mcp-gw->rest-api
 //	   (ASCII arrow, NOT unicode arrow).
 //	6. Negative — same exchange WITHOUT the link -> 400 invalid_scope.
@@ -205,14 +205,29 @@ func TestGatewayFanout_MintToMint(t *testing.T) {
 	if innerAct == nil {
 		t.Fatal("act.act missing — agent should be at depth 2 under Option β")
 	}
-	if got, _ := innerAct["sub"].(string); got != agentClient {
-		t.Errorf("act.act.sub = %q, want %q (the agent at depth 2)", got, agentClient)
+	// Depth 2 is the subject token's client — the client the user
+	// authorized at mcp-gw (gwClient). The exchanger (agentClient) is a
+	// different client, so the fanout fallback (subject client_id == source
+	// slug) does not apply; the exchanger is named by the audit row below.
+	if got, _ := innerAct["sub"].(string); got != gwClient {
+		t.Errorf("act.act.sub = %q, want %q (the subject token's client at depth 2)", got, gwClient)
 	}
 
-	// --- 3. Audit row carries chain_kind + via_link (ASCII arrow). ---
+	// --- 3. Audit row carries chain_kind + via_link (ASCII arrow) and
+	// names the exchanger in its client_id column. ---
 	wantViaLink := gwSlug + "->" + apiSlug
 	if !auditDetailContainsAll(t, h, "token.exchanged", "chain_kind=fronted", "via_link="+wantViaLink) {
 		t.Errorf("expected an audit row with chain_kind=fronted and via_link=%s", wantViaLink)
+	}
+	exchangerRow := false
+	for _, row := range topoAudit(t, h, "token.exchanged") {
+		if row.ClientID == agentClient && strings.Contains(row.Detail, "via_link="+wantViaLink) &&
+			strings.Contains(row.Detail, "subject_client="+gwClient) {
+			exchangerRow = true
+		}
+	}
+	if !exchangerRow {
+		t.Errorf("no token.exchanged row with client_id=%s (the exchanger) and subject_client=%s", agentClient, gwClient)
 	}
 
 	// --- 4. Negative path #1: NO link -> invalid_scope. ---
@@ -281,6 +296,44 @@ func TestGatewayFanout_MintToMint(t *testing.T) {
 	}
 	if deniedMissingSrc.Error == "consent_required" {
 		t.Error("fronted path leaked consent_required on missing source scope — the dispatchMint regression guard failed")
+	}
+
+	// --- 6. Omitted scope. RFC 8693 lets the gateway leave scope out; the
+	// link is then the only authorization, so the AS must derive the target
+	// scopes from the subject's source scopes. The narrow token holds only A,
+	// so it gets AA — never BB, and never a scope-less token.
+	omitted := h.TokenExchangeWithResource(
+		agentClient, agentSecret,
+		narrowTokens.AccessToken,
+		"urn:ietf:params:oauth:token-type:access_token",
+		"",
+		apiSlug,
+	)
+	if omitted.AccessToken == "" {
+		t.Fatal("omitted-scope exchange for a covered subject returned no token")
+	}
+	if got := stringClaim(parseJWTClaims(t, omitted.AccessToken), "scope"); got != "AA" {
+		t.Errorf("omitted-scope exchange: token scope = %q, want %q (derived from subject scope A)", got, "AA")
+	}
+
+	// --- 7. Omitted scope, subject reaches nothing through the link. With
+	// the link narrowed to B -> BB, the A-only token maps to no target
+	// scope and must be refused rather than issued a scope-less token.
+	h.AdminDeleteFrontingLink(gwSlug, apiSlug)
+	h.AdminCreateFrontingLink(e2e.CreateFrontingLinkSpec{
+		Source:   gwSlug,
+		Target:   apiSlug,
+		ScopeMap: map[string][]string{"B": {"BB"}},
+	})
+	deniedOmitted := h.TokenExchangeWithResourceExpectError(
+		agentClient, agentSecret,
+		narrowTokens.AccessToken,
+		"urn:ietf:params:oauth:token-type:access_token",
+		"",
+		apiSlug,
+	)
+	if deniedOmitted.Error != "invalid_scope" {
+		t.Errorf("omitted-scope exchange with no mapped source scope: error = %q, want invalid_scope", deniedOmitted.Error)
 	}
 }
 

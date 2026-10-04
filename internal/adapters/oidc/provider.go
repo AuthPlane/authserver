@@ -250,14 +250,8 @@ func (p *Provider) ExchangeCode(ctx context.Context, code, nonce, codeVerifier s
 		return nil, fmt.Errorf("ID token verification: %w", err)
 	}
 
-	span.SetAttributes(
-		attribute.String("oidc.subject", result.Subject),
-		attribute.String("oidc.email", result.Email),
-	)
-	p.logger.InfoContext(ctx, "OIDC code exchange succeeded",
-		"subject", result.Subject,
-		"email", result.Email,
-	)
+	span.SetAttributes(attribute.String("oidc.subject", result.Subject))
+	p.logger.InfoContext(ctx, "OIDC code exchange succeeded", "subject", result.Subject)
 	return result, nil
 }
 

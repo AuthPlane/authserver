@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -103,6 +105,15 @@ func Load(path string) (*Config, error) {
 
 	normalizeDeprecated(cfg)
 
+	// The file is read as-is: ${VAR} is not substituted. A value still in
+	// that shape once environment overrides are applied would be used
+	// literally — as a signing key, an admin API key, a DSN password — so
+	// refuse it rather than run with a secret that is printed in a doc. A
+	// placeholder the matching AUTHPLANE_* variable replaces is never used.
+	if err := rejectUnexpandedPlaceholders(cfg); err != nil {
+		return nil, err
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -129,6 +140,68 @@ func rejectLegacyYAMLKeys(data []byte) error {
 		}
 	}
 	return nil
+}
+
+// placeholderPattern matches a shell-style ${VAR}, ${VAR:-default} or
+// ${VAR:?msg} anywhere in a string value.
+var placeholderPattern = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*(?::[^}]*)?\}`)
+
+// rejectUnexpandedPlaceholders walks every string value in the raw YAML
+// and refuses the first one that still carries a ${VAR} placeholder. The
+// loader never substitutes environment variables into the file; the
+// supported way to keep a value out of the file is the AUTHPLANE_*
+// environment variable for that key (docs/reference/configuration.md).
+func rejectUnexpandedPlaceholders(cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("config: inspect resolved values: %w", err)
+	}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("config: inspect resolved values: %w", err)
+	}
+	if path, val := findPlaceholder("", raw); path != "" {
+		return fmt.Errorf(
+			"config: %s is %q — the config file is read as-is and ${VAR} is not substituted, and no environment variable overrides it, "+
+				"so the value would be used literally; set the AUTHPLANE_* environment variable for this key or remove the placeholder (see docs/reference/env-vars.md)",
+			path, val,
+		)
+	}
+	return nil
+}
+
+// findPlaceholder returns the dotted path and value of the first string
+// under v that contains a placeholder, or "" when there is none. Maps are
+// walked in sorted key order so the error is deterministic.
+func findPlaceholder(prefix string, v interface{}) (string, string) {
+	switch t := v.(type) {
+	case string:
+		if placeholderPattern.MatchString(t) {
+			return prefix, placeholderPattern.FindString(t)
+		}
+	case map[string]interface{}:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			p := k
+			if prefix != "" {
+				p = prefix + "." + k
+			}
+			if path, val := findPlaceholder(p, t[k]); path != "" {
+				return path, val
+			}
+		}
+	case []interface{}:
+		for i, item := range t {
+			if path, val := findPlaceholder(fmt.Sprintf("%s[%d]", prefix, i), item); path != "" {
+				return path, val
+			}
+		}
+	}
+	return "", ""
 }
 
 // hasYAMLKey reports whether a `.`-delimited path is present in the parsed

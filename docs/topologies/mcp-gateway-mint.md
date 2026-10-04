@@ -60,7 +60,7 @@ sequenceDiagram
     participant API as Hidden REST API &#40;rest-api&#41;
 
     Ag->>GW: call with token bound to mcp-gw<br/>X-Requested-Scope: A
-    GW->>AS: POST /oauth/token (RFC 8693)<br/>Basic auth (gateway creds)<br/>subject_token = agent bearer<br/>resource = rest-api<br/>scope = A
+    GW->>AS: POST /oauth/token (RFC 8693)<br/>Basic auth (gateway creds)<br/>subject_token = agent bearer<br/>resource = rest-api<br/>scope = AA (target-side name; omit to derive from the agent's scopes)
     Note over AS: lookup fronting_links<br/>(mcp-gw → rest-api)<br/>scope_map: A → AA<br/>Option β substitutes slug into client_id
     AS-->>GW: token bound to rest-api<br/>client_id=mcp-gw<br/>act.sub=mcp-gw<br/>act.act.sub=[agent]<br/>scope=AA
     GW->>API: call with downstream token
@@ -86,7 +86,11 @@ sequenceDiagram
 ```
 
 The `act.act` chain anchors audit back to the agent even though the
-gateway authenticated to `/oauth/token` as itself.
+gateway authenticated to `/oauth/token` as itself. `<original agent>` is
+the `client_id` of the agent's bearer (the subject token). If that
+bearer's `client_id` is the source slug itself, the gateway's own
+`client_id` is used instead. If the bearer already carries an `act`
+chain, that chain becomes `act.act` unchanged.
 
 ## When to use
 
@@ -107,13 +111,24 @@ gateway authenticated to `/oauth/token` as itself.
 
 ## How to configure
 
-Three operations: (1) register both Resources (Mint); (2) create the
+Four operations: (1) register both Resources (Mint); (2) create the
 fronting link; (3) register the gateway as a confidential client with
-the `client_credentials` and token-exchange grants.
+the `client_credentials` and token-exchange grants; (4) declare that
+client as the gateway — list it in `mcp-gw`'s `policy.runtime.client_ids`.
+
+Step 4 is what restricts the fronting link to the gateway. The link
+stands in for the user's consent on `rest-api`, so the authorization
+server refuses an exchange through it from any other client with
+`access_denied`, even one that holds the token-exchange grant.
 
 The `scope_map` is the source-to-target translation: an agent
 presenting an `mcp-gw` token with scope `A` may obtain a downstream
 `rest-api` token carrying scope `AA`.
+
+The gateway names scopes in the **target's** vocabulary (`scope=AA`); a
+source-side name such as `A` is refused with `invalid_scope`, because
+`rest-api` declares no scope `A`. Omitting `scope` asks the server to
+derive it: every target scope the agent's scopes reach through the map.
 
 ### Via Admin UI (`http://localhost:9001`)
 
@@ -127,6 +142,9 @@ presenting an `mcp-gw` token with scope `A` may obtain a downstream
    types `client_credentials,urn:ietf:params:oauth:grant-type:token-exchange`,
    auth method `client_secret_basic`, scope `A B C`. Save the
    `client_id` + `client_secret` for the gateway config.
+5. Open **Resources** → `mcp-gw` → **Runtime clients (act AS this
+   resource)**. Add the gateway's `client_id` from step 4. Only a client
+   listed here can drive an exchange through the fronting link.
 
 ### Via CLI
 
@@ -158,6 +176,11 @@ authserver admin client create \
   --grant-types=client_credentials,urn:ietf:params:oauth:grant-type:token-exchange \
   --auth-method=client_secret_basic \
   --scope="A B C"
+
+# 4. Declare it as the gateway (use the client_id printed by step 3)
+authserver admin resource runtime-client add \
+  --slug=mcp-gw \
+  --client-id=<gateway-client-id>
 ```
 
 ### Via REST API
@@ -192,6 +215,11 @@ curl -X POST "$ADMIN/admin/clients" \
        "grant_types":["client_credentials","urn:ietf:params:oauth:grant-type:token-exchange"],
        "token_endpoint_auth_method":"client_secret_basic",
        "scope":"A B C"}'
+
+# 4. Declare it as the gateway (client_id from the step 3 response)
+curl -X POST "$ADMIN/admin/resources/mcp-gw/policy/runtime/client-ids" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"client_id":"<gateway-client-id>"}'
 ```
 
 ### Run the gateway
@@ -214,7 +242,8 @@ these AS-side steps:
 | Resolve `subject_token` | Decodes the agent's bearer; pulls out `aud` (= `mcp-gw` URI) and `sub` (= agent identity). |
 | Per-MCP consent gate | Looks up `consent_grants(user_id, client_id=agent, resource_id=mcp-gw)`. Required — the agent must have user consent at the *source* MCP. |
 | Fronting-link gate | Looks up `fronting_links(source_slug=mcp-gw, target_slug=rest-api)`. Hit → fronted path. Miss → falls back to the cross-MCP consent path (which would also require `consent_grants` for `rest-api` and is **not** what this topology configures). |
-| Scope translation | Applies `fronting_links.scope_map`: `A → AA`. |
+| Gateway check | The caller must be listed in `mcp-gw`'s `policy.runtime.client_ids` (or in `rest-api`'s `policy.exchange.allowed_client_ids`). Otherwise `access_denied`, audit `reason=fronting_caller_not_authorized`. |
+| Scope translation | Applies `fronting_links.scope_map`: `A → AA`. When the request omits `scope`, the target scopes are derived from the subject token's scopes through the map; none mapped → `invalid_scope`. |
 | Option β substitution | Sets `client_id = source.slug` (= `"mcp-gw"`) on the issued JWT — not the gateway's auto-generated OAuth `client_id`. Builds the `act.sub = mcp-gw, act.act.sub = <agent>` chain. |
 | Issue + audit | Inserts `issuances(subject_user_id, client_id, resource_id=rest-api, scopes, agent_id, agent_chain)`. `audit_events` action `token.exchanged`; `detail` carries `type=mint_dispatch chain_kind=fronted via_link=mcp-gw->rest-api` (mint dispatch is identified by `type=mint_dispatch` — the emit does not carry a `target_kind=` field). |
 
@@ -232,16 +261,20 @@ equals client_id" relationship to use a fronting link** — Option β
 substitutes the slug at dispatch time regardless of the gateway's
 OAuth credentials.
 
-### When you also need `policy.runtime.client_ids`
+### Who may use the fronting link
 
-`runtime.client_ids` is **only** required when the gateway dispatches
-to a *Broker* Resource on a path that is **not** covered by a fronting
-link — the broker agent-attestation gate. For Mint→Mint dispatches
-like this topology, the runtime agent-attestation gate does not run.
+Only the gateway. The link replaces the user's consent on `rest-api`,
+so an exchange through it is accepted only from a client listed in
+the source's `policy.runtime.client_ids` (step 4 above) or in the
+target's `policy.exchange.allowed_client_ids`. Any other caller —
+including a client registered through open dynamic registration with
+the token-exchange grant — gets `access_denied`, and the audit log
+records `token.exchange_denied` with `reason=fronting_caller_not_authorized`.
 
-If the same gateway also dispatches directly to a Broker Resource
-without a fronting link, you do need `runtime.client_ids` configured
-for *that* other path. See
+Prefer `runtime.client_ids` on the source: it says "this client is the
+gateway" once, for every link the gateway fronts. Use the target's
+allowlist only when a second, non-gateway client must reach one
+specific target. See
 [runtime-client-binding.md](../guides/integrate/runtime-client-binding.md).
 
 ## Verify it
@@ -261,6 +294,10 @@ sqlite3 data/authserver.db \
 `detail` carries `type=mint_dispatch chain_kind=fronted
 via_link=mcp-gw->rest-api`. Mint dispatch does not include a
 `target_kind=` field — `type=mint_dispatch` alone identifies the path.
+The row's `client_id` column and `actor_client=` name the gateway's
+OAuth `client_id` (the client that called `/oauth/token`);
+`subject_client=` names the agent — the same client the token carries
+at `act.act.sub`.
 
 ## See also
 

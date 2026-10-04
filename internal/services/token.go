@@ -390,12 +390,21 @@ func (s *TokenService) exchangeCode(ctx context.Context, req input.ExchangeCodeR
 		AuthSessionID: sess.ID,
 		CreatedAt:     now,
 	}
+	// The refresh token is issued only to a client registered for the
+	// refresh_token grant (RFC 7591 §2: grant_types lists the grants the
+	// client may use at the token endpoint). The family is created either
+	// way: it is what consent revocation and code-reuse detection reach the
+	// access token through.
+	issueRefresh := hasGrantType(authedClient.GrantTypes, "refresh_token")
 	var refreshPlain string
 	createFamilyAndRefresh := func(txCtx context.Context) error {
 		if createErr := s.tokens.CreateFamily(txCtx, family); createErr != nil {
 			return fmt.Errorf("create token family: %w", createErr)
 		}
 		s.trackJTI(txCtx, jti, familyID, expiry)
+		if !issueRefresh {
+			return nil
+		}
 		var refreshErr error
 		refreshPlain, refreshErr = s.createRefreshToken(txCtx, span, familyID, now, tokenCfg.RefreshTokenExpiry)
 		return refreshErr
@@ -508,6 +517,18 @@ func (s *TokenService) refreshToken(ctx context.Context, req input.RefreshTokenR
 	authedClient, authErr := s.authenticateClient(ctx, span, family.ClientID, req.ClientSecret)
 	if authErr != nil {
 		return nil, authErr
+	}
+
+	// A client not registered for the refresh_token grant may not use it
+	// (RFC 6749 §5.2 unauthorized_client), the same rule client_credentials,
+	// token exchange and jwt-bearer enforce. Such a client is no longer
+	// issued a refresh token, but one issued before that rule existed, or
+	// before an operator removed the grant, must stop working too. Checked
+	// before the consume so the refusal does not spend the token.
+	if !hasGrantType(authedClient.GrantTypes, "refresh_token") {
+		span.RecordError(domain.ErrUnauthorizedClient)
+		span.SetStatus(codes.Error, "refresh_token grant not allowed")
+		return nil, fmt.Errorf("%w: the client is not registered for the refresh_token grant", domain.ErrUnauthorizedClient)
 	}
 
 	// RFC 8707 §2.2, same rule as the authorization-code path. Placed before

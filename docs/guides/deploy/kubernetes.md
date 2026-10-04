@@ -34,6 +34,7 @@ Three ways to run authserver on Kubernetes. None are mutually exclusive — many
 - **Admin port stays internal.** The admin surface (`:9001`) hosts the Admin API + UI + `/metrics`. Never expose it via the public Ingress. Use a separate `adminIngress` with an IP allowlist (Helm) or `ClusterIP` + `kubectl port-forward` (raw).
 - **Signing keys across replicas.** A single PVC with `ReadWriteOnce` only works when all replicas land on one node. For real multi-node, use [`signing.key_store: postgres_key`](../../reference/configuration.md#config-signing) or [`vault_transit`](hashicorp-vault-transit.md).
 - **Graceful shutdown.** Set `terminationGracePeriodSeconds` ≥ [`server.shutdown_wait`](../../reference/configuration.md#config-server) + LB drain time. See [systemd → SIGTERM](systemd.md#graceful-shutdown).
+- **Rate limiting behind the Ingress.** [`rate_limit`](../../reference/configuration.md#config-rate-limit) is on by default and keys on the TCP peer address only; it ignores `X-Forwarded-For` on purpose. Behind an Ingress controller every request arrives from the controller's pod address, so all clients share one bucket. Either enforce the per-client limit at the Ingress (where the real address is known) and set `rate_limit.enabled: false`, or accept that the limit is per-controller-replica, not per client.
 - **Purge as a CronJob.** `authserver purge` is **not** automatic. Deploy the CronJob in [Backup & purge → Kubernetes CronJob](backup-and-purge.md#kubernetes-cronjob).
 
 ## Verify (works on any path)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,7 +99,7 @@ func TestFetch_ValidDocument(t *testing.T) {
 		t.Errorf("redirect_uris: got %d", len(doc.RedirectURIs))
 	}
 	// Defaults applied.
-	if len(doc.GrantTypes) != 1 || doc.GrantTypes[0] != "authorization_code" {
+	if !slices.Equal(doc.GrantTypes, []string{"authorization_code", "refresh_token"}) {
 		t.Errorf("grant_types default: got %v", doc.GrantTypes)
 	}
 	if doc.TokenEndpointAuthMethod != "none" {

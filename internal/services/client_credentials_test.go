@@ -689,7 +689,10 @@ func TestClientCredentials_DCRClientWithGrantedScopes_ErrorNamesTheOverreach(t *
 	}
 }
 
-func TestClientCredentials_UnknownResource_ReturnsInvalidScope(t *testing.T) {
+// An unregistered resource is invalid_target (RFC 8707 §2), the answer the
+// authorization_code and refresh_token grants give — not invalid_scope, which
+// would send the client looking at a scope string that is fine.
+func TestClientCredentials_UnknownResource_ReturnsInvalidTarget(t *testing.T) {
 	setup := newCCTestSetup(t)
 	c, secret := setup.createConfidentialClient(t, "read write")
 
@@ -699,8 +702,11 @@ func TestClientCredentials_UnknownResource_ReturnsInvalidScope(t *testing.T) {
 		Scope:        "read",
 		Resource:     "https://evil.example.com", // Not in static config or scope store.
 	})
-	if !errors.Is(err, domain.ErrInvalidScope) {
-		t.Errorf("err = %v, want ErrInvalidScope", err)
+	if !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Errorf("err = %v, want ErrInvalidTarget", err)
+	}
+	if errors.Is(err, domain.ErrInvalidScope) {
+		t.Errorf("err = %v, must not also be ErrInvalidScope", err)
 	}
 }
 
@@ -737,5 +743,143 @@ func TestClientCredentials_KnownResource_Succeeds(t *testing.T) {
 	}
 	if len(aud) != 1 || aud[0] != "https://api.example.com" {
 		t.Errorf("aud = %v, want [https://api.example.com]", aud)
+	}
+}
+
+// failingResourceLister fails every List call, standing in for a resource
+// store outage.
+type failingResourceLister struct{}
+
+func (failingResourceLister) List(context.Context) ([]services.ResourceInfo, error) {
+	return nil, errors.New("resource store unavailable")
+}
+
+// newCCTestSetupWithResources is newCCTestSetup with the resource lister made
+// explicit.
+func newCCTestSetupWithResources(t *testing.T, lister services.ResourceLister) *ccTestSetup {
+	t.Helper()
+	setup := newCCTestSetup(t)
+	setup.svc = services.NewClientCredentialsService(
+		setup.h.Stores.Client,
+		setup.h.Stores.MachineToken,
+		setup.jwksSvc,
+		staticIssuerForTest("https://auth.example.com"),
+		static.NewClientCredentialsConfigProvider(output.ClientCredentialsConfig{TokenExpiry: 15 * time.Minute}),
+		setup.obs,
+		setup.auditSvc,
+		lister,
+	)
+	return setup
+}
+
+// A scope inside the client's ceiling but not declared by the target resource
+// is refused: nothing ties a client_credentials client to a resource, so the
+// catalog is the only thing keeping one resource's scopes off another's
+// tokens.
+func TestClientCredentials_RequestedScopeOutsideResourceCatalog_Refused(t *testing.T) {
+	setup := newCCTestSetup(t)
+	c, secret := setup.createConfidentialClient(t, "read emit")
+
+	_, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read emit",
+		Resource:     "https://api.example.com", // catalog: read write
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("err = %v, want ErrInvalidScope", err)
+	}
+	if !strings.Contains(err.Error(), "not declared by the target resource") {
+		t.Errorf("error_description = %q, want it to name the resource catalog", err.Error())
+	}
+}
+
+// With scope omitted, the token carries the client's ceiling cut to what the
+// resource declares — never a scope the resource does not know.
+func TestClientCredentials_OmittedScopeWithResource_IssuesCeilingWithinCatalog(t *testing.T) {
+	setup := newCCTestSetup(t)
+	c, secret := setup.createConfidentialClient(t, "read emit")
+
+	resp, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Resource:     "https://api.example.com",
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp.Scope != "read" {
+		t.Errorf("scope = %q, want %q (ceiling ∩ catalog)", resp.Scope, "read")
+	}
+}
+
+// A client whose ceiling shares nothing with the resource's catalog is
+// refused rather than handed a scope-less token audienced to the resource.
+func TestClientCredentials_OmittedScopeWithResource_DisjointCeiling_Refused(t *testing.T) {
+	setup := newCCTestSetup(t)
+	c, secret := setup.createConfidentialClient(t, "billing:write")
+
+	resp, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Resource:     "https://api.example.com",
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("err = %v (resp %+v), want ErrInvalidScope", err, resp)
+	}
+	if !strings.Contains(err.Error(), "none of the client's registered scopes") {
+		t.Errorf("error_description = %q, want it to explain the empty intersection", err.Error())
+	}
+}
+
+// The anonymous open-DCR case: a self-registered client holding
+// client_credentials has an empty ceiling by design. Omitting scope must not
+// turn that into a scope-less token for a real resource, and nothing may be
+// persisted for it.
+func TestClientCredentials_EmptyCeilingOmittedScopeWithResource_Refused(t *testing.T) {
+	for _, source := range []client.RegistrationSource{client.SourceDCR, client.SourceCIMD, client.SourceAdmin} {
+		t.Run(string(source), func(t *testing.T) {
+			setup := newCCTestSetup(t)
+			c, secret := setup.createConfidentialClientWithSource(t, "", source)
+
+			for _, sc := range []string{"", "   "} {
+				resp, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+					ClientID:     c.ID,
+					ClientSecret: secret,
+					Scope:        sc,
+					Resource:     "https://api.example.com",
+				})
+				if !errors.Is(err, domain.ErrInvalidScope) {
+					t.Fatalf("scope %q: err = %v (resp %+v), want ErrInvalidScope", sc, err, resp)
+				}
+			}
+			_, n, err := setup.h.Stores.MachineToken.List(context.Background(), output.MachineTokenFilter{ClientID: c.ID, Limit: 10})
+			if err != nil {
+				t.Fatalf("list machine tokens: %v", err)
+			}
+			if n != 0 {
+				t.Errorf("machine tokens stored for a refused request: %d", n)
+			}
+		})
+	}
+}
+
+// A resource store failure is a server fault, not invalid_target: the client's
+// request is not what is wrong.
+func TestClientCredentials_ResourceLookupFailure_IsNotInvalidTarget(t *testing.T) {
+	setup := newCCTestSetupWithResources(t, failingResourceLister{})
+	c, secret := setup.createConfidentialClient(t, "read")
+
+	_, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+		ClientID:     c.ID,
+		ClientSecret: secret,
+		Scope:        "read",
+		Resource:     "https://api.example.com",
+	})
+	if err == nil {
+		t.Fatal("exchange succeeded with the resource store down")
+	}
+	if domain.IsError(err) {
+		t.Errorf("err = %v, want a non-domain error (server_error on the wire)", err)
 	}
 }

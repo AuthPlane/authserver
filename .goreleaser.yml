@@ -63,29 +63,11 @@ signs:
     artifacts: checksum
     output: true
 
+# The GitHub release body is written from the version's CHANGELOG.md section
+# by the release workflow. The public repository receives one squash commit
+# per release, so a commit-derived changelog would list nothing useful.
 changelog:
-  sort: asc
-  use: github
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^ci:"
-      - "^chore:"
-      - Merge pull request
-      - Merge branch
-  groups:
-    - title: "🚀 Features"
-      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
-      order: 0
-    - title: "🐛 Bug Fixes"
-      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
-      order: 1
-    - title: "🔒 Security"
-      regexp: '^.*?sec(\([[:word:]]+\))??!?:.+$'
-      order: 2
-    - title: "📦 Other"
-      order: 999
+  disable: true
 
 release:
   github:

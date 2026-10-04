@@ -3,7 +3,6 @@ package oauth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"html/template"
 	"math"
 	"net/http"
@@ -225,7 +224,7 @@ func (h *loginHandler) handlePostLogin(w http.ResponseWriter, r *http.Request) {
 		// deployment concern, covered in the threat model.
 		if h.lockout != nil {
 			if until, engaged := h.lockout.RecordFailure(email, ip); engaged {
-				h.recordLockout(r.Context(), email, ip, until)
+				h.recordLockout(r.Context(), ip, until)
 			}
 		}
 		h.renderLoginError(w, r, disp, "Invalid email or password")
@@ -236,8 +235,7 @@ func (h *loginHandler) handlePostLogin(w http.ResponseWriter, r *http.Request) {
 	// trouble. Every other internal failure on this path answers 500; so does
 	// this one.
 	case err != nil:
-		h.obs.Logger.ErrorContext(r.Context(), "login: authentication failed on an internal error",
-			"email", email, "error", err)
+		h.obs.Logger.ErrorContext(r.Context(), "login: authentication failed on an internal error", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -251,7 +249,7 @@ func (h *loginHandler) handlePostLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	h.obs.Logger.InfoContext(r.Context(), "user logged in", "user_id", u.ID, "email", email)
+	h.obs.Logger.InfoContext(r.Context(), "user logged in", "user_id", u.ID)
 
 	safe := shared.SafeRedirect(redirect, "/")
 	dest, err := h.urls.Resolve(r.Context(), safe)
@@ -281,20 +279,15 @@ func (h *loginHandler) handlePostLogout(w http.ResponseWriter, r *http.Request) 
 // fifteen-minute lockout under traffic would otherwise write one event per
 // request.
 //
-// ActorID is left empty and the submitted address goes in Detail. The sibling
-// event user.login_failed — fired from the same form field on the same request
-// — keeps the address out of ActorID for the same reasons, though it does fill
-// ActorID with the resolved user id on the causes where the address matched an
-// account, which this event cannot do: a lockout engages on a submitted
-// identity that need not resolve to anything. Three reasons that shape is right
-// here: ActorID is contracted as a user ID, client ID or "system", and an
-// address that need not correspond to any account is none of those; Detail is
-// the cataloged `key=value` payload operators grep; and actor_id is an indexed
-// exact-match filter on the admin audit feed, which is the wrong home for
-// unbounded text chosen by whoever posted the form.
-func (h *loginHandler) recordLockout(ctx context.Context, email, ip string, until time.Time) {
-	h.obs.Logger.WarnContext(ctx, "auth lockout engaged",
-		"email", email, "ip", ip, "until", until.Format(time.RFC3339))
+// ActorID is left empty: a lockout engages on a submitted identity that need
+// not resolve to any account, and ActorID is contracted as a user ID, client ID
+// or "system". The submitted address is not recorded anywhere on the event —
+// it is form input the poster chose, and personal data — so the row names the
+// source IP and the deadline only. The sibling event user.login_failed, fired
+// from the same form field on the same request, does fill ActorID with the
+// resolved user id on the causes where the address matched an account.
+func (h *loginHandler) recordLockout(ctx context.Context, ip string, until time.Time) {
+	h.obs.Logger.WarnContext(ctx, "auth lockout engaged", "ip", ip, "until", until.Format(time.RFC3339))
 	if h.audit == nil {
 		return
 	}
@@ -303,7 +296,7 @@ func (h *loginHandler) recordLockout(ctx context.Context, email, ip string, unti
 		"",
 		"",
 		ip,
-		fmt.Sprintf("until=%s email=%q", until.Format(time.RFC3339), email),
+		"until="+until.Format(time.RFC3339),
 	))
 }
 

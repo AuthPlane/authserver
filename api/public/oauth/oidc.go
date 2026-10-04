@@ -168,8 +168,25 @@ func (h *oidcHandler) handleOIDCCallback(w http.ResponseWriter, r *http.Request)
 			shared.RenderTemplate(ctx, w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
 			return
 		}
-		h.obs.Logger.WarnContext(ctx, "OIDC authentication failed", "error", err)
-		shared.RenderTemplate(ctx, w, http.StatusUnauthorized, oidcErrorTmpl, h.oidcError(r, "Authentication failed. Please try again."))
+		if errors.Is(err, domain.ErrOIDCEmailInUse) {
+			// The IdP vouched for the user, but the email it asserts already
+			// belongs to another account here and is never linked by email.
+			// Say so: "try again" would never succeed.
+			h.obs.Logger.WarnContext(ctx, "OIDC sign-in refused: email belongs to another account")
+			shared.RenderTemplate(ctx, w, http.StatusConflict, oidcErrorTmpl, h.oidcError(r,
+				"The email address your identity provider shared is already used by another account on this server, so this sign-in cannot be completed. Ask an administrator to resolve the conflict."))
+			return
+		}
+		if errors.Is(err, domain.ErrOIDCAuthFailed) {
+			h.obs.Logger.WarnContext(ctx, "OIDC authentication failed", "error", err)
+			shared.RenderTemplate(ctx, w, http.StatusUnauthorized, oidcErrorTmpl, h.oidcError(r, "Authentication failed. Please try again."))
+			return
+		}
+		// Anything else — a user-store lookup, create or update that failed —
+		// is the server's fault, not the user's: 500 and ERROR, so it reaches
+		// monitoring instead of reading as a mistyped login.
+		h.obs.Logger.ErrorContext(ctx, "OIDC sign-in failed on a server error", "error", err)
+		shared.RenderTemplate(ctx, w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
 		return
 	}
 
@@ -178,7 +195,7 @@ func (h *oidcHandler) handleOIDCCallback(w http.ResponseWriter, r *http.Request)
 		shared.RenderTemplate(ctx, w, http.StatusInternalServerError, oidcErrorTmpl, h.oidcError(r, "Sign-in is temporarily unavailable. Please try again later."))
 		return
 	}
-	h.obs.Logger.InfoContext(ctx, "OIDC user logged in", "user_id", u.ID, "email", u.Email)
+	h.obs.Logger.InfoContext(ctx, "OIDC user logged in", "user_id", u.ID)
 
 	safe := shared.SafeRedirect(state.Redirect, "/")
 	dest, err := h.urls.Resolve(ctx, safe)

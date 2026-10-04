@@ -107,7 +107,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | `--agent` | `bool` | `false` | Register as agent client |
 | `--agent-description` | `string` |  | Agent description (max 500 chars) |
 | `--auth-method` | `string` | `none` | Token endpoint auth method |
-| `--grant-types` | `string` | `authorization_code` | Comma-separated grant-type identifiers<br>(e.g. `authorization_code,refresh_token,client_credentials`). |
+| `--grant-types` | `string` | `authorization_code,refresh_token` | Comma-separated grant-type identifiers<br>(e.g. `authorization_code,refresh_token,client_credentials`). |
 | `--redirect-uris` | `string` |  | Comma-separated full URLs. Each must include a scheme. |
 | `--scope` | `string` |  | Space-separated scopes |
 
@@ -240,7 +240,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 
 **Long**
 
-> Manage operator-declared fronting links. A fronting link declares that a Mint Resource (`source`) may mint tokens for a downstream Resource (`target`) via RFC 8693 token-exchange, translating scopes per the supplied scope-map. The runtime path that consumes these rows lands in (Inc N+1).
+> Manage operator-declared fronting links. A fronting link declares that a Mint Resource (`source`) may mint tokens for a downstream Resource (`target`) via RFC 8693 token-exchange, translating scopes per the supplied scope-map. At runtime the gateway exchanges a token audienced to the source for one audienced to the target, without the user consenting to the target. Only the gateway may do this: a client in the source's runtime clients (`admin resource runtime-client add`) or in the target's exchange allowlist.
 
 **Source** — `cmd/authserver/admin_fronting.go:16`
 
@@ -276,7 +276,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | --- | --- | --- | --- |
 | `--dry-run` | `bool` | `false` | Validate without persisting (runs all pre-write rules) |
 
-**Source** — `cmd/authserver/admin_fronting.go:111`
+**Source** — `cmd/authserver/admin_fronting.go:115`
 
 ## `authserver admin fronting delete`
 
@@ -293,7 +293,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | `--source` | `string` | Source slug |
 | `--target` | `string` | Target slug |
 
-**Source** — `cmd/authserver/admin_fronting.go:217`
+**Source** — `cmd/authserver/admin_fronting.go:221`
 
 ## `authserver admin fronting get`
 
@@ -316,7 +316,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | --- | --- | --- | --- |
 | `--json` | `bool` | `false` | Emit JSON instead of human-readable lines |
 
-**Source** — `cmd/authserver/admin_fronting.go:77`
+**Source** — `cmd/authserver/admin_fronting.go:81`
 
 ## `authserver admin fronting list`
 
@@ -334,7 +334,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | `--source` | `string` |  | Filter by source slug |
 | `--target` | `string` |  | Filter by target slug |
 
-**Source** — `cmd/authserver/admin_fronting.go:30`
+**Source** — `cmd/authserver/admin_fronting.go:34`
 
 ## `authserver admin fronting update`
 
@@ -361,7 +361,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | --- | --- | --- | --- |
 | `--scope-map` | `string` |  | Same `src:tgt[+tgt2],src2:tgt3` grammar as<br>`admin fronting create --scope-map`. Omitting the flag leaves<br>the existing map untouched. |
 
-**Source** — `cmd/authserver/admin_fronting.go:174`
+**Source** — `cmd/authserver/admin_fronting.go:178`
 
 ## `authserver admin grant`
 
@@ -696,11 +696,11 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | Flag | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `--broker-provider` | `string` |  | Broker provider id (required for broker resources) |
-| `--description` | `string` |  | Free-form description (kept for forward compat; not persisted today) |
+| `--description` | `string` |  | Ignored; resources have no description field |
 | `--display-name` | `string` |  | Human-readable display name |
 | `--policy-allowed-clients` | `stringSlice` |  | Comma-separated client_ids permitted to act as the actor at /oauth/token. Empty = any. |
 | `--policy-allowed-return-urls` | `stringSlice` |  | Comma-separated return URLs accepted by the broker connect flow. |
-| `--policy-runtime-client-ids` | `stringSlice` |  | Comma-separated client_ids authorized to act AS this Resource at runtime . Empty = default-deny (no client may act as this Resource). |
+| `--policy-runtime-client-ids` | `stringSlice` |  | Comma-separated client_ids authorized to act AS this Resource at runtime: its resource server's clients (introspection, broker attestation) and the gateway that exchanges through a fronting link from it. Empty = default-deny (no client may act as this Resource). |
 | `--scopes` | `stringArray` |  | Format: `name\|upstream\|description`. Repeatable.<br>For `broker` resources upstream maps the local scope name to the<br>upstream OAuth scope (e.g. `repo\|repo\|Repository read/write`).<br>For `mint` resources upstream is conventionally empty —<br>double-pipe: `tasks:summarize\|\|Summarise tasks`.<br>Mutually exclusive with `--scopes-file`. |
 | `--scopes-file` | `string` |  | Path to JSON file holding an array of {name, upstream, description}. Mutually exclusive with --scopes. |
 | `--uri` | `string` |  | Resource URI (optional) |
@@ -721,7 +721,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | --- | --- | --- |
 | `--id` | `string` | Resource id |
 
-**Source** — `cmd/authserver/admin_resource.go:371`
+**Source** — `cmd/authserver/admin_resource.go:376`
 
 ## `authserver admin resource get`
 
@@ -773,9 +773,9 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 
 **Long**
 
-> Manage the OAuth client_ids authorized to act AS this Resource at runtime. Empty list = no client may act as this Resource (default-deny); multi-entry models multi-tier deployments where each tier authenticates with its own credentials but maps to the same Resource.
+> Manage the OAuth client_ids authorized to act AS this Resource at runtime. Empty list = no client may act as this Resource (default-deny); multi-entry models multi-tier deployments where each tier authenticates with its own credentials but maps to the same Resource. A gateway that exchanges through a fronting link from this Resource must be listed here.
 
-**Source** — `cmd/authserver/admin_resource.go:261`
+**Source** — `cmd/authserver/admin_resource.go:264`
 
 ## `authserver admin resource runtime-client add`
 
@@ -792,7 +792,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | `--client-id` | `string` | OAuth client_id to authorize as this Resource |
 | `--slug` | `string` | Resource slug |
 
-**Source** — `cmd/authserver/admin_resource.go:272`
+**Source** — `cmd/authserver/admin_resource.go:277`
 
 ## `authserver admin resource runtime-client list`
 
@@ -814,7 +814,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | --- | --- | --- | --- |
 | `--json` | `bool` | `false` | Emit JSON instead of human-readable lines |
 
-**Source** — `cmd/authserver/admin_resource.go:332`
+**Source** — `cmd/authserver/admin_resource.go:337`
 
 ## `authserver admin resource runtime-client remove`
 
@@ -831,7 +831,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | `--client-id` | `string` | OAuth client_id to remove |
 | `--slug` | `string` | Resource slug |
 
-**Source** — `cmd/authserver/admin_resource.go:302`
+**Source** — `cmd/authserver/admin_resource.go:307`
 
 ## `authserver admin resource update`
 
@@ -868,7 +868,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 | `--slug` | `string` |  | New slug |
 | `--uri` | `string` |  | New URI |
 
-**Source** — `cmd/authserver/admin_resource.go:171`
+**Source** — `cmd/authserver/admin_resource.go:174`
 
 ## `authserver admin user`
 

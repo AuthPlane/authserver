@@ -1,7 +1,7 @@
 # Tier 03 — MCP server + agent with DPoP + per-tool scopes (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 15 lines · Total example: 132 lines · SDK: go-sdk v0.3.0**
+**Auth-specific code: 15 lines · Total example: 132 lines · SDK: go-sdk v0.4.0**
 <!-- loccount:end -->
 
 A paired Go MCP server and agent that demonstrate two raised guard rails on

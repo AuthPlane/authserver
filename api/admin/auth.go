@@ -21,7 +21,7 @@ type authHandler struct {
 func (h *authHandler) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 	if h.audit != nil {
 		h.audit.Record(r.Context(), audit.NewEvent(
-			"admin.ui.login",
+			audit.ActionAdminUILogin,
 			"admin", "", "",
 			"api_key_verified",
 		))

@@ -41,8 +41,8 @@ Full list lives in the `Action` constants in `internal/domain/audit/entity.go` (
 | `token.issued` | `exchangeCode` in `internal/services/token.go` | First leg of auth-code flow lands a JWT. |
 | `token.refreshed` | `refreshToken` in `internal/services/token.go` | Refresh-token rotation succeeded. |
 | `token.revoked` | `RevokeToken` in `internal/services/revocation.go` | `POST /oauth/revoke` accepted. |
-| `token.exchanged` | `internal/services/token_exchange.go:463` | RFC 8693 exchange minted a token. |
-| `token.exchange_denied` | `internal/services/token_exchange.go:639` | Exchange refused (scope, allowlist, policy). |
+| `token.exchanged` | `Exchange`, `dispatchMint`, `dispatchBroker`, `dispatchFrontedBroker` in `internal/services/token_exchange.go` | RFC 8693 exchange minted a token. |
+| `token.exchange_denied` | `recordDenied` and `emitFrontedBrokerDenialAudit` in `internal/services/token_exchange.go` | Exchange refused (scope, allowlist, policy). |
 | `auth_code.reused` | `handleCodeReuse` in `internal/services/token.go` | Authorization code replayed. Written on every replay, including the ones that revoke nothing. |
 | `family.revoked` | `revokeFamilyHalf` in `internal/services/token.go` | Refresh-token **or** authorization-code reuse detected → family burnt. The detail prefix says which. |
 | `family.revocation_failed` | `revokeFamilyHalf` in `internal/services/token.go` | Reuse detected but the family could **not** be revoked — it is still live; go to the [incident runbook](incident-runbook.md#incident-refresh-token-reuse-burst). |
@@ -54,7 +54,7 @@ Full list lives in the `Action` constants in `internal/domain/audit/entity.go` (
 | `consent_grant.revoked_admin` | Admin path | Operator revoked a grant. |
 | `broker_grant.created` / `broker_grant.revoked` | User self-service | `/connect/{provider}` flow. |
 | `broker_grant.revoked_admin` | Admin path | Operator-forced upstream revoke. |
-| `upstream.token.issued` | `internal/services/broker_issuer.go:346` | AS vended an upstream-format access token to an MCP. |
+| `upstream.token.issued` | `Issue` in `internal/services/broker_issuer.go` | AS vended an upstream-format access token to an MCP. |
 | `key.rotated` | `admin key rotate` | Signing key rotated. |
 | `issuance.revoked_admin` | Admin path | Per-token revocation. |
 | `user.force_logout` | Admin path | Every family for a user burnt. |
@@ -103,9 +103,9 @@ Each emit site stores key=value pairs in `detail`. Examples from source:
 - **`family.revoked`** (`revokeFamilyHalf` in `internal/services/token.go`) → `reuse_detection family=<family_id>` from refresh-token reuse, `code_reuse family=<family_id>` from authorization-code reuse
 - **`family.revocation_failed`** (`reportReuseHalfFailure`, same file) → `reuse_detection family=<family_id> path=reuse half=family`, or `code_reuse family=<family_id> path=code_reuse half=family` — reuse was detected but the family could not be revoked; it is still live
 - **`family.denylist_failed`** (`reportReuseHalfFailure`, same file) → `reuse_detection family=<family_id> path=reuse half=jti`, or `code_reuse family=<family_id> path=code_reuse half=jti` — the family's access-token JTIs could not be denylisted; written next to whichever family row the detection left
-- **`token.exchanged` (mint dispatch)** (`internal/services/token_exchange.go:1115`) → `jti=… sub=… subject_client=… actor_client=… type=mint_dispatch resource=… scopes=… chain_kind=… via_link=…`
-- **`token.exchanged` (broker dispatch)** (`internal/services/token_exchange.go:1434`) → `issuance_id=… sub=… subject_client=… type=broker_dispatch resource=… provider=… scopes=…`
-- **`token.exchanged` (fronted broker)** (`internal/services/token_exchange.go:1636`) → `… type=broker_dispatch resource=… scopes=… chain_kind=fronted via_link=… target_kind=broker issuance_id=…`
+- **`token.exchanged` (mint dispatch)** (`dispatchMint` in `internal/services/token_exchange.go`) → `jti=… sub=… subject_client=… actor_client=… type=mint_dispatch resource=… scopes=… chain_kind=… via_link=…`
+- **`token.exchanged` (broker dispatch)** (`dispatchBroker`, same file) → `issuance_id=… sub=… subject_client=… type=broker_dispatch resource=… provider=… scopes=…`
+- **`token.exchanged` (fronted broker)** (`dispatchFrontedBroker`, same file) → `… type=broker_dispatch resource=… scopes=… chain_kind=fronted via_link=… target_kind=broker issuance_id=…`
 - **`token.revoked` (machine)** (`tryRevokeMachineToken` in `internal/services/revocation.go`) → `machine_token jti=<jti>`
 - **`token.revoked` (family)** (`RevokeToken` in `internal/services/revocation.go`) → `family=<family_id>`
 
@@ -213,7 +213,7 @@ For multi-hop delegation, follow `subject_client` → `actor_client` across cons
 |---|---|---|
 | Query returns empty / fewer rows than expected | `since`/`until` window too narrow; UTC vs. local time mismatch | Widen the window; always pass `Z` suffix (UTC). |
 | `429 Too Many Requests` on a paged export | Admin rate limit hit | Sleep between pages or raise `admin.requests_per_second` ([`docs/reference/configuration.md`](../../reference/configuration.md)). |
-| `detail` field is empty for `token.exchange_denied` | Some denial paths only emit a `reason` — see `internal/services/token_exchange.go:1695` | Filter by `action` + correlate to the trace span; the span carries more attributes. |
+| `detail` for `token.exchange_denied` is only `reason=<x>` | Most denial paths go through `recordDenied` in `internal/services/token_exchange.go`, which records the reason and nothing else; only the fronted-broker path (`emitFrontedBrokerDenialAudit`, same file) carries the full chain context | Filter by `action` + correlate to the trace span; the span carries more attributes. |
 | Can't find a known mutation in the audit log | Mutation happened on a different instance with a separate database; or the YAML-seed path doesn't audit | Confirm `storage.driver` is the same across instances; YAML-seeded rows on first-start are deliberately not audited. |
 | `actor_id` is empty for `family.revoked` | Reuse detection fires without an authenticated actor; the family ID is the only identifier | Read the `detail` (`family=<id>`) and join against `token_families`. |
 | `trace_id` is empty | Tracing disabled or sampler dropped the span | Enable tracing in [`observability` config](../../reference/configuration.md). |

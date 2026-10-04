@@ -12,6 +12,7 @@ import (
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/domain/resource"
+	"github.com/authplane/authserver/internal/domain/user"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
 )
@@ -90,6 +91,21 @@ func EnsureUser(t *testing.T, us output.UserStore, id string) {
 	// calls in the same test database do not collide.
 	if err := us.Create(ctx, newTestUser(id, id+"@test.com")); err != nil {
 		t.Fatalf("ensure user %q: %v", id, err)
+	}
+}
+
+// DisableUser sets an existing user's status to disabled, as the admin
+// disable does, for tests that cannot name the user domain type.
+func DisableUser(t *testing.T, us output.UserStore, id string) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := us.GetByID(ctx, id)
+	if err != nil {
+		t.Fatalf("disable user %q: %v", id, err)
+	}
+	u.Status = user.StatusDisabled
+	if err := us.Update(ctx, u); err != nil {
+		t.Fatalf("disable user %q: %v", id, err)
 	}
 }
 

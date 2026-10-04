@@ -2,7 +2,6 @@ package shared
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/authplane/authserver/internal/config"
+	"github.com/authplane/authserver/internal/observability"
 )
 
 // RateLimiter provides per-IP request throughput limiting.
@@ -92,9 +92,5 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 // ClientIP extracts the client IP from the request.
 // Uses RemoteAddr only -- X-Forwarded-For is ignored to prevent spoofing.
 func ClientIP(r *http.Request) string {
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return ip
+	return observability.RemoteIP(r)
 }

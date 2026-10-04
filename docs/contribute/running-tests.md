@@ -12,7 +12,7 @@ The single command you must run before `git push`. From the
 [`Makefile`](../../Makefile):
 
 ```
-ci-local: build lint check-imports check-oss test-unit vulncheck
+ci-local: build lint check-imports check-drift check-oss test-unit test-integration coverage-check vulncheck
 ```
 
 It runs, in order:
@@ -21,15 +21,18 @@ It runs, in order:
 |---|---|---|
 | Build | `make build` | The binary compiles with `CGO_ENABLED=0` |
 | Lint | `make lint` (`golangci-lint v2.11+`) | Style + static-analysis violations |
-| Import boundaries | `make check-imports` | Hexagonal layer violations + Gate 0 + Gate 1 |
+| Import boundaries | `make check-imports` | Hexagonal layer violations + Gate 0 + Gate 1 + Gate 2 |
+| Drift gates | `make check-drift` | A metric, audit action, env var or quoted log message that exists in code but not in its consumer (dashboard, catalog, reference, runbook), or the reverse — see `scripts/{metricslint,auditlint,envlint,runbooklint}` |
 | OSS hygiene | `make check-oss` | Internal Linear tickets / planning paths / workspace URLs in public-scope files |
 | Unit | `make test-unit` | Domain logic, crypto, config, brokerproto registry |
-| Vulnerabilities | `make vulncheck` (`govulncheck`) | Third-party CVEs (stdlib-only findings warn) |
+| Integration | `make test-integration` | Services, adapters (SQLite in-process) and HTTP handlers — about 80% of the test functions |
+| Coverage floor | `make coverage-check` | The merged unit + integration profile below `COVERAGE_FLOOR` (59%, the merged total measured when the gate was added) |
+| Vulnerabilities | `make vulncheck` (`govulncheck`) | Third-party CVEs in all three Go modules — the root, `e2e/`, `compliance/` (stdlib-only findings warn) |
 
 If `ci-local` is red, do **not** push. If it goes green but you've
-touched an adapter or service package, additionally run
-`make test-integration` for the affected packages — your project memory
-says so and CI agrees.
+touched the postgres adapter, schema or migrations, additionally run
+`make test-integration-postgres`; for an upstream-provider adapter or a
+user-facing flow, `make test-e2e` as well (see the table below).
 
 ## Per-layer targets
 
@@ -46,8 +49,13 @@ Runs `go test -tags=integration` against `internal/adapters/...`,
 external services required. Tests that touch the storage layer use the
 shared adapter suite under `testdata/`.
 
-If your change touches one of those subtrees, run this. The Makefile
-auto-detects the packages so you don't have to enumerate them.
+The Makefile auto-detects the packages so you don't have to enumerate
+them. `test-unit` and `test-integration` each write a coverage profile
+(`coverage-unit.out`, `coverage-integration.out`); `make coverage-check`
+merges them, prints the three totals and fails when the merged total is
+below `COVERAGE_FLOOR` (59%, the merged total measured when the gate was added). The floor is a ratchet: raise it when
+coverage rises; never lower it to make a red run green. `go tool cover
+-html=coverage-merged.out` shows what the last run missed.
 
 ### `make test-integration-postgres`
 
@@ -59,9 +67,19 @@ Required before merging any postgres-adapter change.
 
 ### `make test-race`
 
-`go test -race ./...`. Catches data races under concurrency. Run before
-shipping anything that touches shared state — caches, registries,
-session storage.
+`go test -race -short ./...`. Catches data races under concurrency. Run
+before shipping anything that touches shared state — caches, registries,
+session storage. `-short` skips the two wall-clock timing assertions
+(bcrypt cost uniformity), which are noise under race instrumentation;
+both still run unskipped under `test-unit` and `test-integration`.
+
+### `make test-compliance`
+
+Runs the OAuth/MCP compliance suite under [`compliance/`](../../compliance/)
+(its own Go module): the registration tests first, then the `e2e`-tagged
+journeys with a 15-minute timeout. `make compliance-report` regenerates
+`compliance/report/latest.{json,md}` from it; `make compliance-gate` is the
+CI form that fails on any regression against that report.
 
 ### `make test-e2e`
 
@@ -94,12 +112,12 @@ without regenerating the reference, this fails. Always regenerate via
 | Working on… | Tight loop | Pre-push |
 |---|---|---|
 | A domain entity | `go test ./internal/domain/<pkg>/... -count=1` | `make ci-local` |
-| A service | `go test ./internal/services/... -tags=integration -run TestYour -count=1` | `make ci-local && make test-integration` |
-| An adapter | `go test ./internal/adapters/<driver>/... -tags=integration -count=1` | `make ci-local && make test-integration` (+ `test-integration-postgres` for the postgres adapter) |
-| An HTTP handler | `go test ./api/<area>/... -tags=integration -count=1` | `make ci-local && make test-integration` |
+| A service | `go test ./internal/services/... -tags=integration -run TestYour -count=1` | `make ci-local` |
+| An adapter | `go test ./internal/adapters/<driver>/... -tags=integration -count=1` | `make ci-local` (+ `test-integration-postgres` for the postgres adapter) |
+| An HTTP handler | `go test ./api/<area>/... -tags=integration -count=1` | `make ci-local` |
 | A CLI flag | `go test ./cmd/authserver/... -count=1` | `make ci-local && make docs-check` |
 | A config key | `go test ./internal/config/... -count=1` | `make ci-local && make docs-check` |
-| An upstream-provider adapter | `go test ./internal/adapters/brokerproto/<name>/... -count=1` | `make ci-local && make test-integration && make test-e2e` |
+| An upstream-provider adapter | `go test ./internal/adapters/brokerproto/<name>/... -count=1` | `make ci-local && make test-e2e` |
 | A user-facing flow | `cd e2e && go test ./scenarios/... -tags=e2e -run YourFlow -count=1` | `make ci-local && make test-e2e` |
 | Documentation examples | `tools/docssmoke/run.sh <example>` | `make docs-smoke` |
 

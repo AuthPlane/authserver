@@ -223,6 +223,8 @@ func TestAgentIdentity_BrokerIssuance_ClaimsOnIssuance_NotInWireToken(t *testing
 		Target:   upstreamSlug,
 		ScopeMap: map[string][]string{"tools/echo": {"repo"}},
 	})
+	// The caller is not mcp-0's gateway; the target names it as an allowed exchanger.
+	h.AdminAddAllowedClient(upstreamSlug, mcpServerClientID)
 	h.RunFlowC1Consent(email, password, webAppClientID, "http://localhost:9999/callback", mcpServerSlug, []string{"tools/echo", "repo"}, []string{"tools/echo", "repo"})
 
 	exch := h.TokenExchangeWithResource(

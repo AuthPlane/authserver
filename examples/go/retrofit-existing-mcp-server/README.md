@@ -100,7 +100,7 @@ same `make verify`, just longer first build (~1 min).
 |---|---|
 | **Time to run** | Under a minute warm-cache (`go build` of two small binaries + AS image pull) |
 | **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.4.1` |
-| **SDK** | `github.com/authplane/go-sdk/mcp v0.3.0` (in `after/` only) |
+| **SDK** | `github.com/authplane/go-sdk/mcp v0.4.0` (in `after/` only) |
 
 ## Troubleshooting
 
@@ -142,7 +142,7 @@ configure `GOPROXY` to allow it (or set `GOPRIVATE` if you mirror SDKs
 internally).
 
 **`missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`**
-`go get github.com/authplane/go-sdk/mcp@v0.3.0` adds the `mcp` adapter but
+`go get github.com/authplane/go-sdk/mcp@v0.4.0` adds the `mcp` adapter but
 *not* its transitive dependency `go-sdk/core`, so the very next `go build`
 fails on the missing checksum. Run **`go mod tidy`** (or
 `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.3.0`) to record

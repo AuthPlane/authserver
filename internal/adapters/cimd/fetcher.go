@@ -152,7 +152,7 @@ func New(obs *observability.Provider) *Fetcher {
 				// Per spec: do NOT follow redirects.
 				return http.ErrUseLastResponse
 			},
-			Transport: newDispatchTransport(),
+			Transport: newDispatchTransport(obs.Tracer),
 		},
 		logger:   obs.Logger,
 		tracer:   obs.Tracer,
@@ -379,7 +379,7 @@ func (f *Fetcher) doFetch(ctx context.Context, docURL string, cfg output.CIMDFet
 
 	// Apply defaults.
 	if len(doc.GrantTypes) == 0 {
-		doc.GrantTypes = []string{"authorization_code"}
+		doc.GrantTypes = client.DefaultGrantTypes()
 	}
 	if len(doc.ResponseTypes) == 0 {
 		doc.ResponseTypes = []string{"code"}

@@ -21,9 +21,9 @@ type DCRPort interface {
 // Only client_name is unconditionally required; omitted fields default or
 // are conditionally required per the field notes below.
 type RegisterClientRequest struct {
-	RedirectURIs            []string `json:"redirect_uris,omitempty"`              // required when grant_types includes `authorization_code` or `refresh_token` — the default case, since grant_types itself defaults to `["authorization_code"]`. Max 10
+	RedirectURIs            []string `json:"redirect_uris,omitempty"`              // required when grant_types includes `authorization_code` or `refresh_token` — the default case, since grant_types itself defaults to `["authorization_code", "refresh_token"]`. Max 10
 	ClientName              string   `json:"client_name"`                          // max 255 bytes; a whitespace-only value is rejected
-	GrantTypes              []string `json:"grant_types,omitempty"`                // defaults to `["authorization_code"]` when omitted
+	GrantTypes              []string `json:"grant_types,omitempty"`                // defaults to `["authorization_code", "refresh_token"]` when omitted; refresh tokens are issued only to clients registered for `refresh_token`
 	ResponseTypes           []string `json:"response_types,omitempty"`             // defaults to `["code"]` when omitted
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"` // defaults to `none` when omitted
 	// ApplicationType is the OIDC application_type (SEP-837): "web" or

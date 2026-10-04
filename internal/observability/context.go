@@ -10,6 +10,7 @@ type ctxKey string
 const (
 	requestIDKey ctxKey = "request_id"
 	loggerKey    ctxKey = "logger"
+	clientIPKey  ctxKey = "client_ip"
 )
 
 // WithRequestID stores a request ID in the context.
@@ -34,4 +35,19 @@ func LoggerFromContext(ctx context.Context, fallback *slog.Logger) *slog.Logger 
 		return l
 	}
 	return fallback
+}
+
+// WithClientIP stores the caller's IP address in the context. The HTTP
+// middleware sets it from the connection's RemoteAddr for every request so
+// services can attribute what they record without seeing the request.
+func WithClientIP(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, clientIPKey, ip)
+}
+
+// ClientIPFromContext retrieves the caller's IP address from the context.
+// It is absent for work that did not start from an HTTP request, such as
+// background loops and CLI commands.
+func ClientIPFromContext(ctx context.Context) (string, bool) {
+	ip, ok := ctx.Value(clientIPKey).(string)
+	return ip, ok && ip != ""
 }

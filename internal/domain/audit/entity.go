@@ -43,6 +43,11 @@ const (
 	ActionAuthDenied Action = "auth.denied"
 	// ActionAuthLockedOut records an account lockout event.
 	ActionAuthLockedOut Action = "auth.locked_out"
+	// ActionAdminUILogin records a successful admin API-key verification from
+	// the Admin UI (POST /admin/auth/verify). The UI calls it on every page
+	// load, so this is the highest-volume row in the table; it is a liveness
+	// signal for the key, not a login in the user sense.
+	ActionAdminUILogin Action = "admin.ui.login"
 	// ActionUserLogin records a successful user login event.
 	ActionUserLogin Action = "user.login"
 	// ActionUserLoginFailed records a failed user login event.

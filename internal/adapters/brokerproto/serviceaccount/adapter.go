@@ -24,14 +24,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain/resource"
+	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/ssrf"
 )
@@ -47,6 +54,17 @@ const jwtBearerGrantType = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 // sibling oauth adapter.
 const maxResponseBodySize = 1 << 20
 
+// tracerName is the instrumentation scope used when no observability
+// provider is wired; it resolves through the global tracer provider.
+const tracerName = "github.com/authplane/authserver/internal/adapters/brokerproto/serviceaccount"
+
+// spanIssue is the span covering one JWT-bearer exchange at the upstream
+// token endpoint; issueFailureMsg is the log line written when it fails.
+const (
+	spanIssue       = "ServiceAccount.Issue"
+	issueFailureMsg = "upstream token exchange failed"
+)
+
 // Adapter implements output.BrokerProtocol for the service_account
 // protocol. One adapter instance handles every BrokerProvider whose
 // Protocol is "service_account"; per-provider state lives in
@@ -56,6 +74,8 @@ type Adapter struct {
 	httpClient     *http.Client
 	secretResolver output.SecretResolver
 	allowLoopback  bool
+	logger         *slog.Logger
+	tracer         trace.Tracer
 }
 
 // Option configures an Adapter at construction. The functional-options
@@ -72,6 +92,25 @@ func WithAllowLoopback(allow bool) Option {
 	return func(a *Adapter) { a.allowLoopback = allow }
 }
 
+// WithObservability supplies the logger and tracer the adapter's outbound
+// token calls report through. Without it the adapter falls back to the
+// process default logger and the global tracer provider, so existing
+// callers and tests keep working unchanged. A nil provider is ignored.
+// Mirrors the oauth adapter's option.
+func WithObservability(obs *observability.Provider) Option {
+	return func(a *Adapter) {
+		if obs == nil {
+			return
+		}
+		if obs.Logger != nil {
+			a.logger = obs.Logger
+		}
+		if obs.Tracer != nil {
+			a.tracer = obs.Tracer
+		}
+	}
+}
+
 // New builds an Adapter with the given HTTP client and secret resolver.
 // The HTTP client should set conservative timeouts and disable redirect
 // following on POST flows; the wiring layer is responsible for that.
@@ -79,6 +118,8 @@ func New(httpClient *http.Client, sr output.SecretResolver, opts ...Option) *Ada
 	a := &Adapter{
 		httpClient:     httpClient,
 		secretResolver: sr,
+		logger:         slog.Default(),
+		tracer:         otel.Tracer(tracerName),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -173,7 +214,7 @@ func (a *Adapter) Vend(
 		"grant_type": {jwtBearerGrantType},
 		"assertion":  {assertion},
 	}
-	resp, err := a.postToken(ctx, cfg, form)
+	resp, err := a.postToken(ctx, p, cfg, form)
 	if err != nil {
 		return "", 0, nil, err
 	}
@@ -221,33 +262,66 @@ type tokenResponse struct {
 	Scope       string
 }
 
-func (a *Adapter) postToken(ctx context.Context, cfg configData, form url.Values) (tokenResponse, error) {
+// postToken performs one traced round trip to the upstream token endpoint.
+// The error returned to the caller may carry a truncated response body for
+// diagnostics; the span and the failure log line only ever see a body-free
+// error, because an upstream error body can echo the assertion.
+func (a *Adapter) postToken(ctx context.Context, p *resource.BrokerProvider, cfg configData, form url.Values) (tokenResponse, error) {
+	ctx, span := a.tracer.Start(ctx, spanIssue,
+		trace.WithAttributes(attribute.String("provider_slug", p.Slug)))
+	defer span.End()
+
+	status := 0
+	fail := func(err, safeErr error) error {
+		span.SetAttributes(attribute.String("outcome", "error"))
+		if status != 0 {
+			span.SetAttributes(attribute.Int("http.status_code", status))
+		}
+		span.RecordError(safeErr)
+		span.SetStatus(codes.Error, safeErr.Error())
+		a.logger.WarnContext(ctx, issueFailureMsg,
+			"provider_slug", p.Slug, "status", status, "error", safeErr)
+		return err
+	}
+
 	if err := validateExternalURL(cfg.TokenURL, a.allowLoopback); err != nil {
-		return tokenResponse{}, err
+		return tokenResponse{}, fail(err, err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.TokenURL,
 		strings.NewReader(form.Encode()))
 	if err != nil {
-		return tokenResponse{}, fmt.Errorf("service_account: build token request: %w", err)
+		err = fmt.Errorf("service_account: build token request: %w", err)
+		return tokenResponse{}, fail(err, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return tokenResponse{}, fmt.Errorf("service_account: token request: %w", err)
+		err = fmt.Errorf("service_account: token request: %w", err)
+		return tokenResponse{}, fail(err, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	status = resp.StatusCode
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
-		return tokenResponse{}, fmt.Errorf("service_account: read token response: %w", err)
+		err = fmt.Errorf("service_account: read token response: %w", err)
+		return tokenResponse{}, fail(err, err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return tokenResponse{}, fmt.Errorf("%w: status=%d body=%s",
-			errUpstreamHTTP, resp.StatusCode, truncate(string(body), 200))
+	if status < 200 || status >= 300 {
+		safeErr := fmt.Errorf("%w: status=%d", errUpstreamHTTP, status)
+		return tokenResponse{}, fail(fmt.Errorf("%w body=%s", safeErr, truncate(string(body), 200)), safeErr)
 	}
-	return parseTokenResponse(body)
+	tok, err := parseTokenResponse(body)
+	if err != nil {
+		return tokenResponse{}, fail(err, err)
+	}
+	span.SetAttributes(
+		attribute.String("outcome", "success"),
+		attribute.Int("http.status_code", status),
+	)
+	return tok, nil
 }
 
 // parseTokenResponse handles the OAuth 2.0 JSON token response shape per

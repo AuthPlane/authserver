@@ -170,7 +170,7 @@ journalctl -u authserver -n 50 | grep -iE 'vault|approle'
 | `vault transit: key not found` | Wrong `key_name`, or key never created | `vault list transit/keys`; recreate via Step 2. |
 | `connection refused` at boot | `signing.vault_transit.address` wrong or Vault unreachable from the AS network | Curl `$VAULT_ADDR/v1/sys/health` from the AS host; check NetworkPolicy / security groups. |
 | `Vault is sealed` after Vault restart | Production Vault is sealed by default after restart | Unseal Vault; AppRole renewal will resume automatically. |
-| Background `WARN vault renewal failed` log | AppRole lease expired faster than renewal interval, or Vault is unreachable | Bump `token_ttl` on the role; alert on this log line — once the in-flight token expires, signing fails. |
+| Background `WARN vault token renewal failed` log | AppRole lease expired faster than renewal interval, or Vault is unreachable | Bump `token_ttl` on the role; alert on this log line — once the in-flight token expires, signing fails. |
 | `data_encryption: missing key_env` | Mixed `vault_transit_encrypt` + AppRole, but role-id env var not set in the running process | Verify the env named in `approle.role_id_env` is exported in the pod / unit. |
 
 ## Runbook

@@ -2,14 +2,18 @@
 
 # Audit events
 
-Every state-changing operation in the authorization server emits an audit record via the [`audit.Service`](../../internal/services/audit.go). Each record carries an `Action` (one of the constants declared in [`internal/domain/audit/entity.go`](../../internal/domain/audit/entity.go)), an `ActorID` (user id, client id, or `"system"` / `"admin"`), a `ClientID`, a source IP, a free-form `Detail` string (canonically `key=value key=value ...` so it is greppable), and the OTel trace id of the request that triggered the emit. This page is the authoritative catalog of every action name and the detail keys it carries.
+Every state-changing operation in the authorization server emits an audit record via the [`audit.Service`](../../internal/services/audit.go). Each record carries an `Action` (one of the constants declared in [`internal/domain/audit/entity.go`](../../internal/domain/audit/entity.go)), an `ActorID` (user id, client id, or `"system"` / `"admin"`), a `ClientID`, a source `ip`, a free-form `Detail` string (canonically `key=value key=value ...` so it is greppable), and the OTel trace id of the request that triggered the emit. This page is the authoritative catalog of every action name and the detail keys it carries.
 
-The `Detail` column lists the keys you can expect to see in the canonical `key=value` payload. Optional keys are wrapped in square brackets. The `Emitted by` column cites the emit site as `file:line` so you can verify the exact format string. Most emits live in the service layer; a few fire from the HTTP handler that owns the decision, and the cited path says which.
+The `ip` field is filled for every event raised while serving an HTTP request, on both the public and admin listeners: the middleware stamps the connection's `RemoteAddr` (never `X-Forwarded-For`) on the request context and the audit service copies it onto any event whose emit site left it empty. Events raised outside a request keep an empty `ip` — the keystore listener, the purge loops, and anything an `authserver admin …` CLI command records.
+
+The `Detail` column lists the keys you can expect to see in the canonical `key=value` payload. Optional keys are wrapped in square brackets. The `Emitted by` column names the function that builds the event and the file it lives in, so you can open the exact format string; line numbers are not cited because they rot. Most emits live in the service layer; a few fire from the HTTP handler that owns the decision, and the cited path says which.
 
 | Action | Detail keys | Emitted by | Example query |
 | --- | --- | --- | --- |
 | `token.issued` | `family` | `exchangeCode` in `internal/services/token.go` | `WHERE action='token.issued'` |
 | `token.refreshed` | `family` | `refreshToken` in `internal/services/token.go` | `WHERE action='token.refreshed'` |
+| `token.issue_denied` | `reason` (the OAuth error code the client received — including `server_error`, so "denied" means "did not issue", not "refused a credential") | `ExchangeCode` in `internal/services/token.go`, through `recordDenied` | `WHERE action='token.issue_denied' AND detail NOT LIKE '%reason=server_error%'` |
+| `token.refresh_denied` | `reason` (same convention) | `RefreshToken` in `internal/services/token.go`, through `recordDenied` | `WHERE action='token.refresh_denied' AND detail LIKE '%reason=invalid_grant%'` |
 | `token.revoked` | `family` \| `machine_token jti` \| `machine_jti` | `RevokeToken` / `tryRevokeMachineToken` in `internal/services/revocation.go`, `RevokeToken` in `internal/services/admin.go` | `WHERE action='token.revoked'` |
 | `auth_code.reused` | `code_reuse session verifier` | `handleCodeReuse` in `internal/services/token.go` | `WHERE action='auth_code.reused' AND detail LIKE '%verifier=valid%'` (a replayer who proved PKCE and the session's `client_id` — the strongest reuse signal the server emits). `actor_id` and `client_id` are the user and client the code was issued to, not the replayer |
 | `family.revoked` | `reuse_detection family` (refresh-token reuse) \| `code_reuse family` (authorization-code reuse) | `revokeFamilyHalf` in `internal/services/token.go`, reached from `revokeFamilyOnReuse` or `handleCodeReuse` | `WHERE action='family.revoked'` (reuse alarm — the detail prefix says which path) |
@@ -17,52 +21,55 @@ The `Detail` column lists the keys you can expect to see in the canonical `key=v
 | `family.denylist_failed` | `reuse_detection family path half` \| `code_reuse family path half` | `reportReuseHalfFailure` in `internal/services/token.go`, reached from `denylistFamilyJTIs` | `WHERE action='family.denylist_failed'` (the family's access-token JTIs could not be denylisted; additive to the family row above, never instead of it) |
 | `token.introspected` | `jti issuing_client` (actor blank; `client_id` carries the *requesting* client, which is not always the token's owner) | `IntrospectToken` in `internal/services/introspection.go` | `WHERE action='token.introspected'` |
 | `token.introspect_denied` | `reason [jti]` | `recordDenial` in `internal/services/introspection.go` | `WHERE action='token.introspect_denied' AND detail LIKE '%reason=caller_not_authorized_for_token%'` |
-| `token.exchanged` | `jti sub subject_client actor_client type scopes` (basic) · `jti sub subject_client actor_client type=mint_dispatch resource scopes chain_kind via_link` (registry mint) · `jti sub subject_client actor_client type=broker_dispatch resource scopes chain_kind via_link` (registry broker) | `internal/services/token_exchange.go:462,1112,1431,1633,1692` | `WHERE action='token.exchanged' AND detail LIKE '%type=broker_dispatch%'` |
-| `token.exchange_denied` | `reason` — includes `subject_token_revoked_during_mint`, `consent_revoked_during_mint`, `subject_recheck_failed` and `consent_recheck_failed`, the four ways the post-mint re-check refuses a token whose authorization changed while it was being minted | `internal/services/token_exchange.go:771` | `WHERE action='token.exchange_denied' AND detail LIKE '%reason=invalid_subject_token%'` |
-| `client_credentials.issued` | `jti scopes` | `internal/services/client_credentials.go:319` | `WHERE action='client_credentials.issued'` |
-| `client_credentials.denied` | `reason` | `internal/services/client_credentials.go:380` | `WHERE action='client_credentials.denied' AND detail LIKE '%reason=invalid_client%'` |
-| `jwt_bearer.issued` | `jti idp scopes` | `internal/services/jwt_bearer.go:468` | `WHERE action='jwt_bearer.issued'` |
-| `jwt_bearer.denied` | `reason` | `internal/services/jwt_bearer.go:524` | `WHERE action='jwt_bearer.denied'` |
-| `upstream.token.issued` | `provider resource scopes` | `internal/services/broker_issuer.go:345` | `WHERE action='upstream.token.issued' AND detail LIKE '%provider=github%'` |
-| `broker_grant.created` | `provider grant_id version` | `internal/services/connect.go:360` | `WHERE action='broker_grant.created'` |
-| `broker_grant.revoked` | `provider grant_id` | `internal/services/connect.go:442` | `WHERE action='broker_grant.revoked'` |
-| `broker_grant.revoked_admin` | `id user_id broker_provider_id` | `internal/services/grant_admin.go:217` | `WHERE action='broker_grant.revoked_admin'` |
-| `consent.granted` | `resource scopes` (or empty if no resource) | `internal/services/consent.go:288` | `WHERE action='consent.granted'` |
-| `consent.denied` | `session` | `internal/services/consent.go:310` | `WHERE action='consent.denied'` |
-| `consent_grant.revoked_admin` | `id user_id client_id resource_id revoked_issuances revoked_families [cascade=failed] [family_cascade=failed]` — `revoked_issuances` counts the client's own tokens for the resource plus every token exchanged from them; `revoked_families` the client's refresh families for it; either `failed` marker means live tokens were missed and the row is worth alerting on | `internal/services/grant_admin.go:224` | `WHERE action='consent_grant.revoked_admin' AND detail LIKE '%failed%'` |
-| `client.registered` | `source=dcr` | `internal/services/dcr.go:167` | `WHERE action='client.registered'` |
-| `client.created_admin` | `name` | `internal/services/admin.go:160` | `WHERE action='client.created_admin'` |
-| `client.secret_rotated` | `(empty)` | `internal/services/admin.go:221` | `WHERE action='client.secret_rotated'` |
-| `client.updated` | `(empty)` | `internal/services/admin.go:283` | `WHERE action='client.updated'` |
-| `client.suspended` | `(empty)` | `internal/services/admin.go:345` | `WHERE action='client.suspended'` |
-| `client.revoked` | `(empty)` | `internal/services/admin.go:370` | `WHERE action='client.revoked'` |
-| `client.deleted` | `force` | `internal/services/admin.go:477` | `WHERE action='client.deleted'` |
-| `user.created` | `email` | `internal/services/admin.go:676` | `WHERE action='user.created'` |
-| `user.updated` | `user` | `internal/services/admin.go:739` | `WHERE action='user.updated'` |
-| `user.deleted` | `user force` | `internal/services/admin.go:799` | `WHERE action='user.deleted'` |
-| `user.disabled` | `user` | `internal/services/admin.go:829` | `WHERE action='user.disabled'` |
-| `user.force_logout` | `user revoked` | `internal/services/admin.go:913` | `WHERE action='user.force_logout'` |
+| `token.exchanged` | `jti sub subject_client actor_client type scopes` (basic) · `jti sub subject_client actor_client type=mint_dispatch resource scopes chain_kind via_link` (registry mint) · `jti sub subject_client actor_client type=broker_dispatch resource scopes chain_kind via_link` (registry broker) | `Exchange` (basic) / `dispatchMint` / `dispatchBroker` / `dispatchFrontedBroker` in `internal/services/token_exchange.go` | `WHERE action='token.exchanged' AND detail LIKE '%type=broker_dispatch%'` |
+| `token.exchange_denied` | `reason` — includes `subject_token_revoked_during_mint`, `consent_revoked_during_mint`, `subject_recheck_failed` and `consent_recheck_failed`, the four ways the post-mint re-check refuses a token whose authorization changed while it was being minted | `recordDenied` and `emitFrontedBrokerDenialAudit` in `internal/services/token_exchange.go` | `WHERE action='token.exchange_denied' AND detail LIKE '%reason=invalid_subject_token%'` |
+| `client_credentials.issued` | `jti scopes` | `Exchange` in `internal/services/client_credentials.go` | `WHERE action='client_credentials.issued'` |
+| `client_credentials.denied` | `reason` | `recordDenied` in `internal/services/client_credentials.go` | `WHERE action='client_credentials.denied' AND detail LIKE '%reason=invalid_client%'` |
+| `jwt_bearer.issued` | `jti idp scopes` | `GrantJWTBearer` in `internal/services/jwt_bearer.go` | `WHERE action='jwt_bearer.issued'` |
+| `jwt_bearer.denied` | `reason` | `recordDenied` in `internal/services/jwt_bearer.go` | `WHERE action='jwt_bearer.denied'` |
+| `upstream.token.issued` | `provider resource scopes` | `Issue` in `internal/services/broker_issuer.go` | `WHERE action='upstream.token.issued' AND detail LIKE '%provider=github%'` |
+| `broker_grant.created` | `provider grant_id version` | `CompleteConnect` in `internal/services/connect.go` | `WHERE action='broker_grant.created'` |
+| `broker_grant.revoked` | `provider grant_id` | `Disconnect` in `internal/services/connect.go` | `WHERE action='broker_grant.revoked'` |
+| `broker_grant.revoked_admin` | `id user_id broker_provider_id` | `RevokeBroker` in `internal/services/grant_admin.go` | `WHERE action='broker_grant.revoked_admin'` |
+| `consent.granted` | `resource scopes` (or empty if no resource) | `GrantConsent` in `internal/services/consent.go` | `WHERE action='consent.granted'` |
+| `consent.denied` | `session` | `DenyConsent` in `internal/services/consent.go` | `WHERE action='consent.denied'` |
+| `consent_grant.revoked_admin` | `id user_id client_id resource_id revoked_issuances revoked_families [cascade=failed] [family_cascade=failed]` — `revoked_issuances` counts the client's own tokens for the resource plus every token exchanged from them; `revoked_families` the client's refresh families for it; either `failed` marker means live tokens were missed and the row is worth alerting on | `RevokeConsent` in `internal/services/grant_admin.go` | `WHERE action='consent_grant.revoked_admin' AND detail LIKE '%failed%'` |
+| `client.registered` | `source=dcr` | `RegisterClient` in `internal/services/dcr.go` | `WHERE action='client.registered'` |
+| `client.created_admin` | `name` | `CreateClient` in `internal/services/admin.go` | `WHERE action='client.created_admin'` |
+| `client.secret_rotated` | `(empty)` | `RotateClientSecret` in `internal/services/admin.go` | `WHERE action='client.secret_rotated'` |
+| `client.updated` | `(empty)` | `UpdateClient` in `internal/services/admin.go` | `WHERE action='client.updated'` |
+| `client.suspended` | `(empty)` | `SuspendClient` in `internal/services/admin.go` | `WHERE action='client.suspended'` |
+| `client.revoked` | `(empty)` | `RevokeClient` in `internal/services/admin.go` | `WHERE action='client.revoked'` |
+| `client.deleted` | `force` | `DeleteClient` in `internal/services/admin.go` | `WHERE action='client.deleted'` |
+| `user.created` | `user` | `internal/services/admin.go` (`CreateUser`) | `WHERE action='user.created'` |
+| `user.updated` | `user` | `UpdateUser` in `internal/services/admin.go` | `WHERE action='user.updated'` |
+| `user.deleted` | `user force` | `DeleteUser` in `internal/services/admin.go` | `WHERE action='user.deleted'` |
+| `user.disabled` | `user` | `DisableUser` in `internal/services/admin.go` | `WHERE action='user.disabled'` |
+| `user.force_logout` | `user revoked` | `ForceLogoutUser` in `internal/services/admin.go` | `WHERE action='user.force_logout'` |
 | `user.login` | `(empty)` | `internal/services/user_auth.go` (`Authenticate`) | `WHERE action='user.login'` |
-| `user.login_failed` | `reason` (`user_not_found` \| `user_disabled` \| `user_not_local` \| `invalid_credentials` \| `unusable_stored_hash`), `email` (quoted). **`actor_id` is set** — see the note below | `internal/services/user_auth.go` (`denyLogin`) | `WHERE action='user.login_failed'` |
-| `auth.locked_out` | `until email` (email quoted — it is form input) | `api/public/oauth/login.go` (`recordLockout`) | `WHERE action='auth.locked_out'` |
-| `user.oidc_login` | `(empty)` | `internal/services/oidc.go:146` | `WHERE action='user.oidc_login'` |
-| `user.oidc_login_failed` | `code exchange failed` \| `user disabled` | `internal/services/oidc.go:65,109` | `WHERE action='user.oidc_login_failed'` |
-| `resource.created` | `id slug` | `internal/services/resource_admin.go:233` | `WHERE action='resource.created'` |
-| `resource.patched` | `id slug fields` | `internal/services/resource_admin.go:398` | `WHERE action='resource.patched' AND detail LIKE '%fields=scope_catalog%'` |
-| `resource.deleted` | `id slug [cascaded_links]` | `internal/services/resource_admin.go:495` | `WHERE action='resource.deleted'` |
-| `resource.policy.exchange.allowed_client.added` | `(see emit site for exact key list)` | `internal/services/resource_admin.go:627` | `WHERE action='resource.policy.exchange.allowed_client.added'` |
-| `resource.policy.exchange.allowed_client.removed` | `(see emit site)` | `internal/services/resource_admin.go:682` | `WHERE action='resource.policy.exchange.allowed_client.removed'` |
-| `resource.policy.connect.allowed_return_url.added` | `(see emit site)` | `internal/services/resource_admin.go:753` | `WHERE action='resource.policy.connect.allowed_return_url.added'` |
-| `resource.policy.connect.allowed_return_url.removed` | `(see emit site)` | `internal/services/resource_admin.go:814` | `WHERE action='resource.policy.connect.allowed_return_url.removed'` |
-| `resource.policy.runtime.client.added` | `(see emit site)` | `internal/services/resource_admin.go:969` | `WHERE action='resource.policy.runtime.client.added'` |
-| `resource.policy.runtime.client.removed` | `(see emit site)` | `internal/services/resource_admin.go:1024` | `WHERE action='resource.policy.runtime.client.removed'` |
-| `broker_provider.created` | `id slug` | `internal/services/broker_provider_admin.go:148` | `WHERE action='broker_provider.created'` |
-| `broker_provider.patched` | `id slug fields` | `internal/services/broker_provider_admin.go:233` | `WHERE action='broker_provider.patched'` |
-| `broker_provider.deleted` | `id` | `internal/services/broker_provider_admin.go:265` | `WHERE action='broker_provider.deleted'` |
-| `fronting_link.created` | `source target scopes` | `internal/services/fronting.go:170` | `WHERE action='fronting_link.created'` |
-| `fronting_link.patched` | `source target scopes` | `internal/services/fronting.go:220` | `WHERE action='fronting_link.patched'` |
-| `fronting_link.deleted` | `source target` | `internal/services/fronting.go:244,371` | `WHERE action='fronting_link.deleted'` |
-| `issuance.revoked_admin` | `id subject_user_id client_id resource_id` | `internal/services/issuance_admin.go:214` | `WHERE action='issuance.revoked_admin'` |
+| `user.login_failed` | `reason` (`user_not_found` \| `user_disabled` \| `user_not_local` \| `invalid_credentials` \| `unusable_stored_hash`). The submitted address is not recorded. **`actor_id` is set** — see the note below | `internal/services/user_auth.go` (`denyLogin`) | `WHERE action='user.login_failed'` |
+| `auth.locked_out` | `until` (the submitted address is not recorded; `ip` carries the source) | `api/public/oauth/login.go` (`recordLockout`) | `WHERE action='auth.locked_out'` |
+| `admin.ui.login` | `api_key_verified` (free text) — the Admin UI calls `POST /admin/auth/verify` on every page load, so this is the highest-volume row and a liveness signal for the key, not a login | `handleAuthVerify` in `api/admin/auth.go` | `WHERE action='admin.ui.login'` (exclude it from volume queries) |
+| `key.rotated` | `admin rotated signing key: kid=<kid>` (free text, not `key=value`) | `handleRotateKey` in `api/admin/keys.go` | `WHERE action='key.rotated'` |
+| `dcr.mode_updated` | `dcr mode changed from <old> to <new>` (free text) | `handleUpdateDCRSettings` in `api/admin/dcr.go` | `WHERE action='dcr.mode_updated'` |
+| `user.oidc_login` | `(empty)` | `AuthenticateOIDC` in `internal/services/oidc.go` | `WHERE action='user.oidc_login'` |
+| `user.oidc_login_failed` | `code exchange failed` \| `user disabled` | `AuthenticateOIDC` in `internal/services/oidc.go` | `WHERE action='user.oidc_login_failed'` |
+| `resource.created` | `id slug` | `Create` in `internal/services/resource_admin.go` | `WHERE action='resource.created'` |
+| `resource.patched` | `id slug fields` | `Patch` in `internal/services/resource_admin.go` | `WHERE action='resource.patched' AND detail LIKE '%fields=scope_catalog%'` |
+| `resource.deleted` | `id slug [cascaded_links]` | `DeleteWithCascade` in `internal/services/resource_admin.go` | `WHERE action='resource.deleted'` |
+| `resource.policy.exchange.allowed_client.added` | `(see emit site for exact key list)` | `AddAllowedClient` in `internal/services/resource_admin.go` | `WHERE action='resource.policy.exchange.allowed_client.added'` |
+| `resource.policy.exchange.allowed_client.removed` | `(see emit site)` | `RemoveAllowedClient` in `internal/services/resource_admin.go` | `WHERE action='resource.policy.exchange.allowed_client.removed'` |
+| `resource.policy.connect.allowed_return_url.added` | `(see emit site)` | `AddAllowedReturnURL` in `internal/services/resource_admin.go` | `WHERE action='resource.policy.connect.allowed_return_url.added'` |
+| `resource.policy.connect.allowed_return_url.removed` | `(see emit site)` | `RemoveAllowedReturnURL` in `internal/services/resource_admin.go` | `WHERE action='resource.policy.connect.allowed_return_url.removed'` |
+| `resource.policy.runtime.client.added` | `(see emit site)` | `AddRuntimeClientID` in `internal/services/resource_admin.go` | `WHERE action='resource.policy.runtime.client.added'` |
+| `resource.policy.runtime.client.removed` | `(see emit site)` | `RemoveRuntimeClientID` in `internal/services/resource_admin.go` | `WHERE action='resource.policy.runtime.client.removed'` |
+| `broker_provider.created` | `id slug` | `Create` in `internal/services/broker_provider_admin.go` | `WHERE action='broker_provider.created'` |
+| `broker_provider.patched` | `id slug fields` | `Patch` in `internal/services/broker_provider_admin.go` | `WHERE action='broker_provider.patched'` |
+| `broker_provider.deleted` | `id` | `Delete` in `internal/services/broker_provider_admin.go` | `WHERE action='broker_provider.deleted'` |
+| `fronting_link.created` | `source target scopes` | `Create` in `internal/services/fronting.go` | `WHERE action='fronting_link.created'` |
+| `fronting_link.patched` | `source target scopes` | `Patch` in `internal/services/fronting.go` | `WHERE action='fronting_link.patched'` |
+| `fronting_link.deleted` | `source target` | `Delete` and `CascadeDeleteForResource` in `internal/services/fronting.go` | `WHERE action='fronting_link.deleted'` |
+| `issuance.revoked_admin` | `id subject_user_id client_id resource_id` | `Revoke` in `internal/services/issuance_admin.go` | `WHERE action='issuance.revoked_admin'` |
 
 > **`user.login_failed` carries an `actor_id` that the failed request did not
 > authenticate as.** When the submitted address resolves to an account, the row
@@ -105,9 +112,8 @@ absence marks a request that failed before the token was understood.
 | `subject_inactive` | The user the token represents is disabled or gone. |
 
 The client-authentication reasons are the ones a caller can trigger without
-holding a valid token, so a rising rate on them is the shape of a scan. Note
-that no `ip` is populated on these events, so `client_id` is the only
-attribution a row carries.
+holding a valid token, so a rising rate on them is the shape of a scan. Pair
+`client_id` with `ip` to tell one scanner from many.
 
 Six outcomes are deliberately **not** recorded.
 
@@ -137,12 +143,10 @@ something: `invalid_client_secret` pays a full secret comparison, and
 These action constants are declared in [`internal/domain/audit/entity.go`](../../internal/domain/audit/entity.go) but are not yet referenced by a production emit site (they are reserved for future wiring or are emitted only by tests). They are listed here so consumers of the audit log do not assume they will appear:
 
 - `auth.denied`
-- `key.rotated`
 - `upstream.token.refreshed`
-- `dcr.mode_updated`
 
 ## See also
 
 - Schema: [`audit_events` table](../../migrations/postgres/) (Postgres) / [`audit_events` table](../../migrations/sqlite/) (SQLite).
-- Query API: [`GET /admin/audit`](http-api.md#http-admin-audit-list).
+- Query API: [`GET /admin/audit`](http-api.md#http-admin-audit-list) — filters `action`, `actor_id`, `client_id`, `since`, `until` (RFC 3339; `since` is bounded by `admin.audit_max_lookback`), `limit`, `offset`.
 - Domain entity: [`internal/domain/audit/entity.go`](../../internal/domain/audit/entity.go).

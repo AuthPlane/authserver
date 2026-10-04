@@ -186,10 +186,23 @@ type CreateParams struct {
 	AgentDescription        string
 }
 
-// Defaults fills in RFC 7591 defaults for optional fields.
+// DefaultGrantTypes is what a client that omits grant_types is registered
+// with. RFC 7591 §2 defaults to authorization_code alone, but the token
+// endpoint honors refresh_token only for clients registered for it, so the
+// RFC default would leave every MCP client that omits the field without
+// refresh — a silent change for clients that always had it. refresh_token is
+// harmless on its own: it is reachable only through a token the
+// authorization_code grant issued. A client that sends grant_types explicitly
+// gets exactly what it sent.
+func DefaultGrantTypes() []string {
+	return []string{"authorization_code", "refresh_token"}
+}
+
+// Defaults fills in defaults for optional fields: RFC 7591's, except
+// grant_types (see DefaultGrantTypes).
 func (p *CreateParams) Defaults() {
 	if len(p.GrantTypes) == 0 {
-		p.GrantTypes = []string{"authorization_code"}
+		p.GrantTypes = DefaultGrantTypes()
 	}
 	if len(p.ResponseTypes) == 0 {
 		p.ResponseTypes = []string{"code"}

@@ -2,7 +2,7 @@
 
 *Context: this is part of [Guides — Federation](README.md). Start with the primer if you haven't.*
 
-**Audience:** Operator running Authplane for a team that already has a corporate IdP. After this recipe, users click "Sign in with &lt;your IdP&gt;" on the Authplane login page and Authplane auto-provisions or links a local account from the ID-token claims.
+**Audience:** Operator running Authplane for a team that already has a corporate IdP. After this recipe, users click "Sign in with &lt;your IdP&gt;" on the Authplane login page and Authplane auto-provisions a local account from the ID-token claims on first login and finds it again by the IdP's `sub` on every later one.
 
 ## What you'll achieve in 15 minutes
 
@@ -19,7 +19,7 @@
 
 ## How it works (one paragraph)
 
-User clicks the federation button on Authplane's login page; Authplane redirects to the IdP; the IdP authenticates the user; the IdP redirects back to `/oidc/callback` with an authorization code; Authplane exchanges the code for an ID token, reads `email` and `name`, and either creates a new local account or links to an existing one. The rest of the OAuth flow (consent, scope grant, token issuance) is unchanged. Full sequence in [Reference → Flow 14](../../reference/flows.md).
+User clicks the federation button on Authplane's login page; Authplane redirects to the IdP; the IdP authenticates the user; the IdP redirects back to `/oidc/callback` with an authorization code; Authplane exchanges the code for an ID token, looks the user up by the IdP's subject (`sub`), and creates a new local account on first login, filling `email` and `name` when the IdP sends them. An existing local account is never linked by email. The rest of the OAuth flow (consent, scope grant, token issuance) is unchanged. Full sequence in [Reference → Flow 14](../../reference/flows.md).
 
 ## Steps
 
@@ -109,18 +109,19 @@ authserver admin user list | grep your-email@example.com
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | OIDC button doesn't appear on the login page | `oidc.enabled` is not `true`, or the server didn't reload config | Verify `AUTHPLANE_OIDC_ENABLED=true` (or YAML); restart authserver. |
-| "OIDC authentication failed. Please try again." after IdP login | JWKS unreachable, signature failure, or `client_secret` wrong | Tail authserver logs — `WARN OIDC authentication failed error=<reason>` (`api/public/oauth/oidc.go:116`). Verify the IdP's `/.well-known/openid-configuration` is reachable from authserver's network. |
+| "OIDC authentication failed. Please try again." after IdP login | JWKS unreachable, signature failure, or `client_secret` wrong | Tail authserver logs — `WARN OIDC authentication failed error=<reason>` (`handleOIDCCallback` in `api/public/oauth/oidc.go`). Verify the IdP's `/.well-known/openid-configuration` is reachable from authserver's network. |
 | IdP returns `redirect_uri mismatch` | The URL registered at the IdP does not exactly match `oidc.redirect_uri` | Compare character-for-character — protocol, host, port, path, and trailing slash all matter. |
-| User logs in but no account is created (silent failure) | The IdP did not return an `email` claim in the ID token | Confirm `email` is in `oidc.scopes` and the IdP-side app config exposes the email claim. Without `email`, Authplane cannot reconcile the user. |
+| Federated user's account has no email | The IdP did not return an `email` claim in the ID token | Sign-in still works — users are keyed on the IdP's `sub`. To populate the email, add `email` to `oidc.scopes` and expose the claim in the IdP-side app config; it is filled in on the next login. |
+| "The email address your identity provider shared is already used by another account" (HTTP 409) on first IdP login | The IdP asserted an email that a local (or another federated) account already holds. Authplane does not link accounts by email, so the login is refused and audited as `user.oidc_login_failed` with `reason=email_in_use` | Decide which account is the user's: give the other account a different email (`authserver admin user update`) or delete it, then retry the IdP login. |
 | Redirect loop between Authplane and IdP | `oidc.redirect_uri` points to the IdP, not to Authplane | The redirect URI must be **Authplane's** callback (`/oidc/callback`), not the IdP's. |
-| "OIDC state verification failed" | Browser cookies blocked, multi-tab login race, or replayed state | One tab per login attempt; ensure the session cookie domain matches the issuer; check `session.secure: true` if issuer is HTTPS. (`api/public/oauth/oidc.go:96`) |
+| "Invalid or expired state. Please try again." on the callback | Browser cookies blocked, multi-tab login race, or replayed / stale state | One tab per login attempt; ensure the session cookie domain matches the issuer; check `session.secure: true` if issuer is HTTPS. The log line says which check failed — `WARN OIDC state decode failed`, `WARN OIDC state expired`, or `WARN OIDC state cookie mismatch` (`handleOIDCCallback` in `api/public/oauth/oidc.go`). |
 | Login works but the user can't reach `/authorize` afterward | `show_local_login: false` and the user has no consent grants yet | Normal first-time path — the consent screen renders next. If it doesn't, check that the OAuth client redirect URI matches. |
 | `POST /login` returns 404 | `show_local_login: false` — local password login is disabled | Expected. Sign in through the IdP button, or set `AUTHPLANE_OIDC_SHOW_LOCAL_LOGIN=true` and restart to restore password login. |
 
 ## Limitations
 
 - **One upstream OIDC provider per Authplane instance.** For multiple IdPs, front them with [Dex](https://dexidp.io/) and configure Authplane to use Dex as the single upstream.
-- **Email claim required.** Authplane reconciles users by email; without an `email` claim, account creation fails silently.
+- **No account linking by email.** Federated users are identified by the IdP's `sub`, not by email. The `email` claim is optional; an email already held by another account blocks that user's first IdP login (see above).
 - **No SCIM provisioning yet.** Users are JIT-provisioned on first login. Bulk pre-provisioning is roadmap.
 
 ## See also

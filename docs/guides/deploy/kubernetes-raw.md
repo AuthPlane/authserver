@@ -61,11 +61,11 @@ data:
       algorithm: ES256
       key_store: postgres_key            # multi-replica safe
       postgres_key:
-        encryption_key_env: AUTHPLANE_SIGNING_KEY_ENC
+        encryption_key_env: AUTHPLANE_SIGNING_KEY_ENC   # name of the pod env var that holds the key
     data_encryption:
       driver: aes_master
       aes_master:
-        key_env: AUTHPLANE_DATA_ENC_KEY
+        key_env: AUTHPLANE_DATA_ENC_KEY                 # name of the pod env var that holds the key
     session:
       secure: true
       same_site: lax

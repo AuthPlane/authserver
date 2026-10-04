@@ -249,6 +249,8 @@ func TestDPoP_UnifiedBrokerDispatch_JKTPersistsOnIssuance(t *testing.T) {
 		Target:   upstreamSlug,
 		ScopeMap: map[string][]string{"tools/echo": {"repo"}},
 	})
+	// The caller is not mcp-0's gateway; the target names it as an allowed exchanger.
+	h.AdminAddAllowedClient(upstreamSlug, mcpServerClientID)
 	h.RunFlowC1Consent(email, password, webAppClientID, "http://localhost:9999/callback", mcpServerSlug, []string{"tools/echo", "repo"}, []string{"tools/echo", "repo"})
 
 	// Build a DPoP signer and POST the token-exchange targeting the

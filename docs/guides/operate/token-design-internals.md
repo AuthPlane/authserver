@@ -152,25 +152,25 @@ The chain depth is capped by `max_chain_depth`; exceeding it returns `ErrTokenEx
 
 All names below come from `internal/observability/metrics.go`. Use them verbatim in PromQL.
 
-| Metric | Source line | Why monitor |
+| Metric | Source | Why monitor |
 |---|---|---|
-| `authserver_tokens_issued_total` | `metrics.go:105` | Baseline issuance rate; anomalous spike → enumeration or runaway client. |
-| `authserver_tokens_refreshed_total` | `metrics.go:110` | Should track issued tokens scaled by refresh cadence. |
-| `authserver_tokens_revoked_total` | `metrics.go:115` | Spike → operator action or family-revocation burst. |
+| `authserver_tokens_issued_total` | `TokensIssued` in `metrics.go` | Baseline issuance rate; anomalous spike → enumeration or runaway client. |
+| `authserver_tokens_refreshed_total` | `TokensRefreshed` in `metrics.go` | Should track issued tokens scaled by refresh cadence. |
+| `authserver_tokens_revoked_total` | `TokensRevoked` in `metrics.go` | Spike → operator action or family-revocation burst. |
 | `authserver_refresh_token_reuse_total` | `RefreshTokenReuse` in `metrics.go` | **Critical alert.** Non-zero for > 5 min → IR. |
 | `authserver_auth_code_reuse_total` | `AuthCodeReuse` in `metrics.go` | **Critical alert on `{verifier="valid"}`** — the replayer held the verifier and the client_id: a captured request, a code someone else burned first, or the legitimate client re-submitting its own exchange (see the three stories above). `{verifier="invalid"}` is noise-grade: a spent code was replayed by someone who could not have redeemed it. |
-| `authserver_token_issuance_duration_seconds` | `metrics.go:147` | Latency budget; tail spikes → DB contention. |
-| `authserver_key_rotation_total` | `metrics.go:210` | Unexpected increment → unauthorised rotation. |
-| `authserver_upstream_token_issued_total` | `metrics.go:224` | Broker-dispatch volume per upstream provider. |
-| `authserver_upstream_token_refresh_total` | `metrics.go:236` | Background upstream refreshes; flat-zero may mean upstream secrets expired. |
-| `authplane_dpop_proofs_validated_total` | `metrics.go:265` | DPoP adoption gauge. |
-| `authplane_dpop_proofs_rejected_total` | `metrics.go:270` | Reject rate; sustained non-zero → replay attempt or clock skew. |
-| `authplane_token_exchange_total` | `metrics.go:277` | RFC 8693 volume; baseline for delegation-heavy deployments. |
-| `authplane_token_exchange_denied_total` | `metrics.go:282` | Denied exchanges; chain-depth, allowlist, scope-coverage failures. |
-| `authplane_client_credentials_issued_total` | `metrics.go:253` | Machine-token issuance baseline. |
-| `authserver_active_clients` | `metrics.go:325` | Gauge; mutation by `client.created_admin` / `client.deleted`. |
+| `authserver_token_issuance_duration_seconds` | `TokenIssuanceDuration` in `metrics.go` | Latency budget; tail spikes → DB contention. |
+| `authserver_key_rotation_total` | `KeyRotationTotal` in `metrics.go` | Unexpected increment → unauthorised rotation. |
+| `authserver_upstream_token_issued_total` | `UpstreamTokenIssuedTotal` in `metrics.go` | Broker-dispatch volume per upstream provider. |
+| `authserver_upstream_token_refresh_total` | `UpstreamTokenRefreshTotal` in `metrics.go` | Background upstream refreshes; flat-zero may mean upstream secrets expired. |
+| `authplane_dpop_proofs_validated_total` | `DPoPProofsValidated` in `metrics.go` | DPoP adoption gauge. |
+| `authplane_dpop_proofs_rejected_total` | `DPoPProofsRejected` in `metrics.go` | Reject rate; sustained non-zero → replay attempt or clock skew. |
+| `authplane_token_exchange_total` | `TokenExchangeTotal` in `metrics.go` | RFC 8693 volume; baseline for delegation-heavy deployments. |
+| `authplane_token_exchange_denied_total` | `TokenExchangeDenied` in `metrics.go` | Denied exchanges; chain-depth, allowlist, scope-coverage failures. |
+| `authplane_client_credentials_issued_total` | `ClientCredentialsIssued` in `metrics.go` | Machine-token issuance baseline. |
+| `authserver_active_clients` | `ActiveClients` in `metrics.go` | Gauge; mutation by `client.created_admin` / `client.deleted`. |
 | `authserver_active_token_families` | `ActiveTokenFamilies` in `metrics.go` | Gauge. Families are never purged today, so growth is expected, not a fault. |
-| `authserver_introspection_total` | `metrics.go:203` | Reverse-validation volume; non-zero only if resource servers do real-time revocation checks. |
+| `authserver_introspection_total` | `IntrospectionTotal` in `metrics.go` | Reverse-validation volume; non-zero only if resource servers do real-time revocation checks. |
 
 ## Verify
 

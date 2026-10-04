@@ -5,6 +5,7 @@ package public_test
 import (
 	"context"
 	"fmt"
+	"github.com/authplane/authserver/internal/domain"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -329,7 +330,9 @@ func TestOIDCCallback_Redirect_LocationStaysOnThisOrigin(t *testing.T) {
 func TestOIDCCallback_AuthFailed_ShowsError(t *testing.T) {
 	mock := &mockOIDCFlowProvider{
 		authURL: "https://idp.example.com/authorize",
-		err:     fmt.Errorf("upstream auth failed"),
+		// The facade reports every authentication failure as ErrOIDCAuthFailed;
+		// any other error is a server fault (500).
+		err: fmt.Errorf("upstream auth failed: %w", domain.ErrOIDCAuthFailed),
 	}
 	env := newOIDCTestServer(t, mock)
 

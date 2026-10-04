@@ -6,6 +6,10 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alerting rules (see docs/guides/operate/incident-runbook.md for the runbook anchors).
+rule_files:
+  - /etc/prometheus/alerts.yaml
+
 scrape_configs:
   - job_name: authserver
     scrape_interval: 10s

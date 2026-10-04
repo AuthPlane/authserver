@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 53 lines · SDK: go-sdk v0.3.0**
+**Auth-specific code: 5 lines · Total example: 53 lines · SDK: go-sdk v0.4.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP

@@ -2,9 +2,9 @@ name: Security
 
 on:
   push:
-    branches: [main, develop, 'epic/**']
+    branches: [main, develop, 'epic/**', 'release/**']
   pull_request:
-    branches: [main, develop, 'epic/**']
+    branches: [main, develop, 'epic/**', 'release/**']
   schedule:
     # Run weekly on Monday at 06:00 UTC
     - cron: "0 6 * * 1"
@@ -29,40 +29,54 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Run govulncheck
         run: |
-          # Run govulncheck; capture output and exit code.
-          set +e
-          OUTPUT=$(govulncheck ./... 2>&1)
-          EXIT_CODE=$?
-          echo "$OUTPUT"
-          set -e
+          # e2e/ and compliance/ are separate Go modules; a root-level
+          # `govulncheck ./...` never sees them. Scan each module in turn and
+          # apply the same exit-code dispatch to every run.
+          FAILED=0
+          for MOD in . e2e compliance; do
+            # The published tree does not carry every module; skip what is absent.
+            if [ ! -f "$MOD/go.mod" ]; then
+              echo "govulncheck ($MOD): no module here, skipped"
+              continue
+            fi
+            echo "::group::govulncheck ($MOD)"
+            set +e
+            OUTPUT=$(cd "$MOD" && govulncheck ./... 2>&1)
+            EXIT_CODE=$?
+            echo "$OUTPUT"
+            set -e
 
-          # govulncheck's exit codes: 0 = clean, 3 = vulnerabilities found,
-          # anything else = it failed to run. Dispatch on the code rather than
-          # on "non-zero", so a toolchain/network/load error can never be
-          # mistaken for a clean or merely-stdlib result.
-          case "$EXIT_CODE" in
-            0)
-              echo "No vulnerabilities found."
-              ;;
-            3)
-              # Findings are attributed either to the standard library (which
-              # prints a bare "Standard library" line and is only fixable by
-              # bumping Go) or to a dependency (which prints "Module: <path>").
-              # Any Module: line therefore means something is fixable here.
-              if echo "$OUTPUT" | grep -qE '^[[:space:]]*Module:[[:space:]]'; then
+            # govulncheck's exit codes: 0 = clean, 3 = vulnerabilities found,
+            # anything else = it failed to run. Dispatch on the code rather than
+            # on "non-zero", so a toolchain/network/load error can never be
+            # mistaken for a clean or merely-stdlib result.
+            case "$EXIT_CODE" in
+              0)
+                echo "No vulnerabilities found in $MOD."
+                ;;
+              3)
+                # Findings are attributed either to the standard library (which
+                # prints a bare "Standard library" line and is only fixable by
+                # bumping Go) or to a dependency (which prints "Module: <path>").
+                # Any Module: line therefore means something is fixable here.
+                if echo "$OUTPUT" | grep -qE '^[[:space:]]*Module:[[:space:]]'; then
+                  echo ""
+                  echo "::error::Third-party dependency vulnerabilities found in $MOD."
+                  FAILED=1
+                else
+                  echo ""
+                  echo "::warning::Only Go stdlib vulnerabilities found in $MOD — upgrade Go to fix."
+                fi
+                ;;
+              *)
                 echo ""
-                echo "::error::Third-party dependency vulnerabilities found."
-                exit 1
-              fi
-              echo ""
-              echo "::warning::Only Go stdlib vulnerabilities found — upgrade Go to fix."
-              ;;
-            *)
-              echo ""
-              echo "::error::govulncheck failed to run (exit $EXIT_CODE); no vulnerability report was produced."
-              exit 1
-              ;;
-          esac
+                echo "::error::govulncheck failed to run in $MOD (exit $EXIT_CODE); no vulnerability report was produced."
+                FAILED=1
+                ;;
+            esac
+            echo "::endgroup::"
+          done
+          exit $FAILED
 
   trivy:
     name: Container Image Scan

@@ -369,6 +369,49 @@ func TestOIDCCallback_AuthFailure_Returns401(t *testing.T) {
 	}
 }
 
+func TestOIDCCallback_StoreError_Returns500(t *testing.T) {
+	codec := static.NewStateCodec(static.NewStateCodecConfigProvider([]byte("test-key-anything-non-empty")))
+	// A failure that is neither an auth failure nor an upstream outage — here
+	// a user-store error — is a server error, not a 401.
+	h := newTestHandler(t, codec, &stubOIDC{authErr: errors.New("create federated user: database is locked")})
+
+	fresh := output.State{
+		Redirect: "/dashboard", Nonce: "n", Verifier: "v", BrowserNonce: "b",
+		IssuedAt: time.Now().UTC(),
+	}
+	wire, _ := codec.Encode(context.Background(), fresh)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/oidc/callback?code=c&state="+string(wire), nil)
+	req.AddCookie(&http.Cookie{Name: oidcStateCookieName, Value: "b"})
+	w := httptest.NewRecorder()
+	h.handleOIDCCallback(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status=%d, want 500 (a store failure is a server error)", w.Code)
+	}
+}
+
+func TestOIDCCallback_EmailInUse_Returns409WithReason(t *testing.T) {
+	codec := static.NewStateCodec(static.NewStateCodecConfigProvider([]byte("test-key-anything-non-empty")))
+	h := newTestHandler(t, codec, &stubOIDC{authErr: domain.ErrOIDCEmailInUse})
+
+	fresh := output.State{
+		Redirect: "/dashboard", Nonce: "n", Verifier: "v", BrowserNonce: "b",
+		IssuedAt: time.Now().UTC(),
+	}
+	wire, _ := codec.Encode(context.Background(), fresh)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/oidc/callback?code=c&state="+string(wire), nil)
+	req.AddCookie(&http.Cookie{Name: oidcStateCookieName, Value: "b"})
+	w := httptest.NewRecorder()
+	h.handleOIDCCallback(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("status=%d, want 409", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "already used by another account") {
+		t.Errorf("error page does not say why the sign-in was refused: %s", w.Body.String())
+	}
+}
+
 // findStateCookie returns the OIDC state cookie from a recorder, or nil.
 func findStateCookie(rec *httptest.ResponseRecorder) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {

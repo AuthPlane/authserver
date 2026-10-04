@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/authplane/authserver/internal/ports/output"
 )
@@ -23,9 +24,15 @@ type idTokenClaims struct {
 	Groups   []string             `json:"groups"`
 }
 
-func (p *Provider) verifyIDToken(ctx context.Context, cfg output.OIDCConfig, doc DiscoveryDoc, jwks *jose.JSONWebKeySet, rawToken, expectedNonce string) (*output.OIDCTokenResult, error) {
+func (p *Provider) verifyIDToken(ctx context.Context, cfg output.OIDCConfig, doc DiscoveryDoc, jwks *jose.JSONWebKeySet, rawToken, expectedNonce string) (result *output.OIDCTokenResult, err error) {
 	ctx, span := p.tracer.Start(ctx, "OIDC.verifyIDToken")
-	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
 
 	tok, err := josejwt.ParseSigned(rawToken, []jose.SignatureAlgorithm{
 		jose.RS256, jose.RS384, jose.RS512,
@@ -60,7 +67,7 @@ func (p *Provider) verifyIDToken(ctx context.Context, cfg output.OIDCConfig, doc
 	}
 
 	var claims idTokenClaims
-	if err := tok.Claims(keys[0].Key, &claims); err != nil {
+	if err = tok.Claims(keys[0].Key, &claims); err != nil {
 		return nil, fmt.Errorf("verify ID token signature: %w", err)
 	}
 

@@ -154,7 +154,7 @@ func (d *DB) Migrate(ctx context.Context) error {
 			continue
 		}
 		var v int
-		if _, err := fmt.Sscanf(e.Name(), "%d_", &v); err != nil {
+		if _, scanErr := fmt.Sscanf(e.Name(), "%d_", &v); scanErr != nil {
 			continue
 		}
 		if !applied[v] {
@@ -163,36 +163,105 @@ func (d *DB) Migrate(ctx context.Context) error {
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].version < pending[j].version })
 
+	if len(pending) == 0 {
+		return nil
+	}
+
+	// One pinned connection for the whole run: PRAGMA foreign_keys is
+	// per-connection, so a migration that switches it off must run its
+	// transaction on the connection it switched.
+	conn, err := d.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
 	for _, m := range pending {
 		data, err := fs.ReadFile(migrations.Migrations, m.name)
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", m.name, err)
 		}
-
-		tx, err := d.DB.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin tx for %s: %w", m.name, err)
+		if err := d.applyMigration(ctx, conn, m.version, m.name, string(data)); err != nil {
+			return err
 		}
-
-		if _, err := tx.ExecContext(ctx, string(data)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("exec migration %s: %w", m.name, err)
-		}
-
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO schema_migrations (version) VALUES (?)`, m.version); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record migration %d: %w", m.version, err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", m.name, err)
-		}
-
 		d.logger.InfoContext(ctx, "applied migration", "version", m.version, "file", m.name)
 	}
 
 	return nil
+}
+
+// foreignKeysOffDirective, as the first line of a migration, makes the
+// runner disable foreign-key enforcement around that migration's
+// transaction. SQLite cannot drop a column constraint in place, and its
+// documented table rebuild (create, copy, DROP, RENAME) needs foreign keys
+// off: with them on, DROP TABLE runs an implicit DELETE that fires every ON
+// DELETE CASCADE in the child tables. PRAGMA foreign_keys is a no-op inside
+// a transaction, so the migration cannot do this itself.
+const foreignKeysOffDirective = "-- migrate:foreign-keys-off"
+
+// applyMigration runs one migration and records it, in one transaction on
+// conn. With the foreign-keys-off directive it disables enforcement first,
+// runs PRAGMA foreign_key_check before committing (a rebuild that broke a
+// reference rolls back), and re-enables enforcement afterwards whatever the
+// outcome.
+func (d *DB) applyMigration(ctx context.Context, conn *sql.Conn, version int, name, script string) (err error) {
+	if strings.HasPrefix(script, foreignKeysOffDirective) {
+		if _, offErr := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); offErr != nil {
+			return fmt.Errorf("disable foreign keys for %s: %w", name, offErr)
+		}
+		defer func() {
+			if _, onErr := conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA foreign_keys = ON"); onErr != nil && err == nil {
+				err = fmt.Errorf("re-enable foreign keys after %s: %w", name, onErr)
+			}
+		}()
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx for %s: %w", name, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, script); err != nil {
+		return fmt.Errorf("exec migration %s: %w", name, err)
+	}
+	if strings.HasPrefix(script, foreignKeysOffDirective) {
+		if err := checkForeignKeys(ctx, tx); err != nil {
+			return fmt.Errorf("migration %s: %w", name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO schema_migrations (version) VALUES (?)`, version); err != nil {
+		return fmt.Errorf("record migration %d: %w", version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", name, err)
+	}
+	return nil
+}
+
+// checkForeignKeys fails when PRAGMA foreign_key_check reports any row
+// whose reference does not resolve.
+func checkForeignKeys(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("foreign_key_check: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		var table, parent string
+		var rowid sql.NullInt64
+		var fkid int
+		if scanErr := rows.Scan(&table, &rowid, &parent, &fkid); scanErr != nil {
+			return fmt.Errorf("foreign_key_check: scan: %w", scanErr)
+		}
+		return fmt.Errorf("foreign_key_check: %s row %d references a missing %s row", table, rowid.Int64, parent)
+	}
+	return rows.Err()
 }
 
 // appliedMigrations returns the set of versions recorded in

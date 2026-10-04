@@ -143,6 +143,13 @@ var (
 	// server problem rather than a user auth failure.
 	ErrOIDCUnavailable = newError("temporarily_unavailable", "OIDC upstream is unavailable")
 
+	// ErrOIDCEmailInUse — a first federated login asserts an email that
+	// already belongs to another account (local or federated). Federated
+	// identity is keyed on (provider, subject) and never linked by email, so
+	// the login is refused rather than attached to that account; handlers map
+	// this to HTTP 409 with a message that says why.
+	ErrOIDCEmailInUse = newError(CodeConflict, "the email address asserted by the identity provider belongs to another account")
+
 	// ErrRefreshTokenReused — refresh token was already consumed (concurrent or replay).
 	ErrRefreshTokenReused = newError("invalid_grant", "refresh token has already been used")
 
@@ -468,7 +475,7 @@ type FrontingLinkMissingError struct {
 // response can resolve it without grepping the codebase.
 func (e *FrontingLinkMissingError) Error() string {
 	return fmt.Sprintf(
-		"no fronting link declared from %q to %q — declare fronting_links(%s, %s) — see docs/how-to/topologies/mcp-gateway-broker.md",
+		"no fronting link declared from %q to %q — declare fronting_links(%s, %s) — see docs/topologies/mcp-gateway-broker.md",
 		e.SourceSlug, e.TargetSlug, e.SourceSlug, e.TargetSlug,
 	)
 }

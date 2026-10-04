@@ -698,9 +698,9 @@ func (s *AdminService) CreateUser(ctx context.Context, req input.CreateUserReque
 	}
 
 	if s.audit != nil {
-		s.audit.Record(ctx, audit.NewEvent(audit.ActionUserCreated, "admin", "", "", "email="+req.Email))
+		s.audit.Record(ctx, audit.NewEvent(audit.ActionUserCreated, "admin", "", "", "user="+u.ID))
 	}
-	s.logger.InfoContext(ctx, "user created via admin", "user_id", u.ID, "email", req.Email)
+	s.logger.InfoContext(ctx, "user created via admin", "user_id", u.ID)
 	return u, nil
 }
 

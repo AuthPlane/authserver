@@ -12,7 +12,7 @@
 
 ## Prereqs
 
-- Authplane authserver running with `xaa.enabled: true`. The jwt-bearer endpoint is gated by `cfg.XAA.Enabled` (DI wires the handler iff XAA is on — `cmd/authserver/serve.go:430`). With XAA off, `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` returns `unsupported_grant_type`. There is **no** separate `AUTHPLANE_JWT_BEARER_ENABLED` env var.
+- Authplane authserver running with `xaa.enabled: true` (`AUTHPLANE_XAA_ENABLED`). The jwt-bearer grant has no switch of its own: the composition root in `cmd/authserver/serve.go` wires the handler only when XAA is on. With XAA off, `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` returns `unsupported_grant_type`.
 - An admin API key (`admin.api_key`).
 - An upstream IdP that can sign assertions you control or can request — Okta, Entra ID, Auth0, an internal CA, or for testing the public [`idp.xaa.dev`](https://xaa.dev) playground.
 - Concept context: [glossary — JWT Bearer](../../concepts/glossary.md#glossary-jwt-bearer), [glossary — XAA](../../concepts/glossary.md#glossary-xaa), [Delegation and agent chains](../../concepts/delegation-and-agent-chains.md).
@@ -68,7 +68,7 @@ curl -s -X POST http://localhost:9001/admin/clients \
 # Save .client_id and .client_secret from response.
 ```
 
-**Important:** the `scope` field is mandatory if you want the client to obtain any scope at all. The handler computes `effectiveScope = intersect(clientScopes, assertionScopes, requestScope)` (`internal/services/jwt_bearer.go:238-261`); an empty client scope set produces `invalid_scope` at runtime no matter what the assertion or request asks for.
+**Important:** the `scope` field is mandatory if you want the client to obtain any scope at all. The handler computes `effectiveScope = intersect(clientScopes, assertionScopes, requestScope)` (`GrantJWTBearer` in `internal/services/jwt_bearer.go`); an empty client scope set produces `invalid_scope` at runtime no matter what the assertion or request asks for.
 
 ### 4. Mint the assertion at the IdP
 
@@ -114,7 +114,7 @@ Successful response:
 }
 ```
 
-No `refresh_token` is issued — the handler does not return one for jwt-bearer (`api/public/oauth/handlers.go:327`). Get a new assertion when the access token expires.
+No `refresh_token` is issued — the handler does not return one for jwt-bearer (`handleJWTBearer` in `api/public/oauth/handlers.go`). Get a new assertion when the access token expires.
 
 ## Verify
 
@@ -136,7 +136,7 @@ Denial reasons from `internal/services/jwt_bearer.go` (logged as audit events `j
 
 | Symptom / `reason=` | Likely cause | Fix |
 |---------------------|--------------|-----|
-| `unsupported_grant_type` from `/oauth/token` | XAA disabled — `xaa.enabled` not true, so the handler is nil-gated (`api/public/oauth/handlers.go:292`) | Set `xaa.enabled: true` in YAML, restart. |
+| `unsupported_grant_type` from `/oauth/token` | XAA disabled — `xaa.enabled` not true, so the handler is nil-gated (`handleJWTBearer` in `api/public/oauth/handlers.go`) | Set `xaa.enabled: true` in YAML, restart. |
 | `invalid_client` | Bad `client_id`/`client_secret`, or `token_endpoint_auth_method` mismatch | Verify the registered method matches how you authenticate (`client_secret_post` vs `client_secret_basic`). |
 | `unauthorized_client` | Client is registered but `grant_types` does not include `urn:ietf:params:oauth:grant-type:jwt-bearer` | Patch the client to add the grant. |
 | `invalid_assertion` / `untrusted_issuer` | Assertion `iss` does not match any registered IdP, or header missing | Confirm the IdP `issuer` registered in step 2 exactly equals the assertion's `iss` (including trailing slash). |

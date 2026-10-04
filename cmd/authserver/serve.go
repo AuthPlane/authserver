@@ -385,13 +385,19 @@ func runServe() error {
 			return http.ErrUseLastResponse
 		},
 	}
-	if regErr := bpRegistry.Register(brokerprotooauth.New(bpHTTPClient, brokerConfigSecrets)); regErr != nil {
+	if regErr := bpRegistry.Register(brokerprotooauth.New(
+		bpHTTPClient, brokerConfigSecrets,
+		brokerprotooauth.WithObservability(obs.WithComponent("broker-oauth")),
+	)); regErr != nil {
 		return fmt.Errorf("register brokerproto/oauth adapter: %w", regErr)
 	}
 	if regErr := bpRegistry.Register(brokerprotoapikey.New(brokerConfigSecrets)); regErr != nil {
 		return fmt.Errorf("register brokerproto/apikey adapter: %w", regErr)
 	}
-	if regErr := bpRegistry.Register(brokerprotoserviceaccount.New(bpHTTPClient, brokerConfigSecrets)); regErr != nil {
+	if regErr := bpRegistry.Register(brokerprotoserviceaccount.New(
+		bpHTTPClient, brokerConfigSecrets,
+		brokerprotoserviceaccount.WithObservability(obs.WithComponent("broker-service-account")),
+	)); regErr != nil {
 		return fmt.Errorf("register brokerproto/serviceaccount adapter: %w", regErr)
 	}
 
@@ -545,6 +551,7 @@ func runServe() error {
 	}
 	if tokenExchangeSvc != nil {
 		tokenExchangeSvc.WithFronting(frontingAdminSvc)
+		tokenExchangeSvc.WithUsers(ds.User())
 	}
 	// (jwt-bearer agent identity is wired after service creation in 11i)
 
@@ -669,7 +676,7 @@ func runServe() error {
 			obs.WithComponent("xaa-policy"), auditSvc,
 		)
 		subjectMappingSvc = services.NewSubjectMappingService(
-			ds.SubjectMapping(), ds.IDP(),
+			ds.SubjectMapping(), ds.IDP(), ds.User(),
 			obs.WithComponent("subject-mapping"),
 		)
 

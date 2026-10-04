@@ -33,31 +33,26 @@ protocol adapter.
 
 ## 1. Read the port contract
 
-Read
-[`internal/ports/output/broker_protocol.go:23`](../../internal/ports/output/broker_protocol.go)
-end-to-end. The interface has four methods:
+Read the `BrokerProtocol` interface in
+[`internal/ports/output/broker_protocol.go`](../../internal/ports/output/broker_protocol.go)
+end-to-end. The interface has five methods:
 
-- `Name() string` — protocol identifier, matches `broker_providers.protocol`. See
-  [`internal/ports/output/broker_protocol.go:25`](../../internal/ports/output/broker_protocol.go).
+- `Name() string` — protocol identifier, matches `broker_providers.protocol`.
 - `BuildConnectURL(...)` — initiates the user's upstream connect dance.
   Return `output.ErrNoConnectStep` if your protocol has no per-user
-  consent step. See
-  [`internal/ports/output/broker_protocol.go:41`](../../internal/ports/output/broker_protocol.go).
+  consent step.
 - `HandleCallback(...)` — processes the upstream redirect, returns
   credential bytes to persist (encryption at rest is the storage
-  layer's concern; see
-  [`internal/ports/output/broker_protocol.go:57`](../../internal/ports/output/broker_protocol.go)).
+  layer's concern).
 - `Vend(...)` — produces a fresh upstream access token from persisted
   credential bytes. The `updatedCredential` return value carries
   rotation semantics; nil means "do not write", non-nil (including
-  empty `[]byte{}`) means "persist these bytes". See
-  [`internal/ports/output/broker_protocol.go:74`](../../internal/ports/output/broker_protocol.go).
+  empty `[]byte{}`) means "persist these bytes".
 - `Revoke(...)` — best-effort upstream revocation; local revocation is
-  authoritative regardless of return. See
-  [`internal/ports/output/broker_protocol.go:86`](../../internal/ports/output/broker_protocol.go).
+  authoritative regardless of return.
 
-The sentinel `output.ErrNoConnectStep` at
-[`internal/ports/output/broker_protocol.go:92`](../../internal/ports/output/broker_protocol.go)
+The sentinel `output.ErrNoConnectStep` in
+[`internal/ports/output/broker_protocol.go`](../../internal/ports/output/broker_protocol.go)
 is how `api_key` and `service_account` signal "skip the browser-side
 connect handoff" to the orchestration layer.
 
@@ -75,33 +70,34 @@ internal/adapters/brokerproto/<name>/
   credential.go      # the JSON shape stored in broker_grants.credential
 ```
 
-The shape to copy is the OAuth adapter at
-[`internal/adapters/brokerproto/oauth/adapter.go:50`](../../internal/adapters/brokerproto/oauth/adapter.go):
-struct holding an HTTP client + a SecretResolver, a `New(...)`
-constructor at line 81, and `Name()` at line 97 returning the protocol
+The shape to copy is the `Adapter` struct in
+[`internal/adapters/brokerproto/oauth/adapter.go`](../../internal/adapters/brokerproto/oauth/adapter.go):
+it holds an HTTP client + a `SecretResolver`, its `New(...)`
+constructor takes both, and `Name()` returns the protocol
 identifier.
 
 If your protocol has a per-user consent step (a "connect" flow), copy
 the `BuildConnectURL` / `HandleCallback` skeleton from oauth.
 Otherwise return `output.ErrNoConnectStep` from both like apikey does —
-see
-[`internal/adapters/brokerproto/apikey/adapter.go:47`](../../internal/adapters/brokerproto/apikey/adapter.go).
+see `BuildConnectURL` and `HandleCallback` on the `Adapter` in
+[`internal/adapters/brokerproto/apikey/adapter.go`](../../internal/adapters/brokerproto/apikey/adapter.go).
 
 ## 3. Implement secret resolution
 
 Secrets are not stored in the database. The
 `config_data.<field>_ref` convention (e.g. `client_secret_ref`) names
 an environment variable on the authserver process, and the adapter
-resolves it through the `SecretResolver` interface defined in your
-adapter package (see
-[`internal/adapters/brokerproto/oauth/adapter.go:42`](../../internal/adapters/brokerproto/oauth/adapter.go)
-for the OAuth adapter's `SecretResolver`).
+resolves it through the `output.SecretResolver` port
+([`internal/ports/output/secret_resolver.go`](../../internal/ports/output/secret_resolver.go)),
+which the OAuth adapter's `New` in
+[`internal/adapters/brokerproto/oauth/adapter.go`](../../internal/adapters/brokerproto/oauth/adapter.go)
+takes as a constructor argument.
 
 The shared implementation lives in
 [`internal/adapters/static/secret_env.go`](../../internal/adapters/static/secret_env.go) as
 `static.EnvSecrets`, wired via `static.NewEnvSecrets()` in `cmd/authserver/serve.go`.
-It calls `brokerproto.ValidEnvVarName` from
-[`internal/brokerproto/secretrules.go:16`](../../internal/brokerproto/secretrules.go)
+It calls `ValidEnvVarName` from
+[`internal/brokerproto/secretrules.go`](../../internal/brokerproto/secretrules.go)
 **before** consulting `os.Getenv`, so only `CONNECTOR_*` or
 `AUTHPLANE_VAULT_*` prefixed names succeed. **Do not bypass this
 check** — it prevents a malicious config row from naming `PATH` or
@@ -109,38 +105,39 @@ check** — it prevents a malicious config row from naming `PATH` or
 
 If your protocol introduces new bounded-size operator inputs beyond
 the existing OAuth `extra_auth_params`, add validation alongside
-[`internal/brokerproto/secretrules.go:46`](../../internal/brokerproto/secretrules.go)
-following the same `ValidateExtraAuthParams` pattern.
+`ValidateExtraAuthParams` in
+[`internal/brokerproto/secretrules.go`](../../internal/brokerproto/secretrules.go),
+following the same pattern.
 
 ## 4. Register the adapter in the composition root
 
-The registry construction lives at
-[`cmd/authserver/serve.go:272`](../../cmd/authserver/serve.go):
+The registry construction lives in `runServe` in
+[`cmd/authserver/serve.go`](../../cmd/authserver/serve.go):
 
 ```go
 bpRegistry := brokerproto.NewRegistry()
-bpHTTPClient := &http.Client{Timeout: 30 * time.Second}
-if regErr := bpRegistry.Register(brokerprotooauth.New(bpHTTPClient, envSecretResolver{})); regErr != nil {
+bpHTTPClient := &http.Client{ /* SSRF-safe transport, no redirects */ }
+if regErr := bpRegistry.Register(brokerprotooauth.New(bpHTTPClient, brokerConfigSecrets)); regErr != nil {
     return fmt.Errorf("register brokerproto/oauth adapter: %w", regErr)
 }
 // ...
 ```
 
 Add a parallel `bpRegistry.Register(...)` block for your adapter right
-after the existing three. Mirror the import alias style at
-[`cmd/authserver/serve.go:21`](../../cmd/authserver/serve.go)
+after the existing three. Mirror the import alias style in the import
+block of [`cmd/authserver/serve.go`](../../cmd/authserver/serve.go)
 (`brokerprotooauth`, `brokerprotoapikey`, `brokerprotoserviceaccount`).
 
 There is **no switch statement** anywhere in the broker-issuer path —
 dispatch happens via `Registry.Lookup(name)` against `Name()` (see
-[`internal/brokerproto/registry.go:48`](../../internal/brokerproto/registry.go)).
+`Lookup` in [`internal/brokerproto/registry.go`](../../internal/brokerproto/registry.go)).
 Your adapter is dispatchable the moment it is registered; nothing
 calling code needs to learn about it.
 
 ## 5. Declare the protocol in the domain
 
-The `Protocol` enum lives at
-[`internal/domain/resource/broker_provider.go:24`](../../internal/domain/resource/broker_provider.go).
+The `Protocol` enum lives in
+[`internal/domain/resource/broker_provider.go`](../../internal/domain/resource/broker_provider.go).
 Add your new identifier as a sibling of `ProtocolOAuth`, `ProtocolAPIKey`,
 `ProtocolServiceAccount` and run the domain test suite — the validation
 helpers and OpenAPI-derived admin DTOs read from this enum.
@@ -148,8 +145,9 @@ helpers and OpenAPI-derived admin DTOs read from this enum.
 ## 6. Expose configuration through the admin API and CLI
 
 The admin API surface for BrokerProviders is byte-pass-through for
-`config_data` — the brokerproto adapter owns validation, see the docstring at
-[`internal/ports/input/broker_provider_admin.go:48`](../../internal/ports/input/broker_provider_admin.go).
+`config_data` — the brokerproto adapter owns validation, see the docstring on
+`BrokerProviderPatch` in
+[`internal/ports/input/broker_provider_admin.go`](../../internal/ports/input/broker_provider_admin.go).
 In practice this means **you usually don't add fields to the admin
 DTO**; you add fields to your adapter's `config_data.go`, expose a
 `ValidateConfigData` method, and the admin layer wires it in.

@@ -103,6 +103,20 @@ type httpRoute struct {
 	Server   string // "public" | "admin"
 	AuthMode string // "admin-api-key", "session", "none"
 	Pos      token.Pos
+	// Handler is the name of the handler method the route is wired to
+	// (e.g. "handleQueryAudit"), when the registration names one directly
+	// or through a middleware wrapper; "" when it could not be resolved.
+	Handler string
+	// Receiver is the type of the value Handler is called on ("handlers",
+	// "resourceAdminHandler"), resolved from the nearest preceding
+	// `v := &T{...}` in the registering function; "" when unknown.
+	Receiver string
+	// Dir is the repo-relative directory the registration lives in; the
+	// handler body is looked up in the same package.
+	Dir string
+	// Query lists the URL query parameters the handler reads
+	// (r.URL.Query().Get("x"), q.Get("x"), q.Has("x")), sorted.
+	Query []string
 }
 
 // httpDTO is one parsed struct type with json-tagged fields.
@@ -141,6 +155,7 @@ type httpModel struct {
 func buildHTTPModel(root string) (*httpModel, error) {
 	fset := token.NewFileSet()
 	m := &httpModel{FSet: fset}
+	funcs := map[string]*ast.FuncDecl{}
 
 	for _, rel := range httpRouteSrcDirs {
 		dir := filepath.Join(root, rel)
@@ -161,7 +176,34 @@ func buildHTTPModel(root string) (*httpModel, error) {
 				return nil, fmt.Errorf("parse %s: %w", full, err)
 			}
 			collectRoutes(file, rel, &m.Routes)
+			collectFuncs(file, rel, funcs)
 		}
+	}
+
+	// Attach the query parameters each handler reads. The handler lives in
+	// the same package as its registration; when the receiver type could
+	// not be resolved, fall back to the name only if it is unambiguous in
+	// that package.
+	for i := range m.Routes {
+		r := &m.Routes[i]
+		if r.Handler == "" {
+			continue
+		}
+		fd, ok := funcs[funcKey(r.Dir, r.Receiver, r.Handler)]
+		if !ok {
+			var matches []*ast.FuncDecl
+			for k, f := range funcs {
+				if strings.HasPrefix(k, r.Dir+"\x00") && strings.HasSuffix(k, "\x00"+r.Handler) {
+					matches = append(matches, f)
+				}
+			}
+			if len(matches) != 1 {
+				fmt.Fprintf(os.Stderr, "docsgen http: %s %s: handler %s has %d candidates in %s and no resolved receiver; query parameters omitted\n", r.Method, r.Path, r.Handler, len(matches), r.Dir)
+				continue
+			}
+			fd = matches[0]
+		}
+		r.Query = queryParams(fd)
 	}
 
 	for _, rel := range httpDTOSrcFiles {
@@ -229,7 +271,52 @@ func buildHTTPModel(root string) (*httpModel, error) {
 // httpRoute per match.
 func collectRoutes(file *ast.File, relDir string, out *[]httpRoute) {
 	server := serverFromDir(relDir)
-	ast.Inspect(file, func(n ast.Node) bool {
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		collectRoutesIn(fd, file, relDir, server, out)
+	}
+}
+
+// receiverBinding is one `v := &T{...}` (or `v := T{...}`) assignment in a
+// registering function, used to resolve which type a `v.handleX` refers to.
+type receiverBinding struct {
+	Var  string
+	Type string
+	Pos  token.Pos
+}
+
+// collectRoutesIn walks one function body for route registrations.
+func collectRoutesIn(fd *ast.FuncDecl, file *ast.File, relDir, server string, out *[]httpRoute) {
+	var bindings []receiverBinding
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		id, ok := as.Lhs[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if t := compositeTypeName(as.Rhs[0]); t != "" {
+			bindings = append(bindings, receiverBinding{Var: id.Name, Type: t, Pos: as.Pos()})
+		}
+		return true
+	})
+	resolve := func(v string, at token.Pos) string {
+		best := ""
+		var bestPos token.Pos
+		for _, b := range bindings {
+			if b.Var == v && b.Pos < at && b.Pos > bestPos {
+				best, bestPos = b.Type, b.Pos
+			}
+		}
+		return best
+	}
+	_ = file
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
@@ -255,15 +342,144 @@ func collectRoutes(file *ast.File, relDir string, out *[]httpRoute) {
 			return true
 		}
 		auth := authForCall(call, path, server)
+		handler, recvVar := "", ""
+		if len(call.Args) > 1 {
+			handler, recvVar = handlerName(call.Args[1])
+		}
 		*out = append(*out, httpRoute{
 			Method:   method,
 			Path:     path,
 			Server:   server,
 			AuthMode: auth,
 			Pos:      lit.Pos(),
+			Handler:  handler,
+			Receiver: resolve(recvVar, call.Pos()),
+			Dir:      relDir,
 		})
 		return true
 	})
+}
+
+// compositeTypeName returns T for `&T{...}` or `T{...}`, else "".
+func compositeTypeName(expr ast.Expr) string {
+	if u, ok := expr.(*ast.UnaryExpr); ok && u.Op == token.AND {
+		expr = u.X
+	}
+	cl, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return ""
+	}
+	if id, ok := cl.Type.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// handlerName resolves the handler method a registration names, looking
+// through middleware wrappers: h.handleX, http.HandlerFunc(h.handleX),
+// authMW.Wrap(http.HandlerFunc(h.handleX)), mw(h.handleX). It returns the
+// method name and the receiver variable it is called on ("h"); the first
+// selector whose name starts with "handle" wins, anything else yields "".
+func handlerName(expr ast.Expr) (method, recv string) {
+	switch e := expr.(type) {
+	case *ast.SelectorExpr:
+		if strings.HasPrefix(e.Sel.Name, "handle") {
+			if id, ok := e.X.(*ast.Ident); ok {
+				return e.Sel.Name, id.Name
+			}
+			return e.Sel.Name, ""
+		}
+	case *ast.CallExpr:
+		for _, a := range e.Args {
+			if m, r := handlerName(a); m != "" {
+				return m, r
+			}
+		}
+	case *ast.ParenExpr:
+		return handlerName(e.X)
+	}
+	return "", ""
+}
+
+// funcKey identifies a handler body by directory, receiver type and name.
+// Plain functions have an empty receiver.
+func funcKey(dir, recv, name string) string { return dir + "\x00" + recv + "\x00" + name }
+
+// collectFuncs indexes every method and function declared in file by
+// (dir, receiver type, name) so a route can find its handler body even
+// when several handler types in one package share a method name.
+func collectFuncs(file *ast.File, relDir string, out map[string]*ast.FuncDecl) {
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		recv := ""
+		if fd.Recv != nil && len(fd.Recv.List) == 1 {
+			t := fd.Recv.List[0].Type
+			if st, ok := t.(*ast.StarExpr); ok {
+				t = st.X
+			}
+			if id, ok := t.(*ast.Ident); ok {
+				recv = id.Name
+			}
+		}
+		out[funcKey(relDir, recv, fd.Name.Name)] = fd
+	}
+}
+
+// queryParams returns the sorted set of URL query parameter names the
+// handler reads: string literals passed to .Get / .Has on a receiver that
+// is r.URL.Query() itself or a variable holding it (q, query, params).
+func queryParams(fd *ast.FuncDecl) []string {
+	if fd.Body == nil {
+		return nil
+	}
+	set := map[string]bool{}
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (sel.Sel.Name != "Get" && sel.Sel.Name != "Has") {
+			return true
+		}
+		if !isQueryValues(sel.X) {
+			return true
+		}
+		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if name, err := strconv.Unquote(lit.Value); err == nil && name != "" {
+			set[name] = true
+		}
+		return true
+	})
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isQueryValues reports whether expr is r.URL.Query() or one of the
+// conventional locals handlers assign it to.
+func isQueryValues(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == "q" || e.Name == "query" || e.Name == "params"
+	case *ast.CallExpr:
+		if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
+			return sel.Sel.Name == "Query"
+		}
+	}
+	return false
 }
 
 // serverFromDir maps a route-source directory to the "public" / "admin"
@@ -630,6 +846,20 @@ func renderRouteSection(r httpRoute, src *srcref.SrcRef, repoRootPath string) st
 		b.WriteString("**Source** — `")
 		b.WriteString(ref)
 		b.WriteString("`\n")
+	}
+	if len(r.Query) > 0 {
+		b.WriteString("**Query** — ")
+		for i, q := range r.Query {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString("`")
+			b.WriteString(q)
+			b.WriteString("`")
+		}
+		b.WriteString(" (read by `")
+		b.WriteString(r.Handler)
+		b.WriteString("`)\n")
 	}
 	b.WriteString("\n")
 

@@ -74,6 +74,8 @@ Write `/tmp/authserver-xaa.yaml` with the essentials (full template at the end o
 
 ```bash
 # Verified against docs/reference/cli.md#cli-serve
+# AUTHPLANE_ENCRYPTION_KEY is the variable the YAML's data_encryption.aes_master.key_env
+# names; the server reads the key from whatever variable you name there.
 AUTHPLANE_ENCRYPTION_KEY="$ENC_KEY" \
   go run ./cmd/authserver serve --config /tmp/authserver-xaa.yaml \
   > /tmp/authserver.log 2>&1 &
@@ -200,7 +202,7 @@ curl -s -X POST $PUBLIC_URL/oauth/introspect \
 
 ### Step 4 may fail — that's fine
 
-The browser-side `GET /health` with `Authorization: Bearer …` may report `TypeError: Failed to fetch`. Authplane scopes CORS to `/oauth/*`, discovery, and revoke on purpose (`api/shared/security.go:50`); `/health` is not a browser endpoint. To make step 4 green, terminate Bearer tokens in a real resource server — Authplane's role here ends at step 3.
+The browser-side `GET /health` with `Authorization: Bearer …` may report `TypeError: Failed to fetch`. Authplane scopes CORS to the token, register, revoke, and introspect endpoints plus `/.well-known/*` on purpose (`isCORSEndpoint` in `api/shared/security.go`); `/health` is not a browser endpoint. To make step 4 green, terminate Bearer tokens in a real resource server — Authplane's role here ends at step 3.
 
 ## What can go wrong
 

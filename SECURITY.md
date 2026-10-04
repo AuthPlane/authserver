@@ -56,6 +56,8 @@ Authplane's security design, and the operator procedures that implement it, are 
 - [Key Rotation](docs/guides/operate/key-rotation.md) — operator runbook
 - [Verifying releases](docs/guides/deploy/verifying-releases.md) — cosign signature and SBOM verification for release artifacts and container images
 
+Every push and pull request runs `govulncheck` over all three Go modules in the repository (the root, `e2e/`, `compliance/`) and Trivy over the built container image; Dependabot watches the same three modules, the admin UI's npm tree, the GitHub Actions pins, and the base-image digests in `build/Dockerfile`.
+
 ## Contact
 
 For non-vulnerability security questions, open a [discussion](https://github.com/authplane/authserver/discussions).

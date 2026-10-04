@@ -140,11 +140,11 @@ func (s *UserAuthService) Authenticate(ctx context.Context, email, password stri
 	}
 
 	if reason != "" {
-		s.denyLogin(ctx, span, actorID, email, reason)
+		s.denyLogin(ctx, span, actorID, reason)
 		return nil, domain.ErrInvalidCredentials
 	}
 
-	s.logger.InfoContext(ctx, "user authenticated", "user_id", u.ID, "email", email)
+	s.logger.InfoContext(ctx, "user authenticated", "user_id", u.ID)
 	s.metrics.LoginAttempts.Add(ctx, 1, otelmetric.WithAttributes(
 		attribute.String("result", "success"),
 	))
@@ -162,14 +162,11 @@ func (s *UserAuthService) Authenticate(ctx context.Context, email, password stri
 // be written here on purpose rather than drift into a single branch.
 //
 // actorID is empty when the address matched no account, which is the one case
-// where there is no actor to name.
-//
-// Detail puts reason first and quotes the address, because the address is raw
-// form input: left last and bare, a submitted value carrying a space and its own
-// "reason=" would produce a row whose first reason= the attacker chose. The
-// sibling auth.locked_out event on the same request was fixed the same way.
-func (s *UserAuthService) denyLogin(ctx context.Context, span trace.Span, actorID, email, reason string) {
-	s.logger.WarnContext(ctx, "local authentication denied", "email", email, "reason", reason)
+// where there is no actor to name. The submitted address itself is not written
+// to the log line or the audit row: it is raw form input and personal data, and
+// the user id names the account wherever there is one.
+func (s *UserAuthService) denyLogin(ctx context.Context, span trace.Span, actorID, reason string) {
+	s.logger.WarnContext(ctx, "local authentication denied", "user_id", actorID, "reason", reason)
 	s.metrics.LoginAttempts.Add(ctx, 1, otelmetric.WithAttributes(
 		attribute.String("result", "failure"),
 	))
@@ -177,8 +174,7 @@ func (s *UserAuthService) denyLogin(ctx context.Context, span trace.Span, actorI
 		attribute.String("reason", reason),
 	))
 	if s.audit != nil {
-		s.audit.Record(ctx, audit.NewEvent(audit.ActionUserLoginFailed, actorID, "", "",
-			fmt.Sprintf("reason=%s email=%q", reason, email)))
+		s.audit.Record(ctx, audit.NewEvent(audit.ActionUserLoginFailed, actorID, "", "", "reason="+reason))
 	}
 	span.RecordError(domain.ErrInvalidCredentials)
 	span.SetStatus(codes.Error, reason)
@@ -229,6 +225,6 @@ func (s *UserAuthService) CreateUser(ctx context.Context, email, name, password 
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 
-	s.logger.InfoContext(ctx, "created user", "user_id", u.ID, "email", email, "role", role)
+	s.logger.InfoContext(ctx, "created user", "user_id", u.ID, "role", role)
 	return u, nil
 }

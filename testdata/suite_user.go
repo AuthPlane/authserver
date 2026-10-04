@@ -184,4 +184,91 @@ func RunUserStoreTests(t *testing.T, newStore func(*testing.T) output.UserStore)
 			t.Errorf("count: got %d, want 3", count)
 		}
 	})
+
+	// A federated IdP need not release an email. Any number of users may
+	// have none (stored as NULL, read back as ""), none of them is reachable
+	// by looking up the empty email, and they stay findable by
+	// (provider, provider_sub).
+	// One account per federated identity; local accounts (provider_sub "")
+	// are not constrained by it.
+	t.Run("OneAccountPerFederatedIdentity", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
+		first := newTestUser("fed-first", "")
+		first.PasswordHash = ""
+		first.Provider = user.ProviderOIDC
+		first.ProviderSub = "same-idp-sub"
+		if err := store.Create(ctx, first); err != nil {
+			t.Fatalf("create first: %v", err)
+		}
+		dup := newTestUser("fed-dup", "")
+		dup.PasswordHash = ""
+		dup.Provider = user.ProviderOIDC
+		dup.ProviderSub = "same-idp-sub"
+		if err := store.Create(ctx, dup); !errors.Is(err, domain.ErrUserAlreadyExists) {
+			t.Fatalf("second account for the same identity: want ErrUserAlreadyExists, got %v", err)
+		}
+		for _, id := range []string{"local-a", "local-b"} {
+			if err := store.Create(ctx, newTestUser(id, id+"@example.com")); err != nil {
+				t.Fatalf("local account %s: %v", id, err)
+			}
+		}
+	})
+
+	t.Run("UsersWithoutEmail", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
+
+		for _, sub := range []string{"idp-sub-1", "idp-sub-2", "idp-sub-3"} {
+			u := newTestUser("user-"+sub, "")
+			u.PasswordHash = ""
+			u.Provider = user.ProviderOIDC
+			u.ProviderSub = sub
+			if err := store.Create(ctx, u); err != nil {
+				t.Fatalf("create email-less user %s: %v", sub, err)
+			}
+		}
+
+		got, err := store.GetByProviderSub(ctx, user.ProviderOIDC, "idp-sub-2")
+		if err != nil {
+			t.Fatalf("GetByProviderSub: %v", err)
+		}
+		if got.ID != "user-idp-sub-2" || got.Email != "" {
+			t.Errorf("got id=%q email=%q, want user-idp-sub-2 with no email", got.ID, got.Email)
+		}
+
+		if _, err := store.GetByEmail(ctx, ""); !errors.Is(err, domain.ErrUserNotFound) {
+			t.Errorf("GetByEmail(\"\"): want ErrUserNotFound, got %v", err)
+		}
+
+		// Update keeps a missing email missing, and setting one later
+		// enforces uniqueness like any other email.
+		got.Name = "renamed"
+		got.UpdatedAt = time.Now().UTC()
+		if err := store.Update(ctx, got); err != nil {
+			t.Fatalf("update email-less user: %v", err)
+		}
+		if err := store.Create(ctx, newTestUser("local-1", "taken@example.com")); err != nil {
+			t.Fatalf("create local: %v", err)
+		}
+		got, err = store.GetByID(ctx, "user-idp-sub-2")
+		if err != nil {
+			t.Fatalf("get after update: %v", err)
+		}
+		if got.Name != "renamed" || got.Email != "" {
+			t.Errorf("after update: name=%q email=%q", got.Name, got.Email)
+		}
+		got.Email = "taken@example.com"
+		if err := store.Update(ctx, got); !errors.Is(err, domain.ErrUserAlreadyExists) {
+			t.Errorf("update to a taken email: want ErrUserAlreadyExists, got %v", err)
+		}
+
+		users, err := store.List(ctx)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(users) != 4 {
+			t.Errorf("list: got %d users, want 4", len(users))
+		}
+	})
 }

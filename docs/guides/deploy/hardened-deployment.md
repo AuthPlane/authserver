@@ -95,7 +95,7 @@ WARN cimd.allow_private_addresses=true (AUTHPLANE_CIMD_ALLOW_PRIVATE_ADDRESSES):
 
 ## Admin port: network isolation
 
-The admin port (`/admin/*`, default `:9090`) wraps every JSON API route in API-key middleware with constant-time comparison. The following surfaces on the same port are intentionally NOT API-key-protected:
+The admin port (`/admin/*`, default `:9001`) wraps every JSON API route in API-key middleware with constant-time comparison. The following surfaces on the same port are intentionally NOT API-key-protected:
 
 - `/metrics` — Prometheus scrape; standard convention is unauthenticated
 - `/admin/ui/*` — static SPA bundle; auth happens in-app via `/admin/auth/verify`
@@ -103,11 +103,25 @@ The admin port (`/admin/*`, default `:9090`) wraps every JSON API route in API-k
 The model assumes the admin port is on a private network or otherwise network-isolated from untrusted callers. If you expose the admin port directly to the internet, `/metrics` becomes an information-disclosure surface (token-issuance rates, denial reasons, internal SLO data) and the static SPA assets become a fingerprinting surface.
 
 **Recommendation:**
-- Bind the admin port to `127.0.0.1` or a private interface (`admin.address: "127.0.0.1:9090"`)
+- Bind the admin port to `127.0.0.1` or a private interface (`admin.address: "127.0.0.1:9001"`)
 - Reach it over SSH tunnel, VPN, or behind an authenticating reverse proxy
 - If you must expose it publicly, put it behind a reverse proxy that requires authentication on `/metrics` and `/admin/ui/*`, and audit the API-key value lifecycle (rotation, storage)
 
 The API-protected routes (`/admin/clients`, `/admin/users`, `/admin/keys`, etc.) are safe to expose because the API key is constant-time-checked, but the unauthenticated surfaces still need network isolation.
+
+---
+
+## Container image: digest-pinned bases
+
+`build/Dockerfile` pins both stages by digest, not only by tag —
+`golang:1.26-alpine@sha256:…` for the builder and
+`gcr.io/distroless/static-debian12:nonroot@sha256:…` for the runtime — so a
+tag that is re-pushed upstream cannot change what the image is built from.
+Dependabot bumps the digests. To confirm what a shipped image was built
+from, read the `FROM` lines in the tagged source tree and compare the runtime
+digest against `docker buildx imagetools inspect
+gcr.io/distroless/static-debian12:nonroot`. Pin the *shipped* image the same
+way in your own manifests; see [Verifying releases](verifying-releases.md).
 
 ---
 
@@ -125,7 +139,7 @@ cimd:
   allow_private_addresses: false # default — keep it
 
 admin:
-  address: "127.0.0.1:9090" # not 0.0.0.0 in production
+  address: "127.0.0.1:9001" # not 0.0.0.0 in production
 ```
 
 Set via environment for 12-factor deployments:
@@ -133,5 +147,5 @@ Set via environment for 12-factor deployments:
 ```bash
 AUTHPLANE_OAUTH_REQUIRE_SCOPE=true
 AUTHPLANE_SESSION_FAIL_CLOSED=true
-AUTHPLANE_ADMIN_ADDRESS=127.0.0.1:9090
+AUTHPLANE_ADMIN_ADDRESS=127.0.0.1:9001
 ```

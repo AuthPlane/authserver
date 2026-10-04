@@ -66,6 +66,7 @@ services:
       - "--enable-feature=native-histograms"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yaml:/etc/prometheus/alerts.yaml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"

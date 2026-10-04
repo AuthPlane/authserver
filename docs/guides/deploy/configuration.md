@@ -69,6 +69,17 @@ Three OAuth grants ship **off** to keep a fresh install minimal. Every machine-t
 
 With a flag off, `POST /oauth/token` returns `unsupported_grant_type` for that grant — even if the client has it in `grant_types`.
 
+### 5. Rate limiting — where does the client address come from?
+
+`rate_limit` is on by default (100 requests/s per source address, burst 200)
+and keys on the TCP peer address only. It ignores `X-Forwarded-For`, because a
+client can set that header to anything. Every deploy guide puts a reverse
+proxy in front of the server, and behind one every request arrives from the
+proxy's address, so all clients share one bucket. Decide now: enforce the
+per-client limit at the proxy, where the real address is known, and set
+`rate_limit.enabled: false`; or keep the server limit and treat it as a
+per-proxy ceiling rather than a per-client one.
+
 ## Secrets you must mint
 
 | Secret | Required when | How |
@@ -97,12 +108,12 @@ signing:
   algorithm: ES256
   key_store: postgres_key             # Multi-replica safe; requires data_encryption
   postgres_key:
-    encryption_key_env: AUTHPLANE_SIGNING_KEY_ENC
+    encryption_key_env: AUTHPLANE_SIGNING_KEY_ENC   # *name* of the env var that holds the key (your choice)
 
 data_encryption:
   driver: aes_master
   aes_master:
-    key_env: AUTHPLANE_DATA_ENC_KEY   # Hex 64-char; mint with: openssl rand -hex 32
+    key_env: AUTHPLANE_DATA_ENC_KEY   # *name* of the env var that holds the key (your choice); hex 64-char
 
 session:
   secure: true                        # Required for HTTPS issuer
@@ -132,10 +143,22 @@ Then run with:
 export AUTHPLANE_STORAGE_POSTGRES_DSN="postgres://authserver@db/authserver?sslmode=require"
 export AUTHPLANE_SESSION_SECRET=$(openssl rand -hex 32)
 export AUTHPLANE_ADMIN_API_KEY=$(openssl rand -hex 32)
+# The next two names are the ones config.yaml points at through
+# encryption_key_env / key_env — the server reads whatever variable you name there.
 export AUTHPLANE_SIGNING_KEY_ENC=$(openssl rand -hex 32)
 export AUTHPLANE_DATA_ENC_KEY=$(openssl rand -hex 32)
 authserver serve --config /etc/authserver/config.yaml
 ```
+
+Two of the keys above are **indirections**: `signing.postgres_key.encryption_key_env`
+and `data_encryption.aes_master.key_env` hold the *name* of an environment
+variable, and the server reads the key from the variable with that name. The
+names in the example (`AUTHPLANE_SIGNING_KEY_ENC`, `AUTHPLANE_DATA_ENC_KEY`)
+are only conventions — pick any name, as long as the YAML and the `export`
+agree. Setting the config keys themselves from the environment uses the
+generated names `AUTHPLANE_SIGNING_PG_ENCRYPTION_KEY_ENV` and
+`AUTHPLANE_DATA_ENCRYPTION_KEY_ENV`, which again carry a variable *name*, not
+the key. See [`env-vars.md`](../../reference/env-vars.md).
 
 ## Verify
 

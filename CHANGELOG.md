@@ -4,181 +4,181 @@ All notable, user-facing changes to authserver are documented here —
 operator-impact and wire-shape changes only. The format follows
 [Keep a Changelog](https://keepachangelog.com/); dates are ISO 8601.
 
-## [0.2.1] — 2026-09-21
+## [0.2.2] — 2026-10-03
 
-Post-launch fixes. Four changes that were merged in August but never
-reached the release line, one gap surfaced by an r/mcp reader on the
-v0.2.0 announcement, and one follow-up to the scope-ceiling work.
-No new features; one additive schema change.
+Security patch release. No new config keys, metrics or audit actions.
+Read the upgrade notes first: one step applies to fronting links, and
+three schema migrations run automatically.
+
+### Upgrade notes
+
+- **Fronting links:** add your gateway's `client_id` to the source
+  resource's runtime clients before upgrading
+  (`authserver admin resource runtime-client add --slug <source>
+  --client-id <gateway>`). Until then its exchanges are refused with
+  `access_denied`.
+- **Migration 014** makes `users.email` nullable (on SQLite it rebuilds
+  the `users` table, keeping every row). Once applied, do not start an
+  older binary against the database without first running
+  `014_user_email_nullable.down.sql`, which works only while at most one
+  user has no email.
+- **Migration 015** allows one account per federated identity. It refuses
+  to apply if two federated accounts already share a provider subject;
+  the migration file has the query that finds them.
+- **Migration 016** adds `refresh_token` to every client stored with
+  `grant_types` exactly `["authorization_code"]`, so existing clients keep
+  refresh (see Security).
 
 ### Security
 
-- **Revoking a consent grant now reaches every token that exists because
-  of it.** Before, `DELETE /admin/grants/consent/{id}` stopped new mints
-  and nothing else: the client's own access token for the resource, every
-  token exchanged from it, and every token exchanged from those all stayed
-  usable until `exp` (1h by default for exchanged tokens), and
-  `/oauth/introspect` reported them active. The cascade could not find
-  them — a cross-client exchange records the acting client, not the
-  consenting one, and nothing recorded which token a hop was derived from.
-  Now each issuance carries `consent_client_id` and `parent_jti`; the
-  cascade seeds on the grant and follows the parent link to the leaves,
-  then revokes the client's refresh families for the resource and denylists
-  their access-token JTIs. Introspection answers `active: false` for all of
-  them, and a revoked token is refused as a `subject_token` with
-  `invalid_grant`. A sibling grant for the same resource, and tokens
-  exchanged from it, are not touched. The grant and the subject token are
-  re-read after a mint, so a revocation that lands while an exchange is in
-  flight refuses the token (and revokes the row it wrote) instead of handing
-  out a token the cascade could not see. One window remains and is
-  documented: an authorization code issued before the revoke can be
-  redeemed within its 10-minute life, since redemption does not re-read the
-  grant; the next minor closes it. The audit row reports
-  `revoked_issuances=<n> revoked_families=<n>` and marks `cascade=failed`
-  or `family_cascade=failed` if either half did not complete. Resource
-  servers that verify JWTs locally still see nothing until `exp`; see
-  [what revocation reaches](docs/guides/upstream-providers/token-exchange-grant.md#what-revocation-reaches).
-- **`DELETE /admin/issuances/{id}` now takes effect.** Introspection never
-  read `issuances.revoked_at`, so an admin revoke marked the row and changed
-  nothing at the resource server. It is enforced on the same read as above.
-- **The per-client scope ceiling (`client.Scope`) is now enforced on the
-  `authorization_code` path.** It was previously read only by
-  `client_credentials` and `jwt-bearer`: an operator could set a ceiling
-  through `PATCH /admin/clients/{client_id}` or
-  `authserver admin client update --scope`, the API would accept it, and the
-  interactive path would ignore it — the consent screen offered scopes beyond
-  the ceiling and the resulting access token carried them. The check runs
-  before the login redirect, so a user is never asked for credentials to
-  approve an authorization that cannot succeed, and it no longer depends on a
-  `resource` parameter being present (without one, scope validation was
-  skipped entirely).
-  New config knob `oauth.default_client_scope` (env
-  `AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE`). Clients created through dynamic
-  registration and CIMD cannot state a ceiling of their own — neither the
-  registration request nor the metadata document has a `scope` field — so the
-  server assigns this one, as RFC 7591 §2 permits, and echoes it in the
-  `POST /oauth/register` response. It is assigned only to clients whose grants
-  all keep a user in the loop: a self-registered client asking for
-  `client_credentials`, `jwt-bearer` or token-exchange keeps an empty ceiling,
-  because those grants issue tokens with no user and no consent to bound them.
-  A client with **no** ceiling — which is every client dynamic registration or
-  CIMD has ever created — is still admitted at `/oauth/authorize` and bounded
-  by the resource catalog alone, exactly as before. Only a ceiling an operator
-  actually set is enforced.
-  **What can break:** a client whose registered `scope` is narrower than what
-  it requests at `/oauth/authorize` now gets `invalid_scope` instead of a
-  token. That value was accepted and ignored on this path before, so a ceiling
-  set for `client_credentials` now also binds the same client's interactive
-  flow. Deployments using fronting are the likely case: the scope a Mint
-  resource fronts must be inside the client's ceiling. Check any client that
-  has both a `scope` and `authorization_code` before upgrading.
-- **The ceiling also binds `refresh_token`.** A refresh read only the scope
-  frozen on the family at consent, so narrowing a client's ceiling through
-  `PATCH /admin/clients/{id}` left every live refresh family minting the old
-  scopes — indefinitely, since rotation renews the family. The ceiling is now
-  read on every refresh: an omitted `scope` comes back narrowed to what the
-  ceiling leaves, an explicit request outside it is refused with
-  `invalid_scope` and the ceiling named, and an intersection with nothing left
-  is refused rather than minting a scope-less token. Scope is now resolved
-  before the refresh token is consumed, so a refused request leaves the token
-  unspent. As on `/oauth/authorize`, an empty ceiling does not bound until
-  v0.3.0. The `scope` value in a refresh response is unchanged for clients
-  the ceiling does not cut.
+- Any client holding the token-exchange grant, including one registered
+  through open dynamic registration, could exchange through a fronting
+  link and reach the target as the gateway. Only the gateway may now:
+  a client listed in the source resource's `policy.runtime.client_ids`,
+  or in the target's `policy.exchange.allowed_client_ids` (see Upgrade
+  notes).
+- Token exchange through a fronting link with no `scope` parameter skipped
+  the link's scope check. A caller whose token lacked the mapped source
+  scope was issued a token for the target with no `scope` claim, or, on a
+  broker target, the user's stored upstream token. When `scope` is omitted
+  the server now derives it from the subject token's scopes through the
+  link, and refuses the exchange when none map. Both fronting-link issues
+  affect 0.1.0 through 0.2.1 when token exchange is enabled (the default
+  from 0.2.0).
+- A direct token exchange with no `scope` returned the user's full
+  upstream credential on a broker resource, and a token with an empty
+  scope on a Mint resource. The scope now defaults to what the exchange is
+  authorized for (on a broker, what the agent is consented for), and the
+  exchange is refused when that is empty.
+- `client_credentials` with a `resource` issued scopes the resource never
+  declared, and a client with no scopes (for example one registered
+  through open dynamic registration) could get a token for any resource
+  by omitting `scope`. Scopes are now limited to the client's scopes the
+  resource declares; nothing left → `invalid_scope`. An unknown
+  `resource` returns `invalid_target`.
+- XAA (jwt-bearer) kept issuing tokens for a mapped local user after the
+  user was disabled or deleted, and those tokens stayed active at
+  introspection. Both are now refused. A subject mapping must name an
+  existing user.
+- Token exchange accepted subject and actor tokens of disabled users and
+  suspended clients, which introspection already reports inactive. Those
+  are now refused with `invalid_grant`.
+- A jwt-bearer client with no scope ceiling, such as one registered
+  through open dynamic registration, received the XAA policy's maximum
+  scopes. It is now refused with `invalid_scope`.
+- Refresh tokens were issued to clients not registered for the
+  `refresh_token` grant. They are now issued and honored only for
+  clients that have it. Registrations that omit `grant_types` default to
+  `authorization_code` and `refresh_token`.
+- A config value written as `${VAR}` that no environment variable
+  overrides now fails at startup instead of being used literally. The
+  Docker quickstart showed one for `admin.api_key` without passing the
+  variable; if you copied it, rotate the key and pass it as
+  `AUTHPLANE_ADMIN_API_KEY`.
+- A few log lines, one span attribute and three audit records that
+  included the user's email address no longer do. `user_id` identifies
+  the record instead.
+- Container image base layers are pinned by digest.
 
-### Deprecated
+### Changed
 
-- **Clients with no scope ceiling will be refused from v0.3.0.** Setting
-  `oauth.default_client_scope` (env `AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE`) is
-  optional now and required then: from v0.3.0, a client whose registered
-  `scope` is empty is refused at `/oauth/authorize` and on `refresh_token`
-  with `invalid_scope` instead of being bounded by the resource catalog.
-  Deployments that allow self-registration (`dcr.mode` other than
-  `admin_only`, or CIMD) should set it to the scopes a self-registered client
-  may request. The server logs a startup warning while it is unset, logs the
-  first request from each client that relies on the old behaviour with its
-  `client_id`, and the admin UI carries a notice. Do not size the migration by
-  counting those log lines: they are one per client, and stop entirely past
-  1024 distinct clients, so the count is a floor rather than a total.
-  Alternatively set `dcr.mode: admin_only` and grant scopes per client through
-  the admin API.
-  Ceilings are assigned at registration and are not rewritten later: setting
-  the value applies to new registrations, and does not widen or narrow clients
-  that already exist.
+- Tokens minted through a fronting link name the agent at `act.act.sub`
+  (previously the gateway, when gateway and agent are different
+  clients), and they introspect as active to the target resource's
+  runtime clients (previously inactive to everyone).
+- Audit rows for fronted exchanges record the calling client in
+  `client_id` and `actor_client`; the source resource stays in
+  `via_link`.
+- Examples and `AGENTS.md` pin the current SDKs: TypeScript and Python
+  0.5.0, Go v0.4.0.
 
 ### Fixed
 
-- **`agent_id` is now emitted on `authorization_code` and `refresh_token`
-  access tokens.** Agent identity claims were only attached by
-  `client_credentials`, token exchange and `jwt-bearer`, so an access token
-  issued to a client registered with `is_agent: true` through the standard
-  OAuth grants carried no `agent_id` — with no error indicating why, and no
-  client configuration that could enable it. Since the first hop of a
-  user-consented agent flow is an `authorization_code` token, resource
-  servers reading `agent_id` saw nothing on the primary agent flow.
-  **Wire-shape change:** Authplane-signed access tokens from these two
-  grants now carry an `agent_id` claim for agent clients (non-agent clients
-  are unaffected). `agent_chain` is unchanged — it is derived from the RFC
-  8693 `act` chain, which neither grant builds, so a first-hop token
-  carries `agent_id` alone, matching `client_credentials`.
-  Note that `agents.agent_identity_enabled` does **not** gate emission — it
-  only controls whether `authplane_agent_identity_supported` is advertised in
-  the AS metadata. A deployment running with it off already emitted `agent_id`
-  from `client_credentials`, token exchange and `jwt-bearer`; after this change
-  it does so on the standard OAuth grants too.
-  **Operator-visible logging change:** a delegated agent token previously
-  emitted two INFO lines from the `agent_identity` component — `attached
-  agent_id claim`, then `attached agent_chain claim` carrying `chain_length`.
-  It now emits a single `attached agent_id claim` line with `chain_length` on
-  it. Anything keyed on the `attached agent_chain claim` message (dashboard
-  panel, saved search, alert) will go to zero after upgrade even though
-  delegated traffic is unchanged. The `authorization_code` and
-  `refresh_token` grants log their attachment at DEBUG instead, since they
-  resolve the claims before the request can still be rejected.
-- **Admin client reads now return `scope`, `agent` and `agent_description`.**
-  `GET /admin/clients/{id}`, `GET /admin/clients` and the `200` body of
-  `PATCH /admin/clients/{id}` include the client's scope ceiling and agent
-  identity fields, previously visible only in the `201` create response. The
-  change is additive — existing consumers that ignore unknown JSON keys are
-  unaffected. The three fields are always present, including when empty
-  (`""`, `false`, `""`), so an operator auditing the list can tell "this
-  client holds no ceiling" from "this server does not report the field".
-  The `201` create response drops `omitempty` from `agent` /
-  `agent_description` to match, so create-then-read now yields the same
-  shape on both: previously the `201` omitted the keys for a non-agent
-  client while the read emitted `false` / `""`. That is additive too — it
-  only adds keys carrying zero values.
-- **Admin issuance reads carry the lineage.** `GET /admin/issuances` and
-  `GET /admin/issuances/{id}` include `consent_client_id` and `parent_jti`
-  (both `omitempty`), so a revoked chain can be traced to the grant that
-  revoked it. Additive.
-- **Docs: agent identity is identification, not assurance.** The concept
-  pages said "the presence of the `agent_id` claim is itself the signal"
-  while `POST /oauth/register` — unauthenticated — accepts `"agent": true`.
-  They now say what the claim attests (which registered client issued the
-  token) and what it does not (that anyone vetted it as an agent), and that
-  dynamic registration can set the flag.
-- **Conformance register: two new descriptive entries, probed.** AP-EXT-005
-  (consent revocation reaches derived tokens) and AP-EXT-006 (the per-client
-  scope ceiling binds `authorization_code` and `refresh_token`), each with a
-  wire-level probe in `compliance/probes`, and the compliance reference
-  updated to say which revocation sources introspection reflects.
-- **Docs: what consent revocation reaches, on the page people read to set
-  up delegation.** The token exchange guide gains a "What revocation
-  reaches" section covering the cascade above, the exchanged-token TTL, and
-  when a resource server sees a revocation; the token concept page links to
-  it; the operator table of revocation effects is corrected.
+- Federated sign-in works for users whose identity provider sends no
+  email; previously only the first such user could sign in. A first
+  sign-in whose email belongs to another account gets a 409 page that
+  explains why. Two simultaneous first sign-ins no longer create two
+  accounts. Server-side failures on the callback return 500, not 401.
+- Audit events raised inside an HTTP request carry the caller's IP.
+- Traces: a 5xx response marks the server span as an error; Vault Transit
+  signing joins the request trace; upstream broker, CIMD dispatch and IdP
+  discovery calls get spans and log a WARN on failure.
+- Dashboards: three Operations panels queried renamed or nonexistent
+  metrics; every exported instrument is charted; Prometheus alert rules
+  ship in `deploy/observability/alerts.yaml`.
+- Audit catalog: `token.issue_denied`, `token.refresh_denied`,
+  `admin.ui.login`, `key.rotated` and `dcr.mode_updated` documented;
+  `GET /admin/audit` query filters documented.
+- Deploy guides: the Vault alert string is `vault token renewal failed`;
+  the admin port default is `:9001`; `AUTHPLANE_DPOP_PURGE_INTERVAL` is
+  removed from the compose files (nothing reads it); rate limiting behind
+  a reverse proxy is explained (the limiter keys on the peer address, so
+  every client behind one proxy shares a bucket).
+- Topology pages: the broker-mcp flow now shows how an agent reaches a
+  broker resource (consent at its own Mint resource, then token exchange;
+  a broker resource is never the target of `/authorize`); the
+  gateway-mint request names target-side scopes; the
+  `fronting_link_missing` error links to a page that exists.
+- Reference docs: rows for `invalid_client_metadata`,
+  `invalid_redirect_uri` and `invalid_target`; HTTP metric labels named
+  correctly.
+- CLI help: `admin fronting` and `admin resource runtime-client` describe
+  the gateway rule; `admin resource create --description`, which was
+  never stored, is hidden and warns when used.
+
+## [0.2.1] — 2026-09-21
+
+Post-launch fixes. One additive schema change.
+
+### Security
+
+- Revoking a consent grant (`DELETE /admin/grants/consent/{id}`) now
+  revokes every token issued because of it: the client's access token,
+  every token exchanged from it, and the client's refresh families for the
+  resource. Introspection reports them inactive and they are refused as a
+  `subject_token`. An authorization code issued before the revoke can still
+  be redeemed within its 10-minute life; the next minor closes that.
+  Resource servers that verify JWTs locally see nothing until `exp`.
+- `DELETE /admin/issuances/{id}` now takes effect at introspection.
+- The per-client scope ceiling (`client.Scope`) is enforced on
+  `authorization_code` and `refresh_token`, not only on the machine grants.
+  A client whose ceiling is narrower than what it requests now gets
+  `invalid_scope`. Check any client that has both a `scope` and
+  `authorization_code` before upgrading.
+- New config `oauth.default_client_scope`
+  (`AUTHPLANE_OAUTH_DEFAULT_CLIENT_SCOPE`): the ceiling assigned to clients
+  created through dynamic registration or CIMD whose grants keep a user in
+  the loop. Applies to new registrations only.
+
+### Deprecated
+
+- Clients with no scope ceiling will be refused at `/oauth/authorize` and
+  on `refresh_token` from v0.3.0. Set `oauth.default_client_scope` or use
+  `dcr.mode: admin_only` and grant scopes per client. The server logs a
+  startup warning while it is unset.
+
+### Fixed
+
+- `agent_id` is emitted on `authorization_code` and `refresh_token` access
+  tokens for agent clients, as it already was on the other grants.
+  Delegated agent tokens now log one `attached agent_id claim` line (with
+  `chain_length`) instead of two; anything keyed on
+  `attached agent_chain claim` goes quiet.
+- `GET /admin/clients`, `GET /admin/clients/{id}` and the `PATCH` response
+  include `scope`, `agent` and `agent_description`, always present.
+- `GET /admin/issuances` and `GET /admin/issuances/{id}` include
+  `consent_client_id` and `parent_jti`.
+- Docs: agent identity identifies the issuing client; it does not vouch
+  for it. The token exchange guide describes what revocation reaches.
+- Conformance register: AP-EXT-005 (consent revocation reaches derived
+  tokens) and AP-EXT-006 (scope ceiling on the interactive grants).
 
 ### Schema
 
-- **Migration 013** adds two nullable columns to `issuances`
-  (`consent_client_id`, `parent_jti`) and an index on `parent_jti`. It is
-  numbered 013 because 005–012 are reserved by the next minor; the migration
-  runner now applies every embedded version that is not yet recorded, rather
-  than only versions above the highest recorded one, so an upgrade from
-  0.2.1 to the next minor applies 005–012 correctly and a fresh install
-  applies all thirteen in order. Rows written before 0.2.1 carry NULL in both
-  columns; for those the consent cascade matches the acting `client_id`, as
-  it did before.
+- Migration 013 adds `issuances.consent_client_id`, `issuances.parent_jti`
+  and an index on `parent_jti`. It is numbered past the range the next
+  minor reserves; the migration runner now applies every embedded version
+  not yet recorded, so upgrades in either order apply cleanly.
 
 ## [0.2.0] — 2026-09-14
 

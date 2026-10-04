@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,7 +114,7 @@ func (s *dpopTokenTestSetup) createSessionWithCode(t *testing.T) (*client.Client
 		ID:                      crypto.GenerateClientID(),
 		Name:                    "DPoP Test Client",
 		RedirectURIs:            []string{"https://app.example.com/callback"},
-		GrantTypes:              []string{"authorization_code"},
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
 		Status:                  client.StatusActive,
@@ -154,18 +155,10 @@ func (s *dpopTokenTestSetup) createSessionWithCode(t *testing.T) (*client.Client
 }
 
 // createDPoPProof generates a valid DPoP proof JWT signed by the test key.
+// Thin wrapper over the shared signing helper further down this file.
 func (s *dpopTokenTestSetup) createDPoPProof(t *testing.T, method, uri string) string {
 	t.Helper()
-	signer, err := crypto.NewDPoPSigner(s.dpopKey, jose.ES256)
-	if err != nil {
-		t.Fatalf("create dpop signer: %v", err)
-	}
-
-	proof, err := crypto.CreateDPoPProof(signer, crypto.GenerateRandomString(16), method, uri, time.Now(), "", "")
-	if err != nil {
-		t.Fatalf("create dpop proof: %v", err)
-	}
-	return proof
+	return freshDPoPProof(t, s.dpopKey, method, uri)
 }
 
 // TestToken_ExchangeCode_WithDPoP_BindsJKT verifies that when a valid DPoP proof
@@ -680,4 +673,395 @@ func isDPoPError(err error) bool {
 // isDPoPReplayError checks if the error is specifically a DPoP replay error.
 func isDPoPReplayError(err error) bool {
 	return errors.Is(err, domain.ErrDPoPReplay)
+}
+
+// ---------------------------------------------------------------------------
+// DPoP on the other three grants.
+// ---------------------------------------------------------------------------
+
+// DPoP validation is implemented once per grant service (validateDPoP on
+// TokenService, ClientCredentialsService, JWTBearerService and
+// TokenExchangeService) rather than shared, so each copy needs the same
+// contract pinned. The tests above cover the authorization-code and refresh
+// paths on TokenService; the section below runs one scenario table against
+// the other three grants through the harness each service test file already
+// provides.
+
+const dpopTokenURL = "https://auth.example.com/oauth/token"
+
+// newDPoPClientKey generates a client DPoP key pair (ES256).
+func newDPoPClientKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate dpop key: %v", err)
+	}
+	return key
+}
+
+// signDPoPProof builds a DPoP proof JWT signed by key with every claim the
+// caller wants to control. iat and nonce are explicit so a scenario can
+// present a stale or nonce-bearing proof without a second helper.
+func signDPoPProof(t *testing.T, key *ecdsa.PrivateKey, jti, method, uri string, iat time.Time, nonce string) string {
+	t.Helper()
+	signer, err := crypto.NewDPoPSigner(key, jose.ES256)
+	if err != nil {
+		t.Fatalf("create dpop signer: %v", err)
+	}
+	proof, err := crypto.CreateDPoPProof(signer, jti, method, uri, iat, nonce, "")
+	if err != nil {
+		t.Fatalf("create dpop proof: %v", err)
+	}
+	return proof
+}
+
+// freshDPoPProof is signDPoPProof with a random jti, iat=now and no nonce.
+func freshDPoPProof(t *testing.T, key *ecdsa.PrivateKey, method, uri string) string {
+	t.Helper()
+	return signDPoPProof(t, key, crypto.GenerateRandomString(16), method, uri, time.Now(), "")
+}
+
+// dpopConfigProvider returns the static DPoP config the grant suites wire.
+func dpopConfigProvider(enabled, requireNonce bool) output.DPoPConfigProvider {
+	return static.NewDPoPConfigProvider(output.DPoPConfig{
+		Enabled:       enabled,
+		ProofLifetime: 60 * time.Second,
+		RequireNonce:  requireNonce,
+		NonceTTL:      60 * time.Second,
+	})
+}
+
+// failingDPoPConfigProvider always errors, to assert every grant fails
+// closed on a DPoP config-resolution error rather than issuing a bearer
+// token for a request that presented a proof.
+type failingDPoPConfigProvider struct{ err error }
+
+func (p failingDPoPConfigProvider) Config(context.Context) (output.DPoPConfig, error) {
+	return output.DPoPConfig{}, p.err
+}
+
+// assertCnfJKT checks whether the access token carries cnf.jkt and, when it
+// must, that the thumbprint is the one of key.
+func assertCnfJKT(t *testing.T, accessToken string, key *ecdsa.PrivateKey, wantBound bool) {
+	t.Helper()
+	claims := parseClaims(t, accessToken)
+	cnf, hasCnf := claims["cnf"].(map[string]any)
+	if !wantBound {
+		if hasCnf {
+			t.Errorf("cnf claim present on a token that must be plain Bearer: %v", cnf)
+		}
+		return
+	}
+	if !hasCnf {
+		t.Fatal("cnf claim missing from DPoP-bound token")
+	}
+	jkt, _ := cnf["jkt"].(string)
+	want, err := crypto.ComputeJKT(jose.JSONWebKey{Key: &key.PublicKey})
+	if err != nil {
+		t.Fatalf("compute expected jkt: %v", err)
+	}
+	if jkt != want {
+		t.Errorf("cnf.jkt = %q, want %q", jkt, want)
+	}
+}
+
+// dpopGrant is one grant service under test, wrapped so the scenario table
+// below does not care which request type it is filling in. Every issue call
+// must be independently valid (fresh assertion, fresh subject token) because
+// several scenarios issue twice.
+type dpopGrant struct {
+	// nonce is the DPoP nonce store the scenario wires; also used to issue
+	// a nonce or probe a jti directly.
+	nonce output.DPoPNonceStore
+	// wire installs a DPoP nonce store and config on the service.
+	wire func(store output.DPoPNonceStore, cfg output.DPoPConfigProvider)
+	// issue runs the grant with the given DPoP request fields and returns the
+	// access token and token_type.
+	issue func(t *testing.T, proof, method, url string) (accessToken, tokenType string, err error)
+}
+
+// runDPoPGrantScenarios is the shared scenario table. newGrant builds a
+// fresh, isolated service per subtest; wiring DPoP is the scenario's job.
+func runDPoPGrantScenarios(t *testing.T, newGrant func(t *testing.T) *dpopGrant) {
+	t.Helper()
+
+	t.Run("ValidProof_BindsJKT", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+		key := newDPoPClientKey(t)
+
+		tok, tokenType, err := g.issue(t, freshDPoPProof(t, key, "POST", dpopTokenURL), "POST", dpopTokenURL)
+		if err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		if tokenType != "DPoP" {
+			t.Errorf("token_type = %q, want DPoP", tokenType)
+		}
+		assertCnfJKT(t, tok, key, true)
+	})
+
+	t.Run("NoProof_PlainBearer", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+
+		tok, tokenType, err := g.issue(t, "", "", "")
+		if err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		if tokenType != "Bearer" {
+			t.Errorf("token_type = %q, want Bearer", tokenType)
+		}
+		assertCnfJKT(t, tok, nil, false)
+	})
+
+	// DPoP not wired at all (the default when dpop.enabled=false at boot):
+	// a presented proof is ignored, never validated, and the token is Bearer.
+	t.Run("DPoPNotWired_ProofIgnored", func(t *testing.T) {
+		g := newGrant(t)
+		key := newDPoPClientKey(t)
+
+		tok, tokenType, err := g.issue(t, freshDPoPProof(t, key, "POST", dpopTokenURL), "POST", dpopTokenURL)
+		if err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		if tokenType != "Bearer" {
+			t.Errorf("token_type = %q, want Bearer", tokenType)
+		}
+		assertCnfJKT(t, tok, key, false)
+	})
+
+	// Wired, but the resolved config reports Enabled=false (a substitute
+	// provider toggling per request): same outcome as not wired, and the
+	// proof's jti must not be consumed since it was never validated.
+	t.Run("DPoPDisabledByConfig_ProofIgnored", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(false, false))
+		key := newDPoPClientKey(t)
+
+		jti := "jti-not-consumed"
+		proof := signDPoPProof(t, key, jti, "POST", dpopTokenURL, time.Now(), "")
+		tok, tokenType, err := g.issue(t, proof, "POST", dpopTokenURL)
+		if err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		if tokenType != "Bearer" {
+			t.Errorf("token_type = %q, want Bearer", tokenType)
+		}
+		assertCnfJKT(t, tok, key, false)
+		if err := g.nonce.ConsumeJTI(context.Background(), jti, time.Now().Add(time.Minute)); err != nil {
+			t.Errorf("jti was consumed although the proof was never validated: %v", err)
+		}
+	})
+
+	t.Run("MalformedProof_Rejected", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+
+		_, _, err := g.issue(t, "not-a-jwt", "POST", dpopTokenURL)
+		if !errors.Is(err, domain.ErrDPoPInvalidProof) {
+			t.Fatalf("err = %v, want ErrDPoPInvalidProof", err)
+		}
+	})
+
+	t.Run("ReplayedJTI_Rejected", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+		key := newDPoPClientKey(t)
+
+		jti := "jti-replayed"
+		first := signDPoPProof(t, key, jti, "POST", dpopTokenURL, time.Now(), "")
+		if _, _, err := g.issue(t, first, "POST", dpopTokenURL); err != nil {
+			t.Fatalf("first issue: %v", err)
+		}
+
+		// A new, otherwise valid proof reusing the jti.
+		second := signDPoPProof(t, key, jti, "POST", dpopTokenURL, time.Now(), "")
+		_, _, err := g.issue(t, second, "POST", dpopTokenURL)
+		if !errors.Is(err, domain.ErrDPoPReplay) {
+			t.Fatalf("err = %v, want ErrDPoPReplay", err)
+		}
+	})
+
+	t.Run("WrongHTM_Rejected", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+		key := newDPoPClientKey(t)
+
+		proof := freshDPoPProof(t, key, "GET", dpopTokenURL)
+		_, _, err := g.issue(t, proof, "POST", dpopTokenURL)
+		if !errors.Is(err, domain.ErrDPoPInvalidProof) {
+			t.Fatalf("err = %v, want ErrDPoPInvalidProof", err)
+		}
+	})
+
+	t.Run("WrongHTU_Rejected", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+		key := newDPoPClientKey(t)
+
+		proof := freshDPoPProof(t, key, "POST", "https://evil.example.com/oauth/token")
+		_, _, err := g.issue(t, proof, "POST", dpopTokenURL)
+		if !errors.Is(err, domain.ErrDPoPInvalidProof) {
+			t.Fatalf("err = %v, want ErrDPoPInvalidProof", err)
+		}
+	})
+
+	t.Run("StaleIAT_Rejected", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+		key := newDPoPClientKey(t)
+
+		// ProofLifetime is 60s; ten minutes old is well outside it.
+		proof := signDPoPProof(t, key, crypto.GenerateRandomString(16), "POST", dpopTokenURL, time.Now().Add(-10*time.Minute), "")
+		_, _, err := g.issue(t, proof, "POST", dpopTokenURL)
+		if !errors.Is(err, domain.ErrDPoPInvalidProof) {
+			t.Fatalf("err = %v, want ErrDPoPInvalidProof", err)
+		}
+	})
+
+	t.Run("NonceRequired_MissingNonce_Rejected", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, true))
+		key := newDPoPClientKey(t)
+
+		_, _, err := g.issue(t, freshDPoPProof(t, key, "POST", dpopTokenURL), "POST", dpopTokenURL)
+		if !errors.Is(err, domain.ErrDPoPNonceRequired) {
+			t.Fatalf("err = %v, want ErrDPoPNonceRequired", err)
+		}
+	})
+
+	t.Run("NonceRequired_UnknownNonce_Rejected", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, true))
+		key := newDPoPClientKey(t)
+
+		proof := signDPoPProof(t, key, crypto.GenerateRandomString(16), "POST", dpopTokenURL, time.Now(), "nonce-the-server-never-issued")
+		_, _, err := g.issue(t, proof, "POST", dpopTokenURL)
+		if !errors.Is(err, domain.ErrDPoPNonceMismatch) {
+			t.Fatalf("err = %v, want ErrDPoPNonceMismatch", err)
+		}
+	})
+
+	t.Run("NonceRequired_IssuedNonce_BindsJKT", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, true))
+		key := newDPoPClientKey(t)
+
+		nonce, err := g.nonce.IssueNonce(context.Background(), time.Minute)
+		if err != nil {
+			t.Fatalf("issue nonce: %v", err)
+		}
+		proof := signDPoPProof(t, key, crypto.GenerateRandomString(16), "POST", dpopTokenURL, time.Now(), nonce)
+		tok, tokenType, err := g.issue(t, proof, "POST", dpopTokenURL)
+		if err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		if tokenType != "DPoP" {
+			t.Errorf("token_type = %q, want DPoP", tokenType)
+		}
+		assertCnfJKT(t, tok, key, true)
+	})
+
+	t.Run("ConfigError_FailsClosed", func(t *testing.T) {
+		g := newGrant(t)
+		wantErr := errors.New("dpop config unavailable")
+		g.wire(g.nonce, failingDPoPConfigProvider{err: wantErr})
+		key := newDPoPClientKey(t)
+
+		tok, _, err := g.issue(t, freshDPoPProof(t, key, "POST", dpopTokenURL), "POST", dpopTokenURL)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("err = %v, want it to wrap %v", err, wantErr)
+		}
+		if !strings.Contains(err.Error(), "resolve dpop config") {
+			t.Errorf("err = %q, want the resolve-dpop-config wrap", err)
+		}
+		if tok != "" {
+			t.Error("an access token was issued despite the config error")
+		}
+	})
+}
+
+func TestClientCredentials_DPoP(t *testing.T) {
+	runDPoPGrantScenarios(t, func(t *testing.T) *dpopGrant {
+		setup := newCCTestSetup(t)
+		c, secret := setup.createConfidentialClient(t, "read write")
+		return &dpopGrant{
+			nonce: setup.h.Stores.DPoPNonce,
+			wire:  setup.svc.WithDPoP,
+			issue: func(t *testing.T, proof, method, url string) (string, string, error) {
+				resp, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
+					ClientID:     c.ID,
+					ClientSecret: secret,
+					Scope:        "read",
+					DPoPProof:    proof,
+					HTTPMethod:   method,
+					HTTPURL:      url,
+				})
+				if err != nil {
+					return "", "", err
+				}
+				return resp.AccessToken, resp.TokenType, nil
+			},
+		}
+	})
+}
+
+func TestJWTBearerGrant_DPoP(t *testing.T) {
+	runDPoPGrantScenarios(t, func(t *testing.T) *dpopGrant {
+		setup := newJWTBearerTestSetup(t)
+		c, secret := setup.createJWTBearerClient(t, "read write")
+		return &dpopGrant{
+			nonce: setup.h.Stores.DPoPNonce,
+			wire:  setup.svc.WithDPoP,
+			issue: func(t *testing.T, proof, method, url string) (string, string, error) {
+				// Assertion jtis are single-use; mint one per call.
+				raw := setup.signTestIDJAG(t, setup.validAssertion(c.ID))
+				resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+					Assertion:    raw,
+					ClientID:     c.ID,
+					ClientSecret: secret,
+					Scope:        "read",
+					DPoPProof:    proof,
+					HTTPMethod:   method,
+					HTTPURL:      url,
+				})
+				if err != nil {
+					return "", "", err
+				}
+				return resp.AccessToken, resp.TokenType, nil
+			},
+		}
+	})
+}
+
+func TestTokenExchange_DPoP(t *testing.T) {
+	runDPoPGrantScenarios(t, func(t *testing.T) *dpopGrant {
+		setup := newTETestSetup(t, output.TokenExchangeConfig{
+			AllowSelfExchange: true,
+			MaxChainDepth:     5,
+			TokenExpiry:       15 * time.Minute,
+		})
+		c, secret := setup.createTEClient(t, []string{"urn:ietf:params:oauth:grant-type:token-exchange"}, "read write delete")
+		return &dpopGrant{
+			nonce: setup.h.Stores.DPoPNonce,
+			wire:  setup.svc.WithDPoP,
+			issue: func(t *testing.T, proof, method, url string) (string, string, error) {
+				subjectToken := setup.mintSubjectToken(t, defaultSubjectClaims(c.ID))
+				resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+					SubjectToken:     subjectToken,
+					SubjectTokenType: "urn:ietf:params:oauth:token-type:access_token",
+					Scope:            "read",
+					ClientID:         c.ID,
+					ClientSecret:     secret,
+					DPoPProof:        proof,
+					HTTPMethod:       method,
+					HTTPURL:          url,
+				})
+				if err != nil {
+					return "", "", err
+				}
+				return resp.AccessToken, resp.TokenType, nil
+			},
+		}
+	})
 }

@@ -1,0 +1,109 @@
+# Prometheus alerting rules for authserver.
+#
+# Load with `rule_files: [alerts.yaml]` (the bundled compose stack in this
+# directory does so) or hand the file to Grafana Alerting / Mimir ruler.
+# Every metric here is registered in internal/observability/metrics.go and
+# documented in docs/reference/metrics.md; every `runbook` annotation is an
+# anchor in docs/guides/operate/incident-runbook.md.
+#
+# Label names follow the Prometheus export of the OTel attributes: the HTTP
+# middleware attaches `http.status_code`, exported as `http_status_code`.
+
+groups:
+  - name: authplane
+    rules:
+      # --- security integrity: any non-zero value is an incident -------------
+
+      - alert: RefreshTokenReuse
+        expr: rate(authserver_refresh_token_reuse_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Refresh token reuse detected — possible token theft"
+          description: "A refresh token was presented after it had already been rotated. The family is revoked on detection; confirm with the revocation-failure alerts that the revocation actually landed."
+          runbook: "docs/guides/operate/incident-runbook.md#incident-refresh-token-reuse-burst"
+
+      - alert: RevocationFamilyFailed
+        expr: sum by (path) (increase(authserver_revocation_failures_total{half="family"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reuse detected on path {{ $labels.path }} but the family could not be revoked — revoke it now"
+          description: "Nothing was revoked and the family is still live. path=reuse is refresh-token reuse, path=code_reuse is authorization-code reuse. Its access tokens are denylisted unless RevocationDenylistFailed fired too."
+          runbook: "docs/guides/operate/incident-runbook.md#incident-refresh-token-reuse-burst"
+
+      - alert: RevocationDenylistFailed
+        expr: sum by (path) (increase(authserver_revocation_failures_total{half="jti"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JTI denylist failed on reuse (path {{ $labels.path }}) — access tokens outlive detection until exp"
+          description: "The family's access tokens were not denylisted and introspect as active until exp. Alone it means the family itself is dead; if RevocationFamilyFailed also fired, the family is live as well. Re-run the admin revoke or wait exp."
+          runbook: "docs/guides/operate/incident-runbook.md#incident-refresh-token-reuse-burst"
+
+      - alert: AuthCodeReuse
+        expr: sum by (verifier) (increase(authserver_auth_code_reuse_total[5m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Authorization-code replay (verifier={{ $labels.verifier }})"
+          description: "An authorization code was redeemed twice. verifier=valid means the replayer proved PKCE and the session's client_id, so the family was revoked (check RevocationFailed); verifier=invalid could never have been redeemed. Contain and eradicate as for refresh-token reuse."
+          runbook: "docs/guides/operate/incident-runbook.md#incident-refresh-token-reuse-burst"
+
+      - alert: AuditEventsDropped
+        expr: increase(authserver_audit_events_dropped_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit events are being dropped"
+          description: "The audit store could not persist an event; the full event went to the structured log instead. The audit trail has a gap until the store recovers."
+          runbook: "docs/guides/operate/incident-runbook.md#what-can-go-wrong-cross-cutting"
+
+      - alert: CIMDFetchSuppressedSpike
+        expr: sum(rate(authserver_cimd_fetch_suppressed_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CIMD fetch suppression above 1/s for 5m — fetches are being driven"
+          description: "Outbound CIMD fetches are being stopped by the negative cache, single-flight, or the global in-flight cap. The fetch path is reachable from an unauthenticated GET /oauth/authorize with a caller-chosen URL, so a sustained rate means someone is driving fetches, not that clients are registering."
+          runbook: "docs/guides/operate/incident-runbook.md#what-can-go-wrong-cross-cutting"
+
+      # --- availability / latency ---------------------------------------------
+
+      - alert: HTTPServerErrorRatio
+        expr: |
+          sum(rate(authserver_http_requests_total{http_status_code=~"5.."}[5m]))
+            / clamp_min(sum(rate(authserver_http_requests_total[5m])), 1e-9) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of HTTP requests are 5xx for 5m"
+          description: "Server-side errors across all routes. Break down by route with sum by (http_route) (rate(authserver_http_requests_total{http_status_code=~\"5..\"}[5m]))."
+          runbook: "docs/guides/operate/incident-runbook.md#what-can-go-wrong-cross-cutting"
+
+      - alert: TokenIssuanceP99Slow
+        expr: histogram_quantile(0.99, sum by (le) (rate(authserver_token_issuance_duration_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Token issuance p99 above 2s for 5m"
+          description: "Signing or the database is slow. Compare with authserver_db_operation_duration_seconds and authserver_key_reload_duration_seconds; for the Vault-Transit deploy also check for `vault token renewal failed` in the logs."
+          runbook: "docs/guides/operate/incident-runbook.md#what-can-go-wrong-cross-cutting"
+
+      - alert: HighAuthDenialRate
+        expr: sum(rate(authserver_auth_denied_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "auth_denied rate above 10/s for 5m"
+          description: "Likely credential stuffing or address enumeration (reason=user_not_found), or a regression. Break down with sum by (reason) (rate(authserver_auth_denied_total[5m]))."
+          runbook: "docs/guides/operate/incident-runbook.md#what-can-go-wrong-cross-cutting"

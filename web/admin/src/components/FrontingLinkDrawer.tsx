@@ -400,6 +400,10 @@ export default function FrontingLinkDrawer({
             must be scopes of the chosen target only — to bridge to a
             different target, create a separate fronting link.
             <br />
+            Only the gateway may exchange through the link: add its client
+            to the source resource's runtime clients (or to the target's
+            exchange allowlist). Other clients are refused.
+            <br />
             Validate posts a dry-run for cycle and scope-membership checks
             before commit. On edit, only scope_map is patchable;
             re-pointing source/target requires delete + create.

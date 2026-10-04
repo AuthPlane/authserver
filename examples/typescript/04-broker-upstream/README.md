@@ -1,7 +1,7 @@
 # Tier 04 — MCP server fronting a Broker (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 21 lines · Total example: 59 lines · SDK: ts-sdk 0.4.0**
+**Auth-specific code: 21 lines · Total example: 59 lines · SDK: ts-sdk 0.5.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call a third-party API on the user's

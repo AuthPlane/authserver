@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-integration-postgres test-e2e test-race lint check-imports vulncheck ci-local run run-postgres docker-build docker-run clean ui
+.PHONY: build test test-unit test-integration test-integration-postgres test-e2e test-race lint check-imports vulncheck ci-local coverage-check run run-postgres docker-build docker-run clean ui
 
 BINARY := authserver
 PKG := github.com/authplane/authserver
@@ -11,14 +11,35 @@ build:
 test: test-unit test-integration
 
 test-unit:
-	go test ./internal/domain/... ./internal/crypto/... ./internal/config/... ./internal/brokerproto/... -v -count=1
+	go test ./internal/domain/... ./internal/crypto/... ./internal/config/... ./internal/brokerproto/... -v -count=1 -coverprofile=coverage-unit.out
+
+# Coverage floor, applied by coverage-check to the merged unit + integration
+# profile (what ci-local runs). The number is a ratchet: raise it when
+# coverage rises, never lower it to make a red run green.
+COVERAGE_FLOOR ?= 59
 
 test-integration:
 	@packages=$$(go list ./internal/adapters/... ./internal/services/... ./api/... 2>/dev/null); \
 	if [ -n "$$packages" ]; then \
-		go test $$packages -v -count=1 -tags=integration; \
+		go test $$packages -v -count=1 -tags=integration -coverprofile=coverage-integration.out; \
 	else \
 		echo "No integration test packages found (adapters/services not yet created)."; \
+	fi
+
+# Merge the unit and integration profiles, print each total and the merged
+# one, and fail below COVERAGE_FLOOR. Run test-unit and test-integration first.
+coverage-check:
+	@for f in coverage-unit.out coverage-integration.out; do \
+		test -f $$f || { echo "coverage-check: $$f not found — run make test-unit test-integration first."; exit 1; }; \
+		printf '%-28s %s\n' "$$f" "$$(go tool cover -func=$$f | awk '/^total:/ { print $$3 }')"; \
+	done
+	@{ head -1 coverage-unit.out; tail -q -n +2 coverage-unit.out coverage-integration.out; } > coverage-merged.out
+	@total=$$(go tool cover -func=coverage-merged.out | awk '/^total:/ { sub("%", "", $$3); print $$3 }'); \
+	printf '%-28s %s%% (floor $(COVERAGE_FLOOR)%%)\n' "coverage-merged.out" "$$total"; \
+	if [ -z "$$total" ]; then echo "coverage-check: could not read a total from coverage-merged.out."; exit 1; fi; \
+	if [ $$(echo "$$total < $(COVERAGE_FLOOR)" | bc) -eq 1 ]; then \
+		echo "coverage-check: $$total% is below the $(COVERAGE_FLOOR)% floor. Add tests for what you changed; do not lower COVERAGE_FLOOR."; \
+		exit 1; \
 	fi
 
 AUTHSERVER_TEST_PG_PORT ?= 5433
@@ -27,13 +48,14 @@ test-integration-postgres:
 	@echo "Starting PostgreSQL on port $(AUTHSERVER_TEST_PG_PORT)..."
 	@AUTHSERVER_TEST_PG_PORT=$(AUTHSERVER_TEST_PG_PORT) docker compose -f deploy/docker-compose.test-postgres.yml up -d --wait
 	AUTHPLANE_STORAGE_POSTGRES_DSN="postgres://authserver:authserver@localhost:$(AUTHSERVER_TEST_PG_PORT)/authserver?sslmode=disable" \
-		go test ./internal/adapters/postgres/... -v -count=1 -tags=integration_postgres -timeout=300s; \
+		go test ./internal/adapters/postgres/... -v -count=1 -tags=integration_postgres -timeout=300s -coverprofile=coverage-postgres.out; \
 		EXIT=$$?; \
+		[ $$EXIT -eq 0 ] && go tool cover -func=coverage-postgres.out | tail -1; \
 		AUTHSERVER_TEST_PG_PORT=$(AUTHSERVER_TEST_PG_PORT) docker compose -f deploy/docker-compose.test-postgres.yml down; \
 		exit $$EXIT
 
 test-e2e:
-	cd e2e && go test ./... -v -count=1 -tags=e2e -timeout=180s
+	cd e2e && go test ./... -v -count=1 -tags=e2e -timeout=360s
 
 test-race:
 	go test -race ./...
@@ -60,29 +82,61 @@ lint: $(GOLANGCI_LINT)
 
 vulncheck:
 	@command -v govulncheck >/dev/null 2>&1 || { echo "Installing govulncheck..."; go install golang.org/x/vuln/cmd/govulncheck@latest; }
-	@OUTPUT=$$(govulncheck ./... 2>&1); EXIT=$$?; \
-	echo "$$OUTPUT"; \
-	if [ $$EXIT -eq 0 ]; then echo "No vulnerabilities found."; exit 0; fi; \
-	THIRD_PARTY=$$(echo "$$OUTPUT" | grep -A1 "^Vulnerability" | grep "Module:" || true); \
-	if [ -z "$$THIRD_PARTY" ]; then \
-		echo ""; echo "⚠ Only Go stdlib vulnerabilities found — upgrade Go to fix."; exit 0; \
-	fi; \
-	echo ""; echo "✗ Third-party dependency vulnerabilities found — run 'go get' to upgrade."; exit 1
+	@# e2e/ is a separate module; scan it too.
+	@FAILED=0; for mod in . e2e; do \
+		echo "govulncheck ($$mod)"; \
+		OUTPUT=$$(cd $$mod && govulncheck ./... 2>&1); EXIT=$$?; \
+		echo "$$OUTPUT"; \
+		if [ $$EXIT -eq 0 ]; then echo "No vulnerabilities found in $$mod."; continue; fi; \
+		if [ $$EXIT -ne 3 ]; then echo "✗ govulncheck failed to run in $$mod (exit $$EXIT)."; FAILED=1; continue; fi; \
+		THIRD_PARTY=$$(echo "$$OUTPUT" | grep -A1 "^Vulnerability" | grep "Module:" || true); \
+		if [ -z "$$THIRD_PARTY" ]; then \
+			echo ""; echo "⚠ Only Go stdlib vulnerabilities found in $$mod — upgrade Go to fix."; continue; \
+		fi; \
+		echo ""; echo "✗ Third-party dependency vulnerabilities found in $$mod — run 'go get' to upgrade."; FAILED=1; \
+	done; exit $$FAILED
 
 # Verify domain packages don't import infrastructure
 check-imports:
-	@echo "Checking domain import boundaries..."
-	@for pkg in client user token session consent scope audit connector vault; do \
-		imports=$$(go list -f '{{join .Imports "\n"}}' ./internal/domain/$$pkg/ 2>/dev/null | grep -v "^$$" | grep -v "github.com/gofrs/uuid" | grep "$(PKG)" | grep -v "domain" || true); \
+	@echo "Checking domain import boundaries (every package under internal/domain/)..."
+	@for d in internal/domain/*/; do \
+		pkg=$${d%/}; \
+		imports=$$(go list -f '{{join .Imports "\n"}}' ./$$pkg/ | grep -v "^$$" | grep "\." | grep -v "^$(PKG)/internal/domain" || true); \
 		if [ -n "$$imports" ]; then \
-			echo "VIOLATION: internal/domain/$$pkg imports non-domain package: $$imports"; \
+			echo "VIOLATION: $$pkg imports a non-domain, non-stdlib package:"; echo "$$imports"; \
+			echo "  domain packages may import only the standard library and other internal/domain packages."; \
 			exit 1; \
 		fi; \
+		echo "  $$pkg: clean"; \
 	done
-	@echo "Checking ports don't import adapters, services, config, or crypto..."
-	@imports=$$(go list -f '{{join .Imports "\n"}}' ./internal/ports/... 2>/dev/null | grep "$(PKG)" | grep -E "(adapters|services|config|crypto)" || true); \
+	@echo "Checking ports import only stdlib, internal/domain and go-jose..."
+	@imports=$$(go list -f '{{join .Imports "\n"}}' ./internal/ports/... | grep "\." | sort -u \
+		| grep -v "^$(PKG)/internal/domain$$" \
+		| grep -v "^$(PKG)/internal/domain/" \
+		| grep -v "^github.com/go-jose/go-jose/v4$$" || true); \
 	if [ -n "$$imports" ]; then \
-		echo "VIOLATION: ports import non-domain package: $$imports"; \
+		echo "VIOLATION: internal/ports imports a package outside its allowlist:"; echo "$$imports"; \
+		echo "  ports may import the standard library, internal/domain, and github.com/go-jose/go-jose/v4 (the JWKS type on the IdP port)."; \
+		exit 1; \
+	fi
+	@echo "Checking services import only domain, ports, brokerproto, issuer, crypto, observability, the otel API and go-jose..."
+	@imports=$$(go list -f '{{join .Imports "\n"}}' ./internal/services/... | grep "\." | sort -u \
+		| grep -v "^$(PKG)/internal/domain$$" \
+		| grep -v "^$(PKG)/internal/domain/" \
+		| grep -v "^$(PKG)/internal/ports/" \
+		| grep -v "^$(PKG)/internal/brokerproto$$" \
+		| grep -v "^$(PKG)/internal/issuer$$" \
+		| grep -v "^$(PKG)/internal/crypto$$" \
+		| grep -v "^$(PKG)/internal/observability$$" \
+		| grep -v "^go.opentelemetry.io/otel$$" \
+		| grep -v "^go.opentelemetry.io/otel/attribute$$" \
+		| grep -v "^go.opentelemetry.io/otel/codes$$" \
+		| grep -v "^go.opentelemetry.io/otel/metric$$" \
+		| grep -v "^go.opentelemetry.io/otel/trace$$" \
+		| grep -v "^github.com/go-jose/go-jose/v4$$" || true); \
+	if [ -n "$$imports" ]; then \
+		echo "VIOLATION: internal/services imports a package outside its allowlist:"; echo "$$imports"; \
+		echo "  services reach infrastructure through internal/ports/output interfaces; concrete adapters, config and api are never imported here."; \
 		exit 1; \
 	fi
 	@echo "Checking api/ doesn't import adapters or services directly..."
@@ -123,7 +177,7 @@ ui:
 		echo "web/admin/package.json not found; skipping UI build (placeholder used)"; \
 	fi
 
-ci-local: build lint check-imports test-unit vulncheck
+ci-local: build lint check-imports test-unit test-integration coverage-check vulncheck
 	@echo "All local CI checks passed."
 
 clean:

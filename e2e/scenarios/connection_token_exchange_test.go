@@ -138,6 +138,8 @@ func TestConnectionVend_ViaTokenExchange_HappyPath(t *testing.T) {
 		Target:   "github",
 		ScopeMap: map[string][]string{"tools/echo": {"repo"}},
 	})
+	// The caller is not mcp-0's gateway; the target names it as an allowed exchanger.
+	h.AdminAddAllowedClient("github", mcpServerClientID)
 	attestationScopes := []string{"tools/echo", "repo"}
 	h.RunFlowC1Consent(
 		"alice@example.com", "password123",
@@ -246,6 +248,8 @@ func TestConnectionVend_ViaTokenExchange_NotConnected(t *testing.T) {
 		Target:   "github",
 		ScopeMap: map[string][]string{"tools/echo": {"repo"}},
 	})
+	// The caller is not mcp-0's gateway; the target names it as an allowed exchanger.
+	h.AdminAddAllowedClient("github", mcpServerClientID)
 	attestationScopes := []string{"tools/echo", "repo"}
 	h.RunFlowC1Consent(
 		"bob@example.com", "password123",

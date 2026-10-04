@@ -231,22 +231,81 @@ func (s *IntrospectionService) IntrospectToken(ctx context.Context, req input.In
 	}
 
 	// 6. Check that the issuing client is still active.
+	//
+	// A fronted Mint dispatch issues its token with client_id = the source
+	// Resource's slug (token_exchange.go's Option β), which names no OAuth
+	// client. Such a token is checked against the Resource instead: no client
+	// status applies to that hop, and the subject, revocation and caller
+	// checks around this one still do.
 	issuingClient, err := s.clients.GetByID(ctx, claims.ClientID)
-	if err != nil || !issuingClient.IsActive() {
-		s.logger.InfoContext(ctx, "introspection: issuing client suspended or not found",
+	switch {
+	case err == nil:
+		if !issuingClient.IsActive() {
+			s.logger.InfoContext(ctx, "introspection: issuing client suspended",
+				"issuing_client_id", claims.ClientID,
+			)
+			return s.denyInactive(ctx, start, caller.ID, "issuing_client_inactive", claims.JTI), nil
+		}
+	case errors.Is(err, domain.ErrInvalidClient), errors.Is(err, domain.ErrClientNotFound):
+		fronted, frontErr := s.issuedThroughFrontingSource(ctx, claims)
+		if frontErr != nil {
+			s.logger.ErrorContext(ctx, "introspection: fronting source lookup failed",
+				"issuing_client_id", claims.ClientID,
+				"error", frontErr,
+			)
+			return s.inactiveServerFault(ctx, start), nil
+		}
+		if !fronted {
+			s.logger.InfoContext(ctx, "introspection: issuing client not found",
+				"issuing_client_id", claims.ClientID,
+			)
+			return s.denyInactive(ctx, start, caller.ID, "issuing_client_inactive", claims.JTI), nil
+		}
+	default:
+		s.logger.InfoContext(ctx, "introspection: issuing client lookup failed",
 			"issuing_client_id", claims.ClientID,
+			"error", err,
 		)
 		return s.denyInactive(ctx, start, caller.ID, "issuing_client_inactive", claims.JTI), nil
 	}
 
-	// 7. Check that the subject user is still active (skip for machine tokens).
-	if !isMachineToken && s.users != nil && claims.Subject != "" {
-		u, userErr := s.users.GetByID(ctx, claims.Subject)
-		if userErr != nil || !u.IsActive() {
-			s.logger.InfoContext(ctx, "introspection: subject user disabled or not found",
-				"sub", claims.Subject,
-			)
-			return s.denyInactive(ctx, start, caller.ID, "subject_inactive", claims.JTI), nil
+	// 7. Check that the subject user is still active.
+	//
+	// A user token's sub must name an active local user. A machine token's
+	// sub is checked only when it differs from client_id and names a local
+	// user: client_credentials tokens carry sub = client_id (RFC 9068 §2.2),
+	// and a jwt-bearer token's sub is either the federated "<iss>:<sub>" pair,
+	// which names no local account, or — through a subject mapping — a local
+	// user, whose account status must stop the token like any other. Token
+	// exchange tokens keep the subject token's sub and are covered the same
+	// way. An unknown machine-token subject passes, as in
+	// TokenExchangeService.checkLiveness.
+	if s.users != nil && claims.Subject != "" {
+		if !isMachineToken {
+			u, userErr := s.users.GetByID(ctx, claims.Subject)
+			if userErr != nil || !u.IsActive() {
+				s.logger.InfoContext(ctx, "introspection: subject user disabled or not found",
+					"sub", claims.Subject,
+				)
+				return s.denyInactive(ctx, start, caller.ID, "subject_inactive", claims.JTI), nil
+			}
+		} else if claims.Subject != claims.ClientID {
+			u, userErr := s.users.GetByID(ctx, claims.Subject)
+			switch {
+			case errors.Is(userErr, domain.ErrUserNotFound):
+				// Federated or client subject: no local account to check.
+			case userErr != nil, u == nil:
+				s.logger.WarnContext(ctx, "introspection: subject lookup failed for machine token",
+					"sub", claims.Subject, "error", userErr,
+				)
+				return s.inactiveServerFault(ctx, start), nil
+			case !u.IsActive():
+				s.logger.InfoContext(ctx, "introspection: machine token subject user disabled",
+					"sub", claims.Subject,
+					"client_id", claims.ClientID,
+				)
+				return s.denyInactive(ctx, start, caller.ID, "subject_inactive", claims.JTI), nil
+			}
 		}
 	}
 
@@ -418,12 +477,10 @@ const (
 //
 // Everything else is a stranger asking about somebody else's token.
 //
-// One shape falls outside both branches: the fronted Mint dispatch issues a
-// token whose client_id claim is the source Resource's slug rather than an
-// OAuth client_id (token_exchange.go's Option β), so no caller can match on it.
-// Those tokens do not reach here as active anyway — the issuing-client lookup
-// further down resolves client_id against the client store and finds nothing,
-// which has always reported them inactive to everybody, this change included.
+// The fronted Mint dispatch issues a token whose client_id claim is the source
+// Resource's slug rather than an OAuth client_id (token_exchange.go's Option
+// β), so the first branch never matches it; it is answered through the
+// second, to the runtime clients of the target Resource it is audienced to.
 func (s *IntrospectionService) callerEntitlement(
 	ctx context.Context, requestingClient, issuer string, claims *crypto.AccessTokenClaims,
 ) string {
@@ -486,6 +543,37 @@ func (s *IntrospectionService) callerEntitlement(
 		return entitledAmbiguous
 	}
 	return entitledNo
+}
+
+// issuedThroughFrontingSource reports whether a token whose client_id names
+// no OAuth client was issued by a fronted Mint dispatch through a registered
+// source Resource.
+//
+// Two facts must hold together: client_id resolves to a Resource whose slug
+// is exactly that value, and act.sub carries the same slug — the shape the
+// fronted dispatch stamps and no other grant produces. A client_id that
+// matches a Resource's URI, or a token missing the act hop, is not fronted
+// and stays inactive. A store failure is returned as an error so the caller
+// answers inactive as a server fault rather than as a verdict.
+func (s *IntrospectionService) issuedThroughFrontingSource(
+	ctx context.Context, claims *crypto.AccessTokenClaims,
+) (bool, error) {
+	if s.resources == nil || claims.ClientID == "" {
+		return false, nil
+	}
+	actSub, _ := claims.Act["sub"].(string)
+	if actSub != claims.ClientID {
+		return false, nil
+	}
+	res, err := s.resources.Resolve(ctx, claims.ClientID)
+	switch {
+	case err == nil:
+		return res != nil && res.Slug == claims.ClientID, nil
+	case errors.Is(err, domain.ErrResourceNotFound), errors.Is(err, domain.ErrAmbiguousResource):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // resourceAuthorizes reports whether requestingClient may act AS res.

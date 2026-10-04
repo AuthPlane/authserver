@@ -3,7 +3,7 @@
 # --platform=$BUILDPLATFORM runs the compiler natively and cross-compiles for
 # the image's target platform, which BuildKit supplies as TARGETARCH. Without
 # it the build stage itself runs emulated on a cross-arch host.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS builder
 ARG TARGETARCH
 
 RUN apk add --no-cache git ca-certificates tzdata
@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build \
 RUN mkdir -p /data/keys && chown -R 65534:65534 /data
 
 # Final stage — distroless, non-root
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

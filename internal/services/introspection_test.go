@@ -56,6 +56,13 @@ type introspectEnv struct {
 	revokeIssuance func(t *testing.T, jti string)
 	// withBrokenIssuances wires an issuance store that cannot answer.
 	withBrokenIssuances func()
+
+	// addUser creates a local user; addMachineToken files a JTI in the
+	// machine_tokens table the way client_credentials, jwt-bearer and token
+	// exchange do. withResolver swaps the resource resolver.
+	addUser         func(t *testing.T, id string, status user.Status)
+	addMachineToken func(t *testing.T, jti, clientID string)
+	withResolver    func(r services.ResourceRuntimeResolver)
 }
 
 func newIntrospectEnv(t *testing.T) *introspectEnv {
@@ -137,6 +144,26 @@ func newIntrospectEnv(t *testing.T) *introspectEnv {
 			t.Helper()
 			testdata.RevokeIssuance(t, stores, jti)
 		},
+		addUser: func(t *testing.T, id string, status user.Status) {
+			t.Helper()
+			now := time.Now().UTC()
+			if err := stores.User.Create(context.Background(), &user.User{
+				ID: id, Email: id + "@example.com", Role: user.RoleUser, Status: status,
+				Provider: user.ProviderLocal, CreatedAt: now, UpdatedAt: now,
+			}); err != nil {
+				t.Fatalf("create user %s: %v", id, err)
+			}
+		},
+		addMachineToken: func(t *testing.T, jti, clientID string) {
+			t.Helper()
+			now := time.Now().UTC()
+			if err := stores.MachineToken.Save(context.Background(), token.MachineToken{
+				JTI: jti, ClientID: clientID, IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+			}); err != nil {
+				t.Fatalf("save machine token %s: %v", jti, err)
+			}
+		},
+		withResolver: func(r services.ResourceRuntimeResolver) { svc.WithResourceRegistry(r) },
 	}
 }
 
@@ -834,46 +861,218 @@ func TestIntrospect_DenialReasonsAreGreppable(t *testing.T) {
 	}
 }
 
-// TestIntrospect_FrontedMintToken_InactiveForEveryone documents a shape that
-// predates this change: the fronted Mint dispatch issues a token whose
-// client_id claim is the source Resource's slug rather than an OAuth
-// client_id, and the issuing-client lookup resolves that claim against the
-// client store. It finds nothing, so such a token reports inactive to every
-// caller — the entitlement gate never decides it.
-//
-// Pinned so that a later change teaching that lookup about slug-shaped
-// client_ids is a deliberate one, made with this test in hand.
-func TestIntrospect_FrontedMintToken_InactiveForEveryone(t *testing.T) {
+// frontedClaims is the shape the fronted Mint dispatch issues (token_exchange.go's
+// Option β): client_id and act.sub both carry the source Resource's slug, aud
+// is the target Resource, sub is the user.
+func frontedClaims(sourceSlug string) crypto.AccessTokenClaims {
+	c := validClaims()
+	c.ClientID = sourceSlug
+	c.Act = map[string]interface{}{"sub": sourceSlug, "act": map[string]interface{}{"sub": "agent-client"}}
+	return c
+}
+
+// newFrontedEnv registers the source Resource "fronted-source-slug" and the
+// target Resource at validClaims()'s audience, with "rest-api-rs" as the
+// target's runtime client — the hidden API's introspection credentials.
+func newFrontedEnv(t *testing.T) *introspectEnv {
+	t.Helper()
 	env := newIntrospectEnv(t)
-	ctx := context.Background()
-	env.addClient(t, "exchange-agent", "agent-secret", client.StatusActive)
-	env.addResource(t, "res-1", "echo-mcp", "https://resource.example.com", "exchange-agent")
+	env.addClient(t, "rest-api-rs", "rs-secret", client.StatusActive)
+	env.addResource(t, "res-src", "fronted-source-slug", "https://source.example.com")
+	env.addResource(t, "res-tgt", "rest-api", "https://resource.example.com", "rest-api-rs")
+	return env
+}
 
-	claims := validClaims()
-	claims.ClientID = "fronted-source-slug" // a Resource slug, not a client_id
-	token := signTestToken(t, env.kp, claims)
+func (e *introspectEnv) introspectAsTargetRS(t *testing.T, claims crypto.AccessTokenClaims) *input.IntrospectResponse {
+	t.Helper()
+	resp, err := e.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+		Token:        signTestToken(t, e.kp, claims),
+		ClientID:     "rest-api-rs",
+		ClientSecret: "rs-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken: %v", err)
+	}
+	return resp
+}
 
-	// The caller is a runtime client of the Resource in aud, so it clears the
-	// entitlement gate — and is still refused, one check later.
-	resp, err := env.svc.IntrospectToken(ctx, input.IntrospectRequest{
-		Token:        token,
-		ClientID:     "exchange-agent",
-		ClientSecret: "agent-secret",
+// TestIntrospect_FrontedMintToken_ActiveForTargetRuntimeClient pins that a
+// token issued through a fronting link is active to the resource server it
+// is audienced to. Its client_id is the source Resource's slug, which names
+// no OAuth client; the issuing-client check resolves it against the resource
+// registry instead of failing it.
+func TestIntrospect_FrontedMintToken_ActiveForTargetRuntimeClient(t *testing.T) {
+	env := newFrontedEnv(t)
+
+	resp := env.introspectAsTargetRS(t, frontedClaims("fronted-source-slug"))
+	if !resp.Active {
+		t.Fatalf("fronted token inactive to the target's runtime client; denials: %v", env.deniedEvents())
+	}
+	if resp.ClientID != "fronted-source-slug" || resp.Sub != "user-1" {
+		t.Errorf("client_id/sub = %q/%q, want fronted-source-slug/user-1", resp.ClientID, resp.Sub)
+	}
+}
+
+// TestIntrospect_FrontedMintToken_NotFrontedShaped_Inactive pins that only the
+// fronted shape is admitted: client_id must resolve to a Resource by slug and
+// act.sub must repeat it. Anything else whose client_id names no OAuth client
+// stays inactive, as before.
+func TestIntrospect_FrontedMintToken_NotFrontedShaped_Inactive(t *testing.T) {
+	cases := map[string]func(c *crypto.AccessTokenClaims){
+		"no act claim":            func(c *crypto.AccessTokenClaims) { c.Act = nil },
+		"act.sub differs":         func(c *crypto.AccessTokenClaims) { c.Act = map[string]interface{}{"sub": "someone-else"} },
+		"client_id names nothing": func(c *crypto.AccessTokenClaims) { c.ClientID = "ghost"; c.Act = map[string]interface{}{"sub": "ghost"} },
+		"client_id is a resource URI, not a slug": func(c *crypto.AccessTokenClaims) {
+			c.ClientID = "https://source.example.com"
+			c.Act = map[string]interface{}{"sub": "https://source.example.com"}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := newFrontedEnv(t)
+			claims := frontedClaims("fronted-source-slug")
+			mutate(&claims)
+			if env.introspectAsTargetRS(t, claims).Active {
+				t.Fatal("expected inactive")
+			}
+			env.wantDeniedFor(t, "issuing_client_inactive")
+		})
+	}
+}
+
+// TestIntrospect_FrontedMintToken_DisabledUser_Inactive pins that admitting
+// the fronted hop skips only the OAuth-client status check: the subject
+// liveness check still applies.
+func TestIntrospect_FrontedMintToken_DisabledUser_Inactive(t *testing.T) {
+	env := newFrontedEnv(t)
+	env.addUser(t, "user-off", user.StatusDisabled)
+	claims := frontedClaims("fronted-source-slug")
+	claims.Subject = "user-off"
+
+	if env.introspectAsTargetRS(t, claims).Active {
+		t.Fatal("fronted token of a disabled user must be inactive")
+	}
+	env.wantDeniedFor(t, "subject_inactive")
+}
+
+// TestIntrospect_FrontedMintToken_RevokedIssuance_Inactive pins that the
+// revocation checks still run for a fronted token.
+func TestIntrospect_FrontedMintToken_RevokedIssuance_Inactive(t *testing.T) {
+	env := newFrontedEnv(t)
+	env.withIssuances()
+	claims := frontedClaims("fronted-source-slug")
+	env.addIssuance(t, claims.JTI, "user-1", "introspect-client-1", "res-tgt")
+	env.revokeIssuance(t, claims.JTI)
+
+	if env.introspectAsTargetRS(t, claims).Active {
+		t.Fatal("revoked fronted token must be inactive")
+	}
+	env.wantDeniedFor(t, "issuance_revoked")
+}
+
+// TestIntrospect_FrontedMintToken_StrangerCaller_Inactive pins that the caller
+// rules are unchanged: a client that is not the target's runtime client
+// learns nothing about a fronted token.
+func TestIntrospect_FrontedMintToken_StrangerCaller_Inactive(t *testing.T) {
+	env := newFrontedEnv(t)
+	env.addClient(t, "stranger", "stranger-secret", client.StatusActive)
+
+	resp, err := env.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+		Token:        signTestToken(t, env.kp, frontedClaims("fronted-source-slug")),
+		ClientID:     "stranger",
+		ClientSecret: "stranger-secret",
 	})
 	if err != nil {
 		t.Fatalf("IntrospectToken: %v", err)
 	}
 	if resp.Active {
-		t.Fatal("expected inactive: client_id names no registered client")
+		t.Fatal("a stranger must not see a fronted token active")
 	}
+	env.wantDeniedFor(t, "caller_not_authorized_for_token")
+}
 
-	denied := env.deniedEvents()
-	if len(denied) != 1 {
-		t.Fatalf("denied audit events = %d, want 1", len(denied))
+// TestIntrospect_FrontedMintToken_SourceLookupFails_ServerFault pins that a
+// store failure while resolving the source answers inactive without an audit
+// row: the AS could not decide, the caller did nothing wrong.
+func TestIntrospect_FrontedMintToken_SourceLookupFails_ServerFault(t *testing.T) {
+	env := newFrontedEnv(t)
+	env.withResolver(testdata.NewFlakyResourceResolver(env.registry, "fronted-source-slug"))
+
+	if env.introspectAsTargetRS(t, frontedClaims("fronted-source-slug")).Active {
+		t.Fatal("expected inactive when the source cannot be resolved")
 	}
-	if !strings.Contains(denied[0].Detail, "reason=issuing_client_inactive") {
-		t.Errorf("refused by %q; the entitlement gate is not what rejects these",
-			denied[0].Detail)
+	if n := len(env.deniedEvents()); n != 0 {
+		t.Fatalf("denied audit events = %d, want 0 for a server fault", n)
+	}
+}
+
+// TestIntrospect_MachineToken_MappedDisabledUser_Inactive covers a jwt-bearer
+// token whose sub is a local user reached through a subject mapping. It is
+// filed as a machine token, which used to skip the subject check entirely;
+// a disabled account must stop it like any other token of that user.
+func TestIntrospect_MachineToken_MappedDisabledUser_Inactive(t *testing.T) {
+	env := newIntrospectEnv(t)
+	env.addUser(t, "mapped-bob", user.StatusDisabled)
+	claims := validClaims()
+	claims.Subject = "mapped-bob"
+	claims.Act = map[string]interface{}{"sub": "https://idp.example.com"}
+	env.addMachineToken(t, claims.JTI, claims.ClientID)
+
+	resp, err := env.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+		Token: signTestToken(t, env.kp, claims), ClientID: env.clientID, ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken: %v", err)
+	}
+	if resp.Active {
+		t.Fatal("machine token whose sub is a disabled local user must be inactive")
+	}
+	env.wantDeniedFor(t, "subject_inactive")
+}
+
+// TestIntrospect_MachineToken_SubjectsWithoutLocalAccount_Active pins the
+// machine-token shapes the subject check must leave alone: client_credentials
+// (sub = client_id) and a federated jwt-bearer subject ("<iss>:<sub>"), which
+// names no local user.
+func TestIntrospect_MachineToken_SubjectsWithoutLocalAccount_Active(t *testing.T) {
+	for name, sub := range map[string]string{
+		"client_credentials":   "introspect-client-1",
+		"federated jwt-bearer": "https://idp.example.com:alice@corp",
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newIntrospectEnv(t)
+			claims := validClaims()
+			claims.Subject = sub
+			env.addMachineToken(t, claims.JTI, claims.ClientID)
+
+			resp, err := env.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+				Token: signTestToken(t, env.kp, claims), ClientID: env.clientID, ClientSecret: "test-secret",
+			})
+			if err != nil {
+				t.Fatalf("IntrospectToken: %v", err)
+			}
+			if !resp.Active {
+				t.Fatalf("expected active; denials: %v", env.deniedEvents())
+			}
+		})
+	}
+}
+
+// TestIntrospect_MachineToken_ActiveMappedUser_Active pins that the subject
+// check passes a mapped user whose account is active.
+func TestIntrospect_MachineToken_ActiveMappedUser_Active(t *testing.T) {
+	env := newIntrospectEnv(t)
+	claims := validClaims() // sub = user-1, active
+	env.addMachineToken(t, claims.JTI, claims.ClientID)
+
+	resp, err := env.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+		Token: signTestToken(t, env.kp, claims), ClientID: env.clientID, ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken: %v", err)
+	}
+	if !resp.Active {
+		t.Fatalf("expected active; denials: %v", env.deniedEvents())
 	}
 }
 

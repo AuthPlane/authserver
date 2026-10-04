@@ -1,7 +1,7 @@
 # Tier 01 — Basic MCP server (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 53 lines · SDK: ts-sdk 0.4.0**
+**Auth-specific code: 5 lines · Total example: 53 lines · SDK: ts-sdk 0.5.0**
 <!-- loccount:end -->
 
 A minimal MCP server protected by Authplane-issued JWTs. Everything you need

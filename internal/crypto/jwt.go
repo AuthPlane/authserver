@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -123,14 +124,33 @@ func ValidateAccessTokenClaims(c AccessTokenClaims) error {
 	return nil
 }
 
+// ContextSigner is a crypto.Signer that can also sign under a context.
+// Remote signing backends (Vault Transit, cloud KMS) implement it so the
+// signing round trip joins the trace of the request that mints the token
+// and honors its deadline. Local keys never need it.
+type ContextSigner interface {
+	crypto.Signer
+	SignContext(ctx context.Context, digest []byte, opts crypto.SignerOpts) ([]byte, error)
+}
+
 // SignAccessToken signs an RFC 9068 JWT access token with typ: at+jwt.
 // Returns an error if required claims are missing.
+//
+// It signs under a background context; callers inside a request use
+// SignAccessTokenContext so a remote signer's span joins the request trace.
+func SignAccessToken(kp *KeyPair, claims AccessTokenClaims) (string, error) {
+	return SignAccessTokenContext(context.Background(), kp, claims)
+}
+
+// SignAccessTokenContext signs an RFC 9068 JWT access token with typ: at+jwt
+// under ctx. Returns an error if required claims are missing.
 //
 // For concrete key types (*ecdsa.PrivateKey, *rsa.PrivateKey) the key is
 // passed directly to go-jose. For opaque crypto.Signer implementations
 // (e.g. Vault Transit, KMS) the key is wrapped as a jose.OpaqueSigner
-// so go-jose delegates signing without needing access to raw key material.
-func SignAccessToken(kp *KeyPair, claims AccessTokenClaims) (string, error) {
+// so go-jose delegates signing without needing access to raw key material;
+// when the signer is a ContextSigner the wrapper signs under ctx.
+func SignAccessTokenContext(ctx context.Context, kp *KeyPair, claims AccessTokenClaims) (string, error) {
 	if err := ValidateAccessTokenClaims(claims); err != nil {
 		return "", fmt.Errorf("invalid claims: %w", err)
 	}
@@ -145,6 +165,7 @@ func SignAccessToken(kp *KeyPair, claims AccessTokenClaims) (string, error) {
 		key = kp.PrivateKey
 	default:
 		key = &opaqueCryptoSigner{
+			ctx:    ctx,
 			signer: kp.PrivateKey,
 			kid:    kp.KeyID,
 			alg:    kp.Algorithm,
@@ -175,7 +196,11 @@ func SignAccessToken(kp *KeyPair, claims AccessTokenClaims) (string, error) {
 // opaqueCryptoSigner adapts a crypto.Signer to jose.OpaqueSigner.
 // This allows remote signing backends (Vault Transit, cloud KMS) to work
 // with go-jose, which requires either concrete key types or OpaqueSigner.
+//
+// It is built per signing call and carries that call's context, because
+// jose.OpaqueSigner.SignPayload has no context parameter of its own.
 type opaqueCryptoSigner struct {
+	ctx    context.Context
 	signer crypto.Signer
 	kid    string
 	alg    jose.SignatureAlgorithm
@@ -216,7 +241,13 @@ func (o *opaqueCryptoSigner) SignPayload(payload []byte, alg jose.SignatureAlgor
 	hasher.Write(payload)
 	digest := hasher.Sum(nil)
 
-	sig, err := o.signer.Sign(rand.Reader, digest, hash)
+	var sig []byte
+	var err error
+	if cs, ok := o.signer.(ContextSigner); ok && o.ctx != nil {
+		sig, err = cs.SignContext(o.ctx, digest, hash)
+	} else {
+		sig, err = o.signer.Sign(rand.Reader, digest, hash)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,7 @@
 # Tier 01 — Basic MCP server (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 31 lines · SDK: python-sdk 0.4.0**
+**Auth-specific code: 5 lines · Total example: 31 lines · SDK: python-sdk 0.5.0**
 <!-- loccount:end -->
 
 A minimal FastMCP server protected by Authplane-issued JWTs. Everything you

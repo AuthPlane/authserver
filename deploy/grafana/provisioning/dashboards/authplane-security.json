@@ -90,6 +90,89 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 104,
+      "title": "Integrity",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Reuse detections whose revocation half failed. half=family: the family is still live; half=jti: its access tokens were not denylisted. Any non-zero value is red; see the refresh-token reuse burst runbook.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 6 },
+      "id": 14,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "ceil(sum by (path, half) (increase(authserver_revocation_failures_total{job=~\"$job\"}[5m])))", "legendFormat": "{{path}}/{{half}}", "refId": "A" }
+      ],
+      "title": "Revocation Failures (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Authorization-code replays. verifier=valid proved PKCE and the session's client_id, so revocation was attempted; verifier=invalid could never have been redeemed. Any non-zero value is red.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 6 },
+      "id": 15,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "ceil(sum by (verifier) (increase(authserver_auth_code_reuse_total{job=~\"$job\"}[5m])))", "legendFormat": "verifier={{verifier}}", "refId": "A" }
+      ],
+      "title": "Auth Code Reuse (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Audit events that could not be persisted (the full event went to the structured log instead). Any non-zero value is red: the audit trail has a gap.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 6 },
+      "id": 16,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "ceil(sum(increase(authserver_audit_events_dropped_total{job=~\"$job\"}[5m])))", "legendFormat": "Dropped", "refId": "A" }
+      ],
+      "title": "Audit Events Dropped (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Outbound CIMD fetches stopped by negative_cache / single_flight / capacity. The fetch path is reachable unauthenticated, so a sustained value means fetches are being driven at the server.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 6 },
+      "id": 17,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "ceil(sum by (reason) (increase(authserver_cimd_fetch_suppressed_total{job=~\"$job\"}[5m])))", "legendFormat": "{{reason}}", "refId": "A" }
+      ],
+      "title": "CIMD Fetches Suppressed (5m)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
       "id": 101,
       "title": "DPoP (RFC 9449)",
       "type": "row"
@@ -100,7 +183,7 @@
         "defaults": { "custom": { "fillOpacity": 15 }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 11 },
       "id": 5,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -116,7 +199,7 @@
         "defaults": { "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 6 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 11 },
       "id": 6,
       "options": { "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -131,7 +214,7 @@
         "defaults": { "unit": "short" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 11 },
       "id": 7,
       "options": {
         "legend": { "displayMode": "list", "placement": "right" },
@@ -148,18 +231,19 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 },
       "id": 102,
       "title": "Token Exchange & Client Credentials",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Groups authplane_token_exchange_total by its type label. The exchange counter's label set is unified in a later release; until then some exchange paths emit a different label and this panel may undercount.",
       "fieldConfig": {
         "defaults": { "custom": { "fillOpacity": 15, "stacking": { "mode": "normal" } }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 15 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
       "id": 8,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -174,7 +258,7 @@
         "defaults": { "custom": { "fillOpacity": 20 }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 15 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
       "id": 9,
       "options": { "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -189,7 +273,7 @@
         "defaults": { "custom": { "fillOpacity": 20 }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 15 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
       "id": 10,
       "options": { "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -200,7 +284,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
       "id": 103,
       "title": "Authentication & Consent",
       "type": "row"
@@ -211,7 +295,7 @@
         "defaults": { "custom": { "fillOpacity": 15, "stacking": { "mode": "normal" } }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 29 },
       "id": 11,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -226,7 +310,7 @@
         "defaults": { "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 29 },
       "id": 12,
       "options": { "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -241,7 +325,7 @@
         "defaults": { "custom": { "fillOpacity": 15, "stacking": { "mode": "normal" } }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 29 },
       "id": 13,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [

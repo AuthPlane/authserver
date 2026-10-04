@@ -62,7 +62,7 @@ func newIssuanceFlowFixture(t *testing.T, slug string) *issuanceFlowFixture {
 	userID := h.CreateUser(email, password)
 
 	mcpResourceSlug := "iss-" + slug + "-mcp"
-	webAppClientID := h.AdminCreatePublicClient("iss-"+slug+"-webapp", []string{"authorization_code"}, "tools/echo", nil)
+	webAppClientID := h.AdminCreatePublicClient("iss-"+slug+"-webapp", []string{"authorization_code", "refresh_token"}, "tools/echo", nil)
 	mcpClientID, mcpSecret := h.AdminCreateConfidentialClient(
 		"iss-"+slug+"-mcp",
 		[]string{"urn:ietf:params:oauth:grant-type:token-exchange"},

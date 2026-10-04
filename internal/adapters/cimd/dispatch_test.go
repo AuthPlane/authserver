@@ -2,8 +2,14 @@ package cimd
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // recordingRT records which transport was selected and returns a minimal response.
@@ -82,4 +88,84 @@ func TestDispatchTransport_IgnoresScheme(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDispatchTransport_EmitsSpan verifies each round trip runs under a
+// CIMD.Dispatch span carrying the address policy and the response status, and
+// that a transport failure marks the span as an error.
+func TestDispatchTransport_EmitsSpan(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	var hit string
+	d := newDispatchTransport(tp.Tracer("test"))
+	d.strict = recordingRT{name: "strict", hit: &hit}
+	d.permissive = failingRT{}
+
+	req, _ := http.NewRequestWithContext(withAllowPrivate(context.Background(), false),
+		http.MethodGet, "https://example.com", http.NoBody)
+	resp, err := d.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	req, _ = http.NewRequestWithContext(withAllowPrivate(context.Background(), true),
+		http.MethodGet, "https://example.com", http.NoBody)
+	resp, err = d.RoundTrip(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("expected the failing transport's error, got nil")
+	}
+
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2", len(spans))
+	}
+	for _, s := range spans {
+		if s.Name != "CIMD.Dispatch" {
+			t.Errorf("span name = %q, want CIMD.Dispatch", s.Name)
+		}
+	}
+	if spans[0].Status.Code == codes.Error {
+		t.Errorf("successful dispatch span marked Error")
+	}
+	if !hasAttr(spans[0], "http.status_code", attribute.IntValue(http.StatusOK)) {
+		t.Errorf("successful span missing http.status_code=200: %v", spans[0].Attributes)
+	}
+	if spans[1].Status.Code != codes.Error {
+		t.Errorf("failed dispatch span status = %v, want Error", spans[1].Status.Code)
+	}
+	if !hasAttr(spans[1], "allow_private", attribute.BoolValue(true)) {
+		t.Errorf("failed span missing allow_private=true: %v", spans[1].Attributes)
+	}
+}
+
+// TestDispatchTransport_NilTracerFallsBack pins that a transport built without
+// a tracer (as the struct-literal tests above do) still round-trips.
+func TestDispatchTransport_NilTracerFallsBack(t *testing.T) {
+	var hit string
+	d := &dispatchTransport{strict: recordingRT{name: "strict", hit: &hit}, permissive: recordingRT{name: "permissive", hit: &hit}}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com", http.NoBody)
+	resp, err := d.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip with nil tracer: %v", err)
+	}
+	_ = resp.Body.Close()
+}
+
+type failingRT struct{}
+
+func (failingRT) RoundTrip(_ *http.Request) (*http.Response, error) {
+	return nil, errors.New("dial refused")
+}
+
+func hasAttr(span tracetest.SpanStub, key string, want attribute.Value) bool {
+	for _, kv := range span.Attributes {
+		if string(kv.Key) == key && kv.Value == want {
+			return true
+		}
+	}
+	return false
 }

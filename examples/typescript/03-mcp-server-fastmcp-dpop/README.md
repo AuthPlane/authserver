@@ -1,7 +1,7 @@
 # Tier 03 — FastMCP server + agent with DPoP (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 16 lines · Total example: 127 lines · SDK: ts-sdk 0.4.0**
+**Auth-specific code: 16 lines · Total example: 127 lines · SDK: ts-sdk 0.5.0**
 <!-- loccount:end -->
 
 A FastMCP TypeScript server protected by Authplane-issued, DPoP-bound JWTs

@@ -28,7 +28,7 @@ All the auth-specific code fits inside the `// authplane:begin` /
 that prints the vended-token shape.
 
 <!-- loccount:begin -->
-**Auth-specific code: 19 lines · Total example: 49 lines · SDK: go-sdk v0.3.0**
+**Auth-specific code: 19 lines · Total example: 49 lines · SDK: go-sdk v0.4.0**
 <!-- loccount:end -->
 
 ## What you'll learn
@@ -40,8 +40,8 @@ that prints the vended-token shape.
   a `consent_required` response routes into a consent-elicitation
   branch instead of `log.Fatal`
 - How to read the `ConsentURL` field (camelCase Go struct field; wire
-  format is the JSON `consent_url`, defined in
-  [`api/shared/errors.go:36`](../../../api/shared/errors.go))
+  format is the JSON `consent_url`, defined on
+  `OAuthErrorResponse` in [`api/shared/errors.go`](../../../api/shared/errors.go))
 - How to wire the AS-side knobs — register a broker provider, expose it as
   a `backend_kind=broker` resource with a scope catalog, gate it with
   `policy.exchange.allowed_client_ids`
@@ -340,8 +340,8 @@ vending:
 
 If any bound fails, the AS responds with HTTP 400 + JSON
 `{"error":"consent_required","consent_url":"…","cause":"…"}`. The
-`consent_url` field is defined in
-[`api/shared/errors.go:36`](../../../api/shared/errors.go) and the AS
+`consent_url` field is defined on `OAuthErrorResponse` in
+[`api/shared/errors.go`](../../../api/shared/errors.go) and the AS
 chooses between `/connect/{provider}` (bound C/E failures) and
 `/authorize?resource=…` (bound B failures) based on the `cause`
 sub-discriminator

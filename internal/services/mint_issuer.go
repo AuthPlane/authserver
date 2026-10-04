@@ -155,7 +155,7 @@ func (m *MintIssuer) Issue(ctx context.Context, req IssueRequest) (*IssueRespons
 		claims.Cnf = map[string]interface{}{"jkt": req.DPoPJKT}
 	}
 
-	signed, err := crypto.SignAccessToken(kp, claims)
+	signed, err := crypto.SignAccessTokenContext(ctx, kp, claims)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

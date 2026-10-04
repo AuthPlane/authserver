@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -251,12 +252,12 @@ func TestCIMD_UpdateExisting_GrantTypesChange(t *testing.T) {
 
 	ctx := context.Background()
 
-	// First call — defaults applied (authorization_code, code, none).
+	// First call — defaults applied (authorization_code + refresh_token, code, none).
 	c1, err := svc.VerifyCIMD(ctx, ts.URL+cimdTestPath)
 	if err != nil {
 		t.Fatalf("first verify: %v", err)
 	}
-	if len(c1.GrantTypes) != 1 || c1.GrantTypes[0] != "authorization_code" {
+	if !slices.Equal(c1.GrantTypes, []string{"authorization_code", "refresh_token"}) {
 		t.Errorf("first grant_types: got %v", c1.GrantTypes)
 	}
 	if c1.TokenEndpointAuthMethod != "none" {
@@ -270,8 +271,8 @@ func TestCIMD_UpdateExisting_GrantTypesChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second verify: %v", err)
 	}
-	if len(c2.GrantTypes) != 2 {
-		t.Fatalf("updated grant_types: got %v, want 2 entries", c2.GrantTypes)
+	if !slices.Equal(c2.GrantTypes, []string{"authorization_code", "client_credentials"}) {
+		t.Fatalf("updated grant_types: got %v, want [authorization_code client_credentials]", c2.GrantTypes)
 	}
 	if c2.TokenEndpointAuthMethod != "client_secret_post" {
 		t.Errorf("updated auth method: got %q", c2.TokenEndpointAuthMethod)

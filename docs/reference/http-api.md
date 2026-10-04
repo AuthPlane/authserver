@@ -179,6 +179,7 @@ All endpoints are documented from their route registration site in `api/public/*
 **Server** — public (:9000)  
 **Auth** — browser session cookie (managed by `shared.SessionMiddleware`)  
 **Source** — `api/public/connection/routes.go:61`
+**Query** — `resource`, `return_url` (read by `handleConnect`)
 
 ---
 
@@ -189,6 +190,7 @@ All endpoints are documented from their route registration site in `api/public/*
 **Server** — public (:9000)  
 **Auth** — browser session cookie (managed by `shared.SessionMiddleware`)  
 **Source** — `api/public/connection/routes.go:62`
+**Query** — `code`, `state` (read by `handleCallback`)
 
 ---
 
@@ -219,6 +221,7 @@ All endpoints are documented from their route registration site in `api/public/*
 **Server** — public (:9000)  
 **Auth** — browser session cookie (managed by `shared.SessionMiddleware`)  
 **Source** — `api/public/oauth/routes.go:252`
+**Query** — `session_id` (read by `handleGetConsent`)
 
 ---
 
@@ -263,6 +266,7 @@ All endpoints are documented from their route registration site in `api/public/*
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
 **Source** — `api/public/oauth/routes.go:225`
+**Query** — `redirect` (read by `handleGetLogin`)
 
 ---
 
@@ -301,6 +305,7 @@ All endpoints are documented from their route registration site in `api/public/*
 **Server** — public (:9000)  
 **Auth** — browser session cookie (managed by `shared.SessionMiddleware`)  
 **Source** — `api/public/oauth/routes.go:161`
+**Query** — `client_id`, `code_challenge`, `code_challenge_method`, `redirect_uri`, `resource`, `response_type`, `scope`, `state` (read by `handleAuthorize`)
 
 Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_challenge_method=S256`). Redirects to `/consent` after login.
 
@@ -369,6 +374,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
 **Source** — `api/public/oauth/routes.go:291`
+**Query** — `code`, `error`, `error_description`, `state` (read by `handleOIDCCallback`)
 
 ---
 
@@ -379,6 +385,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — public (:9000)  
 **Auth** — none (public; request-body parameters identify the caller)  
 **Source** — `api/public/oauth/routes.go:290`
+**Query** — `redirect` (read by `handleOIDCStart`)
 
 ---
 
@@ -403,6 +410,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:94`
+**Query** — `action`, `actor_id`, `client_id`, `limit`, `offset`, `since`, `until` (read by `handleQueryAudit`)
 
 **Response 200** — JSON array of [`auditEventView`](#dto-audit-event-view).
 
@@ -427,6 +435,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:224`
+**Query** — `slug` (read by `handleList`)
 
 **Response 200** — JSON array of [`BrokerProviderView`](#dto-broker-provider-view).
 
@@ -487,6 +496,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:69`
+**Query** — `limit`, `offset`, `source`, `status` (read by `handleListClients`)
 
 **Response 200** — JSON array of [`clientView`](#dto-client-view).
 
@@ -515,6 +525,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:73`
+**Query** — `force` (read by `handleDeleteClient`)
 
 **Response 204** — no body.
 
@@ -611,6 +622,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:263`
+**Query** — `dry_run` (read by `handleCreate`)
 
 **Request** — JSON [`createFrontingLinkRequest`](#dto-create-fronting-link-request); `?dry_run=true` validates without persisting. **Response 201** — [`FrontingLinkView`](#dto-fronting-link-view).
 
@@ -743,6 +755,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:248`
+**Query** — `client`, `jti`, `limit`, `resource`, `since`, `user` (read by `handleList`)
 
 **Response 200** — [`IssuanceListResponse`](#dto-issuance-list-response).
 
@@ -803,6 +816,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:189`
+**Query** — `slug` (read by `handleList`)
 
 **Response 200** — JSON array of [`ResourceView`](#dto-resource-view).
 
@@ -827,6 +841,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:193`
+**Query** — `cascade` (read by `handleDelete`)
 
 **Response 204** — no body. 409 [`frontingLinkConflictResponse`](#dto-fronting-link-conflict-response) if fronting links reference the resource without `?cascade=true`.
 
@@ -875,6 +890,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:210`
+**Query** — `url` (read by `handleRemoveAllowedReturnURL`)
 
 ---
 
@@ -1025,6 +1041,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:79`
+**Query** — `client_id`, `limit`, `offset`, `user_id` (read by `handleListTokens`)
 
 ---
 
@@ -1079,6 +1096,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:87`
+**Query** — `force` (read by `handleDeleteUser`)
 
 **Response 204** — no body.
 
@@ -1163,6 +1181,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:88`
+**Query** — `limit`, `offset` (read by `handleListUserTokens`)
 
 **Response 200** — `{ tokens: [...] }` (issuance summary; see `api/admin/handlers.go`).
 
@@ -1175,6 +1194,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:158`
+**Query** — `idp_id` (read by `handleListPolicies`)
 
 ---
 
@@ -1225,6 +1245,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Server** — admin (:9001)  
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:171`
+**Query** — `idp_id` (read by `handleListMappings`)
 
 ---
 

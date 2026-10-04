@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	otelmetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -67,7 +69,8 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 }
 
 // RequestID returns middleware that generates a unique request ID,
-// stores it in context, adds X-Request-ID header, and creates a child logger.
+// stores it in context along with the caller's IP, adds X-Request-ID header,
+// and creates a child logger.
 func (m *HTTPMiddleware) RequestID() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +80,7 @@ func (m *HTTPMiddleware) RequestID() func(http.Handler) http.Handler {
 			}
 
 			ctx := WithRequestID(r.Context(), reqID)
+			ctx = WithClientIP(ctx, RemoteIP(r))
 			childLogger := m.logger.With("request_id", reqID)
 			ctx = WithLogger(ctx, childLogger)
 
@@ -117,6 +121,12 @@ func (m *HTTPMiddleware) Tracing() func(http.Handler) http.Handler {
 				attribute.Int("http.status_code", rw.statusCode),
 				attribute.Int64("http.response_size", rw.written),
 			)
+			// A 5xx is the server failing, so the span carries an error status
+			// and shows up in trace-backend error filters and service-map
+			// error rates. 4xx is the caller's fault and stays Unset.
+			if rw.statusCode >= 500 {
+				span.SetStatus(codes.Error, http.StatusText(rw.statusCode))
+			}
 		})
 	}
 }
@@ -204,6 +214,17 @@ func routePattern(r *http.Request) string {
 		return pattern
 	}
 	return r.URL.Path
+}
+
+// RemoteIP returns the IP of the connection the request arrived on.
+// It reads RemoteAddr only; X-Forwarded-For is ignored so a caller cannot
+// choose the address the server attributes it to.
+func RemoteIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
 }
 
 // generateRequestID creates a hex-encoded random request ID.

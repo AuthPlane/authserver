@@ -28,13 +28,29 @@ var _ output.UserStore = (*UserStore)(nil)
 
 const userColumns = `id, email, name, password_hash, role, status, provider, provider_sub, version, created_at, updated_at`
 
+// emailParam maps the domain's "no email" (the empty string) to NULL. A
+// federated identity is keyed on (provider, provider_sub) and its IdP need
+// not release an email, so email is nullable and unique only among the rows
+// that have one; storing "" instead would let exactly one email-less user
+// exist.
+func emailParam(email string) *string {
+	if email == "" {
+		return nil
+	}
+	return &email
+}
+
 func scanUser(row interface{ Scan(...any) error }) (*user.User, error) {
 	var u user.User
+	var email *string
 	if err := row.Scan(
-		&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.Status,
+		&u.ID, &email, &u.Name, &u.PasswordHash, &u.Role, &u.Status,
 		&u.Provider, &u.ProviderSub, &u.Version, &u.CreatedAt, &u.UpdatedAt,
 	); err != nil {
 		return nil, err
+	}
+	if email != nil {
+		u.Email = *email
 	}
 	u.CreatedAt = toUTC(u.CreatedAt)
 	u.UpdatedAt = toUTC(u.UpdatedAt)
@@ -52,7 +68,7 @@ func (s *UserStore) Create(ctx context.Context, u *user.User) error {
 	}
 	_, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`INSERT INTO users (`+userColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-		u.ID, u.Email, u.Name, u.PasswordHash, u.Role, u.Status,
+		u.ID, emailParam(u.Email), u.Name, u.PasswordHash, u.Role, u.Status,
 		u.Provider, u.ProviderSub, u.Version, toUTC(u.CreatedAt), toUTC(u.UpdatedAt),
 	)
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("user_create"))
@@ -95,6 +111,11 @@ func (s *UserStore) GetByID(ctx context.Context, id string) (*user.User, error) 
 func (s *UserStore) GetByEmail(ctx context.Context, email string) (*user.User, error) {
 	ctx, span := s.tracer.Start(ctx, "Postgres.UserGetByEmail")
 	defer span.End()
+
+	// No user is addressed by the absence of an email.
+	if email == "" {
+		return nil, domain.ErrUserNotFound
+	}
 
 	start := time.Now()
 	row := dbOrTx(ctx, s.pool).QueryRow(ctx,
@@ -146,12 +167,15 @@ func (s *UserStore) Update(ctx context.Context, u *user.User) error {
 	start := time.Now()
 	res, err := dbOrTx(ctx, s.pool).Exec(ctx,
 		`UPDATE users SET email=$1, name=$2, password_hash=$3, role=$4, status=$5, provider=$6, provider_sub=$7, version=version+1, updated_at=$8 WHERE id=$9 AND version=$10`,
-		u.Email, u.Name, u.PasswordHash, u.Role, u.Status, u.Provider, u.ProviderSub,
+		emailParam(u.Email), u.Name, u.PasswordHash, u.Role, u.Status, u.Provider, u.ProviderSub,
 		toUTC(u.UpdatedAt), u.ID, u.Version,
 	)
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("user_update"))
 
 	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.ErrUserAlreadyExists
+		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("update user: %w", err)

@@ -101,7 +101,7 @@ returns from
    (public client), scope `read write`. Save.
 3. Copy the auto-generated `client_id` from the Clients list and hand
    it to the agent. PKCE is enforced for **all** clients on the
-   authorization-code flow (`authorize.go:110-115` rejects a missing
+   authorization-code flow (`StartAuthorization` in `internal/services/authorize.go` rejects a missing
    `code_challenge` regardless of `token_endpoint_auth_method`); the
    `auth-method=none` choice above just declares the client public —
    it does not change the PKCE requirement.

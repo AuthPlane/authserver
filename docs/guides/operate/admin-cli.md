@@ -45,7 +45,7 @@ authserver admin client rotate-secret --id $CLIENT_ID
 authserver admin client delete --id $CLIENT_ID --force
 ```
 
-**Verify**: `authserver admin client list` no longer shows the deleted row; the audit log carries `client.deleted` (canonical: `internal/domain/audit/entity.go:87`).
+**Verify**: `authserver admin client list` no longer shows the deleted row; the audit log carries `client.deleted` (canonical: `ActionClientDeleted` in `internal/domain/audit/entity.go`).
 
 ---
 
@@ -63,7 +63,7 @@ authserver admin user force-logout --id $USER_ID
 # → docs/reference/cli.md#cli-admin-user-force-logout
 ```
 
-**Verify**: `audit_events` row with action `user.force_logout` (canonical: `internal/domain/audit/entity.go:93`).
+**Verify**: `audit_events` row with action `user.force_logout` (canonical: `ActionForceLogout` in `internal/domain/audit/entity.go`).
 
 ---
 
@@ -134,6 +134,10 @@ authserver admin fronting create --source gateway-mcp --target github-repo \
 # → docs/reference/cli.md#cli-admin-fronting-create
 
 authserver admin fronting list --source gateway-mcp
+
+# Declare the gateway: only a client in the source's runtime clients (or the
+# target's exchange allowlist) may exchange through the link.
+authserver admin resource runtime-client add --slug gateway-mcp --client-id <gateway-client-id>
 ```
 
 `--dry-run` validates against the service layer (cycle detection, scope coverage) without persisting — wire this into CI. See [Topologies → MCP Gateway (Broker)](../../topologies/mcp-gateway-broker.md).
@@ -174,7 +178,7 @@ authserver admin issuance revoke --id $ISSUANCE_ID
 # → docs/reference/cli.md#cli-admin-issuance-revoke
 ```
 
-`--since` accepts Go durations plus `d` / `w` suffixes (default 24h, max 30d). `revoke` is idempotent. Emits `issuance.revoked_admin` (canonical: `internal/domain/audit/entity.go:150`).
+`--since` accepts Go durations plus `d` / `w` suffixes (default 24h, max 30d). `revoke` is idempotent. Emits `issuance.revoked_admin` (canonical: `ActionIssuanceRevokedAdmin` in `internal/domain/audit/entity.go`).
 
 ---
 

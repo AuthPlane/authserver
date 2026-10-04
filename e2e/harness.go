@@ -25,6 +25,7 @@ import (
 
 	apiadmin "github.com/authplane/authserver/api/admin"
 	apipublic "github.com/authplane/authserver/api/public"
+	apishared "github.com/authplane/authserver/api/shared"
 	"github.com/authplane/authserver/internal/adapters/aesmaster"
 	brokerprotoapikey "github.com/authplane/authserver/internal/adapters/brokerproto/apikey"
 	brokerprotooauth "github.com/authplane/authserver/internal/adapters/brokerproto/oauth"
@@ -33,6 +34,7 @@ import (
 	"github.com/authplane/authserver/internal/adapters/cimd"
 	"github.com/authplane/authserver/internal/adapters/idpjwks"
 	"github.com/authplane/authserver/internal/adapters/keyfile"
+	adapteroidc "github.com/authplane/authserver/internal/adapters/oidc"
 	"github.com/authplane/authserver/internal/adapters/sqlite"
 	"github.com/authplane/authserver/internal/adapters/static"
 	"github.com/authplane/authserver/internal/adapters/storage"
@@ -243,6 +245,12 @@ type HarnessConfig struct {
 	// h.AdminAPIKey is the bearer token. Wires the same unified-resource
 	// admin services serve.go constructs in production.
 	EnableAdminAPI bool
+
+	// OIDC wires upstream OIDC federation (the oidc-federated-login topology)
+	// against this in-process provider, through the production OIDC adapter
+	// and facade: /oidc/start and /oidc/callback are served, and ID tokens are
+	// verified by the real verifier. nil leaves federation off, as before.
+	OIDC *MockOIDCProvider
 }
 
 // ConnectorConfig configures a mock upstream connector for E2E connection tests.
@@ -394,6 +402,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	bpHTTPClient := &http.Client{Timeout: 10 * time.Second}
 	if regErr := bpRegistry.Register(brokerprotooauth.New(
 		bpHTTPClient, harnessSecretResolver{}, brokerprotooauth.WithAllowLoopback(true),
+		brokerprotooauth.WithObservability(obs.WithComponent("broker-oauth")),
 	)); regErr != nil {
 		t.Fatalf("register brokerproto/oauth adapter: %v", regErr)
 	}
@@ -402,6 +411,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	}
 	if regErr := bpRegistry.Register(brokerprotoserviceaccount.New(
 		bpHTTPClient, harnessSecretResolver{},
+		brokerprotoserviceaccount.WithObservability(obs.WithComponent("broker-service-account")),
 	)); regErr != nil {
 		t.Fatalf("register brokerproto/serviceaccount adapter: %v", regErr)
 	}
@@ -678,6 +688,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		tokenExchangeSvcReal.WithAgentIdentity(agentIdentitySvc)
 		tokenExchangeSvcReal.WithResourceScopes(resourceLister)
 		tokenExchangeSvcReal.WithFronting(frontingAdminSvc)
+		tokenExchangeSvcReal.WithUsers(stores.User)
 		deps.TokenExchange = tokenExchangeSvcReal
 	}
 
@@ -763,7 +774,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 			obs.WithComponent("xaa-policy"), auditSvc,
 		)
 		subjectMappingSvc = services.NewSubjectMappingService(
-			stores.SubjectMapping, stores.IDP,
+			stores.SubjectMapping, stores.IDP, userStore,
 			obs.WithComponent("subject-mapping"),
 		)
 
@@ -804,6 +815,26 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		obs.WithComponent("prm-metadata"),
 	)
 
+	// Upstream OIDC federation, mirroring cmd/authserver/serve.go's OIDC block:
+	// production adapter + facade, state codec keyed off the session secret.
+	// The adapter's SSRF-safe client refuses loopback, so the harness injects
+	// a plain one (the mock provider is an httptest server).
+	if hcfg.OIDC != nil {
+		oidcConfig := static.NewOIDCConfigProvider(output.OIDCConfig{
+			Enabled:      true,
+			Issuer:       hcfg.OIDC.Issuer,
+			ClientID:     hcfg.OIDC.ClientID,
+			ClientSecret: []byte(hcfg.OIDC.ClientSecret),
+			RedirectURI:  issuerURL + "/oidc/callback",
+			Scopes:       []string{"openid", "email", "profile"},
+		})
+		oidcProvider := adapteroidc.New(oidcConfig, static.NewConfigSecretBackendInline(), obs.WithComponent("oidc"),
+			adapteroidc.WithHTTPClient(&http.Client{Timeout: 10 * time.Second}))
+		deps.OIDC = services.NewOIDCFacade(oidcProvider, userStore, obs.WithComponent("oidc-facade"), auditSvc)
+		sessionSecret, _ := harnessSessionSecret{}.Secret(context.Background())
+		deps.StateCodec = static.NewStateCodec(static.NewStateCodecConfigProvider(apishared.DeriveKey(sessionSecret, "oidc-state")))
+	}
+
 	srvReal := apipublic.NewServer(context.Background(), serverCfg, deps, obs.WithComponent("http"))
 	// Replace handler on the test server. Under a mount the AS is served from
 	// a host-level mux that strips the prefix, which is what a reverse proxy
@@ -838,6 +869,17 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 		issuanceAdminSvc := services.NewIssuanceAdminService(
 			stores.Issuance, obs.WithComponent("issuance-admin"), auditSvc,
 		)
+		// XAA admin routes (/admin/idps, /admin/xaa/policies,
+		// /admin/xaa/subject-mappings) when XAA is on, as serve.go mounts them.
+		var xaaAdminDeps *apiadmin.XAADeps
+		if hcfg.EnableXAA {
+			xaaAdminDeps = &apiadmin.XAADeps{
+				IDP:            xaaIDPSvc,
+				Policy:         xaaPolicySvc,
+				SubjectMapping: subjectMappingSvc,
+				Config:         static.NewXAAConfigProvider(output.XAAConfig{Enabled: true}),
+			}
+		}
 		adminSrv, err := apiadmin.NewServer(
 			context.Background(),
 			config.AdminConfig{Enabled: true, Address: ":0", APIKey: harnessAdminAPIKey},
@@ -849,6 +891,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 				Grants:          &apiadmin.GrantAdminDeps{Grants: grantAdminSvc},
 				Issuances:       &apiadmin.IssuanceAdminDeps{Issuances: issuanceAdminSvc},
 				Fronting:        &apiadmin.FrontingAdminDeps{Fronting: frontingAdminSvc},
+				XAA:             xaaAdminDeps,
 			},
 		)
 		if err != nil {
@@ -2582,5 +2625,67 @@ func (h *TestHarness) RunFlowConnect(email, password, providerSlug string) {
 		body, _ := io.ReadAll(callbackResp.Body)
 		h.T.Fatalf("RunFlowConnect(%s): callback status = %d, want 302; body=%s",
 			providerSlug, callbackResp.StatusCode, body)
+	}
+}
+
+// XAAPolicySpec is the wire body of POST /admin/xaa/policies. Empty slices
+// are omitted, which the policy engine reads as "no restriction".
+type XAAPolicySpec struct {
+	Name      string   `json:"name"`
+	IDPID     string   `json:"idp_id"`
+	ClientIDs []string `json:"client_ids,omitempty"`
+	Scopes    []string `json:"scopes,omitempty"`
+	Resources []string `json:"resources,omitempty"`
+}
+
+// AdminCreateXAAPolicy creates an XAA policy through POST /admin/xaa/policies
+// and returns its id. Requires EnableXAA and EnableAdminAPI.
+func (h *TestHarness) AdminCreateXAAPolicy(spec XAAPolicySpec) string {
+	h.T.Helper()
+	resp := h.AdminRequest(http.MethodPost, "/admin/xaa/policies", spec)
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		h.T.Fatalf("POST /admin/xaa/policies: status %d, body %s", resp.StatusCode, raw)
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil || out.ID == "" {
+		h.T.Fatalf("POST /admin/xaa/policies: no id in %s (%v)", raw, err)
+	}
+	return out.ID
+}
+
+// AdminCreateSubjectMapping maps (idp, idpSubject) to localUserID through
+// POST /admin/xaa/subject-mappings and returns the mapping id.
+func (h *TestHarness) AdminCreateSubjectMapping(idpID, idpSubject, localUserID string) string {
+	h.T.Helper()
+	resp := h.AdminRequest(http.MethodPost, "/admin/xaa/subject-mappings", map[string]string{
+		"idp_id": idpID, "idp_subject": idpSubject, "local_user_id": localUserID,
+	})
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		h.T.Fatalf("POST /admin/xaa/subject-mappings: status %d, body %s", resp.StatusCode, raw)
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil || out.ID == "" {
+		h.T.Fatalf("POST /admin/xaa/subject-mappings: no id in %s (%v)", raw, err)
+	}
+	return out.ID
+}
+
+// AdminSetIDPEnabled flips a trusted IdP's enabled flag through
+// PUT /admin/idps/{id}.
+func (h *TestHarness) AdminSetIDPEnabled(idpID string, enabled bool) {
+	h.T.Helper()
+	resp := h.AdminRequest(http.MethodPut, "/admin/idps/"+url.PathEscape(idpID), map[string]any{"enabled": enabled})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		h.T.Fatalf("PUT /admin/idps/%s: status %d, body %s", idpID, resp.StatusCode, raw)
 	}
 }

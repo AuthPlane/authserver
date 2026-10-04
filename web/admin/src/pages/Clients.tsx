@@ -63,7 +63,7 @@ interface ClientFormData {
 const emptyForm: ClientFormData = {
   name: "",
   redirect_uris: "",
-  grant_types: ["authorization_code"],
+  grant_types: ["authorization_code", "refresh_token"],
   token_endpoint_auth_method: "client_secret_post",
   scope: "",
   is_agent: false,

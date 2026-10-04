@@ -169,6 +169,15 @@ auth.example.com {
 }
 ```
 
+> **Rate limiting behind the proxy.** `rate_limit` is on by default (100
+> requests/s, burst 200) and keys on the TCP peer address only — it
+> deliberately ignores `X-Forwarded-For`, because a client can set that
+> header. Behind Caddy every request arrives from Caddy's address, so all
+> clients share one bucket: one busy client throttles every other one, and the
+> only escape today is `rate_limit.enabled: false` plus a limit in Caddy
+> itself (a rate-limit module, not part of the standard build) where the
+> real client address is known.
+
 Set [`AUTHPLANE_SERVER_ISSUER`](../../reference/env-vars.md) to `https://auth.example.com` and [`AUTHPLANE_SESSION_SECURE`](../../reference/env-vars.md) to `true` once TLS is live.
 
 ## Grace-period & purge ops

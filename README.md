@@ -10,6 +10,8 @@
 One Go binary. AGPL-3.0. MCP Authorization spec **2026-07-28**, end-to-end.
 
 > **New in v0.2.0 — MCP Authorization 2026-07-28.** Client ID Metadata Documents on by default, RFC 9207 `iss` on every authorization response, Protected Resource Metadata served by the AS, `authorization_grant_profiles_supported` for Enterprise-Managed Authorization, `application_type` on registration — and DPoP, client credentials, token exchange and XAA enabled out of the box. Details and the breaking changes in the [changelog](CHANGELOG.md).
+>
+> **v0.2.2 is a security patch.** Upgrade, and read its [upgrade notes](CHANGELOG.md) first: fronting-link gateways must be declared.
 
 > **AI coding agents:** read [AGENTS.md](AGENTS.md) first — it has the deterministic workflow for adding Authplane to an existing MCP server, the SDK pins per stack, and the three byte-for-byte rules that cause >90% of `invalid_token` failures. If you're an agent operating from web docs (no clone), [llms.txt](llms.txt) is the same link map in the [llmstxt.org](https://llmstxt.org/) convention.
 

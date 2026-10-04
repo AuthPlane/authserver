@@ -147,7 +147,7 @@ func (e *oauthTestEnv) createClient(t *testing.T, isPublic bool) (*client.Client
 		ID:                      crypto.GenerateClientID(),
 		Name:                    "OAuth Test Client",
 		RedirectURIs:            []string{"https://app.example.com/callback"},
-		GrantTypes:              []string{"authorization_code"},
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
 		Status:                  client.StatusActive,

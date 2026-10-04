@@ -14,12 +14,12 @@ and `token_exchange` implementations.
 
 Create `internal/ports/input/<grant>.go` declaring the interface the
 HTTP handler will call. Follow the shape of
-[`internal/ports/input/client_credentials.go:9`](../../internal/ports/input/client_credentials.go)
-(`ClientCredentialsPort`),
-[`internal/ports/input/token_exchange.go:6`](../../internal/ports/input/token_exchange.go)
-(`TokenExchangePort`), and
-[`internal/ports/input/jwt_bearer.go:9`](../../internal/ports/input/jwt_bearer.go)
-(`JWTBearerPort`). One method, one request struct, one response struct;
+`ClientCredentialsPort` in
+[`internal/ports/input/client_credentials.go`](../../internal/ports/input/client_credentials.go),
+`TokenExchangePort` in
+[`internal/ports/input/token_exchange.go`](../../internal/ports/input/token_exchange.go), and
+`JWTBearerPort` in
+[`internal/ports/input/jwt_bearer.go`](../../internal/ports/input/jwt_bearer.go). One method, one request struct, one response struct;
 domain errors only.
 
 `internal/ports/` must not import `internal/services/`,
@@ -31,10 +31,9 @@ boundaries.
 
 Create `internal/services/<grant>.go` (flat file, no nested package —
 match
-[`internal/services/client_credentials.go:33`](../../internal/services/client_credentials.go)
+[`internal/services/client_credentials.go`](../../internal/services/client_credentials.go)
 where `ClientCredentialsService` is declared, with its constructor
-`NewClientCredentialsService` at
-[`internal/services/client_credentials.go:64`](../../internal/services/client_credentials.go)).
+`NewClientCredentialsService` in the same file).
 
 Use the boilerplate from `CONTRIBUTING.md`:
 
@@ -55,32 +54,29 @@ adapter.
 
 ## 3. Add the dispatch arm in the token handler
 
-The `grant_type` switch lives at
-[`api/public/oauth/handlers.go:131`](../../api/public/oauth/handlers.go).
+The `grant_type` switch lives in `handleToken` in
+[`api/public/oauth/handlers.go`](../../api/public/oauth/handlers.go).
 Append a `case` for your grant identifier (or its RFC URN) and route
 it to a per-grant handler method on `oauthHandler`. Mirror the
-defensive pattern at
-[`api/public/oauth/handlers.go:211`](../../api/public/oauth/handlers.go)
-where `handleClientCredentials` returns
+defensive pattern of `handleClientCredentials` in
+[`api/public/oauth/handlers.go`](../../api/public/oauth/handlers.go),
+which returns
 `domain.NewFeatureDisabledError(...)` if the underlying service was
 not wired — that signals "you forgot to flip the feature flag".
 
 Add your dependency to the `oauth.Deps` struct alongside `Token`,
-`ClientCredentials`, `TokenExchange`, `JWTBearer` at
-[`api/public/server.go:34`](../../api/public/server.go).
+`ClientCredentials`, `TokenExchange`, `JWTBearer` — the `Deps` struct in
+[`api/public/server.go`](../../api/public/server.go).
 
 ## 4. Gate the grant behind config
 
 Every new grant ships *disabled* by default. Add an `Enabled` bool to
 `internal/config/config.go` and bind the env var in
 `internal/config/loader.go` using the
-`AUTHPLANE_<GRANT>_ENABLED` pattern — see the existing bindings at
-[`internal/config/loader.go:241`](../../internal/config/loader.go)
-(client credentials),
-[`internal/config/loader.go:246`](../../internal/config/loader.go)
-(DPoP), and
-[`internal/config/loader.go:253`](../../internal/config/loader.go)
-(token exchange).
+`AUTHPLANE_<GRANT>_ENABLED` pattern — see the existing bindings in
+[`internal/config/loader.go`](../../internal/config/loader.go):
+`loadClientCredentialsFromEnv` (client credentials), `loadDPoPFromEnv`
+(DPoP), and `loadTokenExchangeFromEnv` (token exchange).
 
 `make docs-gen` regenerates `docs/reference/configuration.md` and
 `docs/reference/env-vars.md` from these sources — never hand-edit
@@ -90,30 +86,30 @@ the reference pages.
 
 `cmd/authserver/serve.go` is the only file that knows both your port
 interface and its concrete service. Construct the service conditionally
-behind the feature flag, mirroring the OAuth grant trio at
-[`cmd/authserver/serve.go:348`](../../cmd/authserver/serve.go)
-(client credentials),
-[`cmd/authserver/serve.go:367`](../../cmd/authserver/serve.go)
-(token exchange), and
-[`cmd/authserver/serve.go:446`](../../cmd/authserver/serve.go)
-(jwt-bearer). Set the corresponding field on `apipublic.Deps` so the
-public server picks the service up; the existing wiring at
-[`cmd/authserver/serve.go:543`](../../cmd/authserver/serve.go)
-(`Token: tokenSvc`) and
-[`cmd/authserver/serve.go:570`](../../cmd/authserver/serve.go)
-(`deps.JWTBearer = jwtBearerSvc`) is the model.
+behind the feature flag, mirroring the OAuth grant trio in `runServe` in
+[`cmd/authserver/serve.go`](../../cmd/authserver/serve.go): the
+`services.NewClientCredentialsService` (client credentials),
+`services.NewTokenExchangeService` (token exchange), and
+`services.NewJWTBearerService` (jwt-bearer) blocks. Set the corresponding
+field on `apipublic.Deps` so the public server picks the service up; the
+existing wiring in the same function — `Token: tokenSvc` inside the
+`apipublic.Deps{…}` literal and `deps.JWTBearer = jwtBearerSvc` right
+after it — is the model.
 
 ## 6. Publish the grant in AS metadata
 
-The `/.well-known/oauth-authorization-server` document at
-[`api/public/wellknown/handlers.go:40`](../../api/public/wellknown/handlers.go)
-builds its `grant_types_supported` array conditionally — see the
-appends at
-[`api/public/wellknown/handlers.go:44`](../../api/public/wellknown/handlers.go).
-Add a sibling `if h.has<Grant>` arm that appends your identifier, and
-plumb the boolean through `wellknown.Deps` (mirror
-`HasClientCredentials` at
-[`api/public/server.go:158`](../../api/public/server.go)).
+The `/.well-known/oauth-authorization-server` document is assembled by
+`Metadata` on `ASMetadataService` in
+[`internal/services/as_metadata.go`](../../internal/services/as_metadata.go);
+`handleASMetadata` in
+[`api/public/wellknown/handlers.go`](../../api/public/wellknown/handlers.go)
+only serializes it. The `grant_types_supported` array comes from the
+`EnabledGrantsProvider` port, whose config-backed implementation is
+`EnabledGrantTypes` in
+[`internal/config/grants.go`](../../internal/config/grants.go) — add an
+arm there that appends your identifier when its flag is set. Nothing in
+`wellknown.Deps` needs to change; the same list is what DCR uses to
+refuse a registration that asks for a disabled grant.
 
 ## 7. Add tests
 

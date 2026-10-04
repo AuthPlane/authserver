@@ -1,7 +1,7 @@
 # Tier 04 — MCP server fronting a Broker (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 27 lines · Total example: 60 lines · SDK: python-sdk 0.4.0**
+**Auth-specific code: 27 lines · Total example: 60 lines · SDK: python-sdk 0.5.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call a third-party API on the user's
@@ -128,7 +128,7 @@ describe what's happening so you can reproduce the flow by hand.
    long-lived MCP server in this tier, the Broker exchange dispatch
    identifies the *acting* MCP by looking up a Mint resource that lists
    the calling client_id in its `policy.runtime.client_ids` (see
-   `internal/services/token_exchange.go:1244-1255`). Without this row
+   `resolveActorMCP` in `internal/services/token_exchange.go`). Without this row
    the exchange fails with `unauthorized_client`:
 
    ```bash
@@ -238,7 +238,7 @@ describe what's happening so you can reproduce the flow by hand.
       otherwise the dispatcher would interpret the cross-resource jump as
       a [fronted topology](../../../docs/topologies/) and demand a
       `fronting_links` row (see
-      `internal/services/token_exchange.go:1206-1242`). See
+      `isFrontedBrokerExchange` in `internal/services/token_exchange.go`). See
       `python-sdk/authplane/client.py` for the helper and
       [`POST /oauth/token`](../../../docs/reference/http-api.md#http-public-oauth-token)
       for the wire shape.
@@ -285,7 +285,7 @@ for the full request/response shape.
 
 When any of the three-bound consent checks fails, the token endpoint
 emits HTTP 400 with `{"error":"consent_required","consent_url":...}`
-(the wire field is `consent_url`, per `api/shared/errors.go:40`). The
+(the wire field is `consent_url`, per `OAuthErrorResponse` in `api/shared/errors.go`). The
 Python SDK maps this to `ConsentRequiredError` and exposes `.consent_url`
 (`python-sdk/authplane/errors.py:145-162`). The URL the AS picks
 depends on which bound failed:

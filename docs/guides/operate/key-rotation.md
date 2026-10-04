@@ -33,7 +33,7 @@ authserver admin key rotate
 # → docs/reference/cli.md#cli-admin-key-rotate
 ```
 
-A fresh key pair is generated, becomes the active signer immediately, and the previous key remains in JWKS for verification. The audit log records `key.rotated` (canonical: `internal/domain/audit/entity.go:39`) and the metric `authserver_key_rotation_total` increments by one (canonical: `internal/observability/metrics.go:210`).
+A fresh key pair is generated, becomes the active signer immediately, and the previous key remains in JWKS for verification. The audit log records `key.rotated` (canonical: `ActionKeyRotated` in `internal/domain/audit/entity.go`) and the metric `authserver_key_rotation_total` increments by one (canonical: `KeyRotationTotal` in `internal/observability/metrics.go`).
 
 In Docker:
 

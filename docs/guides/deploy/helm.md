@@ -17,6 +17,7 @@ The Helm chart at [`charts/authplane/`](../../../charts/authplane/) is the produ
 - A reachable Postgres (managed service, in-cluster, or the chart's Bitnami subchart for dev).
 - TLS termination (cert-manager + ingress-nginx is the assumed default).
 - Read [Configuration](configuration.md) for the values you're about to set.
+- Decide where rate limiting lives. The server's `rate_limit` keys on the TCP peer address and ignores `X-Forwarded-For`; behind ingress-nginx that address is the controller's, so all clients share one bucket. Limit at the Ingress (`nginx.ingress.kubernetes.io/limit-rps`) and set `rate_limit.enabled: false`, or keep the server limit knowing it is per controller replica. See [Kubernetes → cross-cutting concerns](kubernetes.md#cross-cutting-concerns-all-paths).
 
 ## Steps
 

@@ -45,6 +45,31 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Release notes from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > /tmp/section.md
+          if [ ! -s /tmp/section.md ]; then
+            echo "::error::CHANGELOG.md has no [$VERSION] section; the release body was not written."
+            exit 1
+          fi
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          {
+            echo "Self-hosted OAuth 2.1 Authorization Server for the Model Context Protocol."
+            echo
+            cat /tmp/section.md
+            if [ -n "$PREV" ]; then
+              echo "**Full Changelog**: https://github.com/authplane/authserver/compare/${PREV}...${GITHUB_REF_NAME}"
+            fi
+          } > /tmp/body.md
+          gh release edit "$GITHUB_REF_NAME" --notes-file /tmp/body.md
+
   chart:
     name: Publish Helm chart
     runs-on: ubuntu-latest

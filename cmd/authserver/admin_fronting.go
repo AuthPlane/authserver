@@ -19,8 +19,12 @@ var frontingCmd = &cobra.Command{
 	Long: "Manage operator-declared fronting links. A fronting link " +
 		"declares that a Mint Resource (`source`) may mint tokens for a " +
 		"downstream Resource (`target`) via RFC 8693 token-exchange, " +
-		"translating scopes per the supplied scope-map. The runtime path " +
-		"that consumes these rows lands in (Inc N+1).",
+		"translating scopes per the supplied scope-map. At runtime the " +
+		"gateway exchanges a token audienced to the source for one " +
+		"audienced to the target, without the user consenting to the " +
+		"target. Only the gateway may do this: a client in the source's " +
+		"runtime clients (`admin resource runtime-client add`) or in the " +
+		"target's exchange allowlist.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 }

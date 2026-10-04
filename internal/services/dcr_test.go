@@ -5,6 +5,7 @@ package services_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -145,8 +146,9 @@ func TestDCR_Open_RegisterPublicClient(t *testing.T) {
 	if len(resp.RedirectURIs) != 1 || resp.RedirectURIs[0] != "https://app.example.com/callback" {
 		t.Errorf("redirect_uris: got %v", resp.RedirectURIs)
 	}
-	// Defaults applied.
-	if len(resp.GrantTypes) != 1 || resp.GrantTypes[0] != "authorization_code" {
+	// Defaults applied: RFC 7591's authorization_code plus refresh_token, which
+	// the token endpoint now honors only for clients registered for it.
+	if !slices.Equal(resp.GrantTypes, []string{"authorization_code", "refresh_token"}) {
 		t.Errorf("grant_types default: got %v", resp.GrantTypes)
 	}
 	if len(resp.ResponseTypes) != 1 || resp.ResponseTypes[0] != "code" {

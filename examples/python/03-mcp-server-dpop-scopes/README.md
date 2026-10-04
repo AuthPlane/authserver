@@ -1,7 +1,7 @@
 # Tier 03 — DPoP-bound MCP server + agent with per-tool scopes (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 15 lines · Total example: 187 lines · SDK: python-sdk 0.4.0**
+**Auth-specific code: 15 lines · Total example: 187 lines · SDK: python-sdk 0.5.0**
 <!-- loccount:end -->
 
 A paired MCP server and agent that demonstrate two production-shaped auth

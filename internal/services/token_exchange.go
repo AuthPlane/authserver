@@ -36,6 +36,7 @@ var _ input.TokenExchangePort = (*TokenExchangeService)(nil)
 // alongside one (delegation). Full audit trail on delegation chain.
 type TokenExchangeService struct {
 	clients        output.ClientStore
+	users          output.UserStore
 	machineTokens  output.MachineTokenStore
 	jwksVerify     JWKSBuildProvider
 	jwksSign       JWKSSigningKeyProvider
@@ -149,6 +150,12 @@ func (s *TokenExchangeService) WithResourceScopes(resources ResourceLister) {
 // When set, dispatchMint consults the FrontingService for a (source, target)
 // link before applying the user-consent gate; a link makes the operator
 // declaration the consent surrogate. nil keeps direct-only behavior.
+// WithUsers wires the user store the exchange consults to refuse a token
+// whose subject user is disabled. Without it only client status is checked.
+func (s *TokenExchangeService) WithUsers(users output.UserStore) {
+	s.users = users
+}
+
 func (s *TokenExchangeService) WithFronting(fr *FrontingService) {
 	s.fronting = fr
 }
@@ -228,6 +235,15 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 		return nil, revokeErr
 	}
 
+	// 5b. A token whose user or client has since been disabled or suspended
+	// is inactive at introspection; it must not seed a fresh token here.
+	if reason, liveErr := s.checkLiveness(ctx, span, subjectClaims); liveErr != nil {
+		if reason != "" {
+			s.recordDenied(ctx, req.ClientID, reason)
+		}
+		return nil, liveErr
+	}
+
 	// 5a. Unified-dispatch fork ( +  registry-or-bust). When the
 	// caller names a resource, it MUST resolve to a row in the unified
 	// table; ErrResourceNotFound is final, mapped to invalid_target by the
@@ -270,6 +286,12 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 			s.recordDenied(ctx, req.ClientID, "invalid_actor_token")
 			return nil, actorErr
 		}
+		if reason, liveErr := s.checkLiveness(ctx, span, ac); liveErr != nil {
+			if reason != "" {
+				s.recordDenied(ctx, req.ClientID, "actor_"+reason)
+			}
+			return nil, liveErr
+		}
 		actorClaims = ac
 	}
 
@@ -303,6 +325,19 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 	if policyErr := s.checkPolicy(ctx, span, req.ClientID, subjectClaims, actorClaims, teCfg); policyErr != nil {
 		s.recordDenied(ctx, req.ClientID, "policy_denied")
 		return nil, policyErr
+	}
+
+	// 8a. Never issue an empty scope. This path is a self-exchange with no
+	// resource catalog, so the default for an omitted scope is the subject
+	// token's scopes; an identity-only subject (or a scope parameter of
+	// only whitespace) leaves nothing and is refused, as on the
+	// registry-dispatched Mint path. Runs after the policy check so a
+	// disallowed exchange keeps answering access_denied.
+	if effectiveScopes.IsEmpty() {
+		span.RecordError(domain.ErrInvalidScope)
+		span.SetStatus(codes.Error, "no scope to issue")
+		s.recordDenied(ctx, req.ClientID, "default_scope_empty")
+		return nil, fmt.Errorf("%w: scope omitted and the subject token carries no scope to inherit", domain.ErrInvalidScope)
 	}
 
 	// 9. Chain depth check.
@@ -413,7 +448,7 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 		KeyID:      sk.KeyID,
 	}
 
-	accessToken, err := crypto.SignAccessToken(kp, claims)
+	accessToken, err := crypto.SignAccessTokenContext(ctx, kp, claims)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -637,6 +672,80 @@ func (s *TokenExchangeService) revokeOwnIssuance(ctx context.Context, issuanceID
 }
 
 // checkRevocation checks if a token has been revoked.
+// checkLiveness refuses a token whose subject user is disabled, or whose
+// subject or issuing client is suspended or revoked — the same conditions
+// introspection reports as subject_inactive / issuing_client_inactive.
+// Disabling a user or suspending a client revokes nothing, so without this a
+// token introspection already calls inactive could still be exchanged for a
+// fresh one.
+//
+// An identity that does not resolve is not refused here: a token minted
+// through a fronting link carries the source resource's slug as client_id,
+// and its sub may be a machine client rather than a user. Only an identity
+// that resolves and is not active refuses. A store failure refuses as a
+// server fault. Returns the denial reason (empty for a fault) and the error.
+func (s *TokenExchangeService) checkLiveness(ctx context.Context, span trace.Span, claims *crypto.AccessTokenClaims) (string, error) {
+	clientActive := func(id string) (bool, error) {
+		c, err := s.clients.GetByID(ctx, id)
+		switch {
+		case err == nil:
+			return c.IsActive(), nil
+		case errors.Is(err, domain.ErrInvalidClient), errors.Is(err, domain.ErrClientNotFound):
+			return true, nil
+		default:
+			return false, fmt.Errorf("look up client %q: %w", id, err)
+		}
+	}
+	refuse := func(reason, msg string) (string, error) {
+		span.RecordError(domain.ErrInvalidGrant)
+		span.SetStatus(codes.Error, msg)
+		s.logger.InfoContext(ctx, "token exchange denied: "+msg,
+			"sub", claims.Subject,
+			"token_client_id", claims.ClientID,
+		)
+		return reason, domain.ErrInvalidGrant
+	}
+	fault := func(err error) (string, error) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "liveness lookup failed")
+		return "", err
+	}
+
+	if claims.ClientID != "" {
+		active, err := clientActive(claims.ClientID)
+		if err != nil {
+			return fault(err)
+		}
+		if !active {
+			return refuse("issuing_client_inactive", "token's issuing client is suspended or revoked")
+		}
+	}
+
+	if claims.Subject != "" && claims.Subject != claims.ClientID {
+		if s.users != nil {
+			u, err := s.users.GetByID(ctx, claims.Subject)
+			switch {
+			case err == nil:
+				if !u.IsActive() {
+					return refuse("subject_inactive", "token's subject user is disabled")
+				}
+				return "", nil
+			case errors.Is(err, domain.ErrUserNotFound):
+			default:
+				return fault(fmt.Errorf("look up subject user: %w", err))
+			}
+		}
+		active, err := clientActive(claims.Subject)
+		if err != nil {
+			return fault(err)
+		}
+		if !active {
+			return refuse("subject_inactive", "token's subject client is suspended or revoked")
+		}
+	}
+	return "", nil
+}
+
 func (s *TokenExchangeService) checkRevocation(ctx context.Context, span trace.Span, claims *crypto.AccessTokenClaims) error {
 	if claims.JTI == "" {
 		return nil
@@ -933,9 +1042,9 @@ func (s *TokenExchangeService) enforceSubjectScopeCeiling(
 }
 
 // validateAgainstCatalog checks that every fine scope in scopeStr is
-// declared on target. Empty scopeStr is allowed — the issued token simply
-// inherits the empty scope set rather than escalating, since downstream
-// dispatchers do not expand scopes.
+// declared on target. Empty scopeStr passes: each dispatcher derives the
+// default for an omitted scope from what authorized the exchange, already
+// bounded by the target's catalog, or refuses when nothing is derivable.
 func (s *TokenExchangeService) validateAgainstCatalog(scopeStr string, target *resource.Resource) error {
 	if scopeStr == "" {
 		return nil
@@ -969,6 +1078,10 @@ func (s *TokenExchangeService) validateAgainstCatalog(scopeStr string, target *r
 //     the fronted-broker path does NOT gate the same way.
 //  4. subject-scope ceiling (ADR-002), direct path only — the fronted
 //     path bounded its scopes in step 3. Applies to self-exchange too.
+//     An omitted scope on the direct path is defaulted per authorizing
+//     branch (directMintDefaultScopes) — on a self-exchange here, on the
+//     consent branch once the grant is read in step 5 — and refused with
+//     invalid_scope when nothing is derivable.
 //  5. cross-client delegation gate, then the user-consent gate against
 //     consent_grants (user, agent, target). Both are skipped on the
 //     fronted path and on a self-exchange. The delegation gate is
@@ -1075,8 +1188,41 @@ func (s *TokenExchangeService) dispatchMint(
 	// any covering one. dispatchFrontedBroker's equivalent gate is an
 	// any-of check, so the two fronted paths can disagree on the same
 	// link.
+	if frontedLink != nil && !frontedCallerAuthorized(frontedSource, target, req.ClientID) {
+		span.RecordError(domain.ErrTokenExchangeNotAuthorized)
+		span.SetStatus(codes.Error, "fronting: caller is not the gateway")
+		s.logger.InfoContext(ctx, "fronted dispatch denied: caller is neither the source's runtime client nor in the target's exchange allowlist",
+			"client_id", req.ClientID,
+			"source_slug", frontedSource.Slug,
+			"target_slug", target.Slug,
+		)
+		s.recordDenied(ctx, req.ClientID, "fronting_caller_not_authorized")
+		return nil, errFrontedCallerNotAuthorized(frontedSource, target, req.ClientID)
+	}
 	if frontedLink != nil {
 		requestedTargets := strings.Fields(req.Scope)
+		if len(requestedTargets) == 0 {
+			// RFC 8693 lets a request omit scope and leaves the choice to
+			// the AS. On a fronted exchange the link is the only
+			// authorization, so an omitted scope means every target scope
+			// the subject token's source scopes reach through it — never
+			// "nothing to check". A subject that reaches none is refused.
+			requestedTargets = frontedMintTargetsFor(frontedLink.ScopeMap, scope.Parse(subjectClaims.Scope))
+			if len(requestedTargets) == 0 {
+				span.SetStatus(codes.Error, "fronting: subject token reaches no target scope")
+				s.logger.InfoContext(ctx, "fronted dispatch denied: scope omitted and subject_token holds no source scope the fronting link maps",
+					"client_id", req.ClientID,
+					"agent_client_id", agentClientID,
+					"sub", subjectClaims.Subject,
+					"source_slug", frontedSource.Slug,
+					"target_slug", target.Slug,
+				)
+				s.recordDenied(ctx, req.ClientID, "fronting_subject_scope_insufficient")
+				return nil, fmt.Errorf("%w: subject_token holds no source scope mapped by fronting link (source=%s target=%s)",
+					domain.ErrInvalidScope, frontedSource.Slug, target.Slug)
+			}
+			req.Scope = strings.Join(requestedTargets, " ")
+		}
 		requiredSources, unmapped := requiredSourceScopesForTargets(frontedLink.ScopeMap, requestedTargets)
 		if len(unmapped) > 0 {
 			span.SetStatus(codes.Error, "fronting: target scope not in scope_map")
@@ -1126,6 +1272,21 @@ func (s *TokenExchangeService) dispatchMint(
 	// ceiling only lets scope narrow, so the exchange grants nothing the
 	// caller did not already have.
 	isSelfExchange := teCfg.AllowSelfExchange && req.ClientID == subjectClaims.ClientID
+
+	// An omitted scope on the direct path is not "nothing to check": the
+	// catalog check, the subject-scope ceiling and the consent coverage
+	// check all pass vacuously on an empty request, and the token used to
+	// be issued with an empty scope. It defaults instead to what an
+	// explicit request could have named on the branch that authorizes the
+	// exchange (see directMintDefaultScopes), and is refused with
+	// invalid_scope when that is nothing. The fronted path derived its own
+	// default above.
+	scopeOmitted := frontedLink == nil && len(strings.Fields(req.Scope)) == 0
+	if scopeOmitted && isSelfExchange {
+		if refuse := s.applyDirectMintDefaultScopes(ctx, span, &req, nil, subjectClaims, target, "self_exchange"); refuse != nil {
+			return nil, refuse
+		}
+	}
 	if frontedLink == nil && !isSelfExchange {
 		// Cross-client delegation gate. The consent lookup below is keyed
 		// on agentClientID — the subject token's client, the agent the
@@ -1210,6 +1371,11 @@ func (s *TokenExchangeService) dispatchMint(
 				Cause:        domain.CauseConsentMissing,
 			}
 		}
+		if scopeOmitted {
+			if refuse := s.applyDirectMintDefaultScopes(ctx, span, &req, grant, subjectClaims, target, "consent_grant"); refuse != nil {
+				return nil, refuse
+			}
+		}
 		if missing := scopesNotConsented(grant, strings.Fields(req.Scope)); len(missing) > 0 {
 			span.SetStatus(codes.Error, "consent_required:scope_insufficient")
 			s.logger.InfoContext(ctx, "mint dispatch denied: requested scope not consented",
@@ -1243,6 +1409,12 @@ func (s *TokenExchangeService) dispatchMint(
 			s.recordDenied(ctx, req.ClientID, "invalid_actor_token")
 			return nil, actorErr
 		}
+		if reason, liveErr := s.checkLiveness(ctx, span, ac); liveErr != nil {
+			if reason != "" {
+				s.recordDenied(ctx, req.ClientID, "actor_"+reason)
+			}
+			return nil, liveErr
+		}
 		actorClaims = ac
 	}
 
@@ -1263,28 +1435,31 @@ func (s *TokenExchangeService) dispatchMint(
 	switch {
 	case frontedLink != nil:
 		// Option β: the issued JWT carries client_id = source
-		// resource's slug; the agent that drove the exchange (req.ClientID
-		// — the /oauth/token caller) lives at act.act. If the subject
-		// token already carries an act chain (chained exchange A->B->C),
-		// prepend the source as the new outermost layer — the existing
-		// chain becomes the new act.act, so the agent appears once, at
-		// depth 2.
+		// resource's slug, act.sub = the source, and act.act.sub = the
+		// agent. If the subject token already carries an act chain
+		// (chained exchange A->B->C), prepend the source as the new
+		// outermost layer — the existing chain becomes the new act.act,
+		// so the agent appears once, at depth 2.
 		//
 		// This is purely the issued-token claim shape. unwound the
 		// broader "operator must satisfy MCP-slug==client_id" reading by
 		// moving the agent-attestation gate to policy.runtime.client_ids;
 		// only the JWT-claim shape here remains Option β.
 		//
-		// The inner actor's Sub uses req.ClientID rather than
-		// subjectClaims.ClientID because the subject token's client_id
-		// in the gateway-fanout pattern is the source slug itself
-		// (the gateway IS the OAuth client at /authorize); copying it
-		// would collapse act.sub and act.act.sub onto the same value.
-		// req.ClientID is always the exchange initiator — the entity the
-		// audit + downstream RS care about identifying.
+		// The agent is the subject token's client: the client the user
+		// authorized at the source. The /oauth/token caller is the
+		// gateway, which the source slug at act.sub already stands for and
+		// the audit row's client_id names; putting it at depth 2 as well
+		// would drop the agent from the token entirely whenever the two
+		// are different clients — the documented gateway shape. The one
+		// exception is a subject token whose client_id is the source slug
+		// itself (the gateway-fanout pattern, where the gateway was the
+		// OAuth client at /authorize): copying it would collapse act.sub
+		// and act.act.sub onto the same value, so the inner actor falls
+		// back to the caller.
 		innerActor := existingAct
 		if innerActor == nil {
-			innerActor = &token.ActClaim{Sub: req.ClientID}
+			innerActor = &token.ActClaim{Sub: frontedInnerActor(subjectClaims.ClientID, frontedSource.Slug, req.ClientID)}
 		}
 		resultingAct = &token.ActClaim{
 			Sub: frontedSource.Slug,
@@ -1422,9 +1597,18 @@ func (s *TokenExchangeService) dispatchMint(
 		"via_link", viaLink,
 	)
 	if s.audit != nil {
+		// actor_client is the actor token's client when one was presented.
+		// On a fronted exchange without one it is the gateway — the
+		// authenticated caller — matching the fronted-broker row, so both
+		// fronted rows name who drove the exchange in client_id and
+		// actor_client, the agent in subject_client, and the source in
+		// via_link.
 		actorClientID := ""
-		if actorClaims != nil {
+		switch {
+		case actorClaims != nil:
 			actorClientID = actorClaims.ClientID
+		case frontedLink != nil:
+			actorClientID = req.ClientID
 		}
 		s.audit.Record(ctx, audit.NewEvent(
 			audit.ActionTokenExchanged,
@@ -1452,6 +1636,38 @@ func (s *TokenExchangeService) dispatchMint(
 		ExpiresIn:       resp.ExpiresIn,
 		Scope:           req.Scope,
 	}, nil
+}
+
+// applyDirectMintDefaultScopes fills req.Scope for a direct Mint exchange
+// that named none, or refuses it with invalid_scope when nothing can be
+// derived. grant is the consent grant that authorized the exchange, nil on
+// a self-exchange; branch labels the authorizing branch for the log line.
+func (s *TokenExchangeService) applyDirectMintDefaultScopes(
+	ctx context.Context,
+	span trace.Span,
+	req *input.TokenExchangeRequest,
+	grant *resource.ConsentGrant,
+	subjectClaims *crypto.AccessTokenClaims,
+	target *resource.Resource,
+	branch string,
+) error {
+	derived := directMintDefaultScopes(grant, target, scope.Parse(subjectClaims.Scope))
+	if len(derived) == 0 {
+		span.RecordError(domain.ErrInvalidScope)
+		span.SetStatus(codes.Error, "scope omitted and no default scope derivable")
+		s.logger.InfoContext(ctx, "mint dispatch denied: scope omitted and nothing the exchange is authorized for is declared by the resource",
+			"client_id", req.ClientID,
+			"agent_client_id", subjectClaims.ClientID,
+			"sub", subjectClaims.Subject,
+			"resource_slug", target.Slug,
+			"authorized_by", branch,
+		)
+		s.recordDenied(ctx, req.ClientID, "default_scope_empty")
+		return fmt.Errorf("%w: scope omitted and no scope of resource %q is covered by the subject token and the %s that authorizes this exchange",
+			domain.ErrInvalidScope, target.Slug, strings.ReplaceAll(branch, "_", " "))
+	}
+	req.Scope = strings.Join(derived, " ")
+	return nil
 }
 
 // dispatchBroker runs the unified Broker flow:
@@ -1661,6 +1877,33 @@ func (s *TokenExchangeService) dispatchBroker(
 	// attestation is too narrow — the remediation is re-consent at
 	// /authorize?resource=<actor_mcp>, not /connect/<provider>.
 	requestedScopes := strings.Fields(req.Scope)
+	if len(requestedScopes) == 0 {
+		// An omitted scope is not "nothing to check": with an empty request
+		// the ceiling, this coverage check and the broker issuer's bounds
+		// all pass vacuously, and the upstream refresh carries no scope —
+		// the user's whole upstream grant. Default to what an explicit
+		// request could have named: the scopes the agent is attested for
+		// that this resource declares, within the subject token's scopes
+		// when it carries any. Refuse when that leaves nothing.
+		requestedScopes = directBrokerDefaultScopes(attestation, target, scope.Parse(subjectClaims.Scope))
+		if len(requestedScopes) == 0 {
+			span.SetStatus(codes.Error, "consent_required:scope_insufficient")
+			s.logger.InfoContext(ctx, "broker dispatch denied: scope omitted and agent attestation covers no scope this resource declares",
+				"client_id", req.ClientID,
+				"agent_client_id", agentClientID,
+				"sub", subjectClaims.Subject,
+				"resource_slug", target.Slug,
+				"actor_resource_slug", actorAsResource.Slug,
+			)
+			s.recordDenied(ctx, req.ClientID, "broker_scope_not_consented")
+			return nil, &domain.ConsentRequiredError{
+				Service:      actorAsResource.Slug,
+				ResourceSlug: actorAsResource.Slug,
+				Cause:        domain.CauseScopeInsufficient,
+			}
+		}
+		req.Scope = strings.Join(requestedScopes, " ")
+	}
 	if missing := scopesNotConsented(attestation, requestedScopes); len(missing) > 0 {
 		span.SetStatus(codes.Error, "consent_required:scope_insufficient")
 		s.logger.InfoContext(ctx, "broker dispatch denied: requested scope not covered by agent attestation",
@@ -1816,6 +2059,18 @@ func (s *TokenExchangeService) dispatchFrontedBroker(
 		attribute.String("via_link", source.Slug+"->"+target.Slug),
 	)
 
+	if !frontedCallerAuthorized(source, target, req.ClientID) {
+		span.RecordError(domain.ErrTokenExchangeNotAuthorized)
+		span.SetStatus(codes.Error, "fronting: caller is not the gateway")
+		s.logger.InfoContext(ctx, "fronted broker denied: caller is neither the source's runtime client nor in the target's exchange allowlist",
+			"client_id", req.ClientID,
+			"source_slug", source.Slug,
+			"target_slug", target.Slug,
+		)
+		s.emitFrontedBrokerDenialAudit(ctx, req, subjectClaims, source, target, "fronting_caller_not_authorized")
+		return nil, errFrontedCallerNotAuthorized(source, target, req.ClientID)
+	}
+
 	// 1. Resolve the broker provider first — needed both for the IssueRequest
 	// and to populate ProviderSlug on any ConsentRequiredError so the HTTP
 	// handler can build the launchable /connect/<slug>?return_url URL.
@@ -1844,6 +2099,29 @@ func (s *TokenExchangeService) dispatchFrontedBroker(
 	// consented to the abstract MCP scope that authorizes this target.
 	requested := strings.Fields(req.Scope)
 	subjectScopes := scope.Parse(subjectClaims.Scope)
+	if len(requested) == 0 {
+		// An omitted scope is not "nothing to check": with an empty
+		// request the broker issuer's bounds pass vacuously and it vends
+		// the user's stored upstream credential with every scope the user
+		// granted. Derive the targets the subject token reaches through
+		// the link, and refuse when it reaches none.
+		requested = frontedBrokerTargetsFor(link.ScopeMap, subjectScopes)
+		if len(requested) == 0 {
+			s.logger.InfoContext(ctx, "fronted broker denied: scope omitted and subject_token holds no source scope the fronting link maps",
+				"source_slug", source.Slug,
+				"target_slug", target.Slug,
+			)
+			span.SetStatus(codes.Error, "consent_required:subject_scope_insufficient")
+			s.emitFrontedBrokerDenialAudit(ctx, req, subjectClaims, source, target, "subject_scope_insufficient")
+			return nil, &domain.ConsentRequiredError{
+				ProviderSlug: provider.Slug,
+				ResourceSlug: target.Slug,
+				Cause:        domain.CauseScopeInsufficient,
+				DeniedReason: "subject_scope_insufficient",
+			}
+		}
+		req.Scope = strings.Join(requested, " ")
+	}
 	translated, unmapped, missingCoverage := validateBrokerTargets(link.ScopeMap, requested, subjectScopes)
 	if len(unmapped) > 0 {
 		s.logger.InfoContext(ctx, "fronted broker denied: target scope not declared in scope_map",
@@ -1958,16 +2236,19 @@ func (s *TokenExchangeService) dispatchFrontedBroker(
 	span.SetStatus(codes.Ok, "")
 
 	// Emit the dispatch-site audit event (chain_kind=fronted, target_kind=broker)
-	// and increment the success counter. Both are T9 additions; the logger +
-	// span above remain unchanged from T8.
+	// and increment the success counter. client_id and actor_client are the
+	// authenticated caller — the gateway that vended the upstream bearer;
+	// the source slug is carried by via_link. The issuance row keeps the
+	// source slug as its actor (Option β), but the audit row is the only
+	// record of who called /oauth/token.
 	if s.audit != nil {
 		s.audit.Record(ctx, audit.NewEvent(
 			audit.ActionTokenExchanged,
-			subjectClaims.Subject, source.Slug, "",
+			subjectClaims.Subject, req.ClientID, "",
 			fmt.Sprintf("sub=%s subject_client=%s actor_client=%s type=broker_dispatch resource=%s scopes=%s chain_kind=fronted via_link=%s target_kind=broker issuance_id=%s",
 				subjectClaims.Subject,
 				subjectClaims.ClientID,
-				source.Slug,
+				req.ClientID,
 				target.Slug,
 				strings.Join(translated, " "),
 				source.Slug+"->"+target.Slug,
@@ -2026,11 +2307,11 @@ func (s *TokenExchangeService) emitFrontedBrokerDenialAudit(
 	}
 	s.audit.Record(ctx, audit.NewEvent(
 		audit.ActionTokenExchangeDenied,
-		subjectClaims.Subject, source.Slug, "",
+		subjectClaims.Subject, req.ClientID, "",
 		fmt.Sprintf("sub=%s subject_client=%s actor_client=%s type=broker_dispatch resource=%s scopes=%s chain_kind=fronted via_link=%s target_kind=broker denied_reason=%s",
 			subjectClaims.Subject,
 			subjectClaims.ClientID,
-			source.Slug,
+			req.ClientID,
 			target.Slug,
 			req.Scope,
 			source.Slug+"->"+target.Slug,
@@ -2130,6 +2411,141 @@ func operatorAllowsClient(allowed []string, clientID string) bool {
 		return true
 	}
 	return slices.Contains(allowed, clientID)
+}
+
+// frontedCallerAuthorized reports whether clientID may drive an exchange
+// through the fronting link source -> target. The link replaces the user's
+// consent on the target, so it must not be usable by any client holding the
+// token-exchange grant: the caller must be named in the target's
+// policy.exchange.allowed_client_ids, or be the gateway itself — listed in
+// the source's policy.runtime.client_ids. This is the predicate the direct
+// path already applies to cross-client exchanges.
+func frontedCallerAuthorized(source, target *resource.Resource, clientID string) bool {
+	return slices.Contains(target.Policy.Exchange.AllowedClientIDs, clientID) ||
+		slices.Contains(source.Policy.Runtime.ClientIDs, clientID)
+}
+
+// errFrontedCallerNotAuthorized names the fix an operator needs.
+func errFrontedCallerNotAuthorized(source, target *resource.Resource, clientID string) error {
+	return fmt.Errorf("%w: client %q may not exchange through fronting link %s->%s; add it to %s's policy.runtime.client_ids (it is the gateway) or to %s's policy.exchange.allowed_client_ids",
+		domain.ErrTokenExchangeNotAuthorized, clientID, source.Slug, target.Slug, source.Slug, target.Slug)
+}
+
+// frontedInnerActor returns the act.act.sub of a fronted Mint token whose
+// subject carries no act chain: the subject token's client — the agent the
+// user authorized — unless it is empty or the source slug itself, in which
+// case the gateway calling /oauth/token is the only distinct actor left.
+func frontedInnerActor(subjectClientID, sourceSlug, callerClientID string) string {
+	if subjectClientID == "" || subjectClientID == sourceSlug {
+		return callerClientID
+	}
+	return subjectClientID
+}
+
+// directBrokerDefaultScopes returns, sorted, the scopes a direct broker
+// exchange that names none is issued: those the agent-attestation grant
+// covers and the broker resource declares, narrowed to the subject token's
+// scopes when it carries any. Every scope returned passes the checks an
+// explicit request for it would face.
+func directBrokerDefaultScopes(attestation *resource.ConsentGrant, target *resource.Resource, subjectScopes scope.Set) []string {
+	if attestation == nil {
+		return nil
+	}
+	declared := make(map[string]struct{}, len(target.Scopes))
+	for _, sc := range target.Scopes {
+		declared[sc.Name] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, sc := range attestation.Scopes {
+		if _, ok := declared[sc]; !ok {
+			continue
+		}
+		if !subjectScopes.IsEmpty() && !subjectScopes.Contains(sc) {
+			continue
+		}
+		if _, dup := seen[sc]; dup {
+			continue
+		}
+		seen[sc] = struct{}{}
+		out = append(out, sc)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// directMintDefaultScopes returns, sorted, the scopes a direct (non-fronted)
+// Mint exchange that names none is issued — exactly what an explicit request
+// could have named on the branch that authorized it:
+//
+//   - consent grant (grant != nil): the grant's scopes the target declares,
+//     narrowed to the subject token's scopes when it carries any. This one
+//     branch covers a same-client exchange with self-exchange off and the
+//     cross-client exchanges admitted by the target's
+//     policy.exchange.allowed_client_ids or policy.runtime.client_ids; those
+//     two only admit the caller, and every one of them then requires the
+//     grant, so the grant is the scope authority. Same rule as
+//     directBrokerDefaultScopes over the agent attestation.
+//   - self-exchange (grant == nil): the subject token's scopes the target
+//     declares. No grant is consulted, so the subject token is the only
+//     authority; an identity-only subject derives nothing and is refused
+//     rather than defaulting to the whole catalog.
+func directMintDefaultScopes(grant *resource.ConsentGrant, target *resource.Resource, subjectScopes scope.Set) []string {
+	if grant != nil {
+		return directBrokerDefaultScopes(grant, target, subjectScopes)
+	}
+	var out []string
+	for _, sc := range target.Scopes {
+		if subjectScopes.Contains(sc.Name) && !slices.Contains(out, sc.Name) {
+			out = append(out, sc.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// frontedMintTargetsFor returns, sorted, the target scopes a subject holding
+// subjectScopes may reach through m on the fronted Mint->Mint path when the
+// request names none. It applies requiredSourceScopesForTargets' rule — a
+// target is reachable only through its lexicographically smallest source key
+// — so every derived target passes that gate, and an omitted scope never
+// grants what an explicit request for the same targets would be refused.
+func frontedMintTargetsFor(m resource.ScopeMap, subjectScopes scope.Set) []string {
+	rev := make(map[string][]string)
+	for src, tgts := range m {
+		for _, t := range tgts {
+			rev[t] = append(rev[t], src)
+		}
+	}
+	var out []string
+	for t, sources := range rev {
+		sort.Strings(sources)
+		if subjectScopes.Contains(sources[0]) {
+			out = append(out, t)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// frontedBrokerTargetsFor is frontedMintTargetsFor for the fronted-broker
+// path, which accepts any covering source key (validateBrokerTargets).
+func frontedBrokerTargetsFor(m resource.ScopeMap, subjectScopes scope.Set) []string {
+	set := make(map[string]struct{})
+	for src, tgts := range m {
+		if !subjectScopes.Contains(src) {
+			continue
+		}
+		for _, t := range tgts {
+			set[t] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // requiredSourceScopesForTargets reverse-walks a fronting link's ScopeMap to

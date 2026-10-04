@@ -16,7 +16,7 @@ This page lists five named incidents, each with the same Symptoms / Detect / Con
 
 - `AUTHPLANE_ADMIN_API_KEY` exported.
 - Prometheus / OTel scrape pointed at the AS (see [Deploy → Observability](../deploy/observability-prometheus-otel.md)).
-- An alerting rule pack subscribed to the metric thresholds called out below.
+- An alerting rule pack subscribed to the metric thresholds called out below — [`deploy/observability/alerts.yaml`](../../../deploy/observability/alerts.yaml) ships one in Prometheus rule-file format, and each rule's `runbook` annotation points at a section of this page.
 
 ---
 
@@ -36,7 +36,7 @@ curl -fsS "http://localhost:9001/admin/audit?action=key.rotated&limit=10" \
   -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events'
 ```
 
-Prometheus: `rate(authserver_tokens_issued_total[5m])` (canonical: `internal/observability/metrics.go:105`) spikes anomalously, or `authserver_key_rotation_total` (canonical: `internal/observability/metrics.go:210`) increments without an operator action.
+Prometheus: `rate(authserver_tokens_issued_total[5m])` (canonical: `TokensIssued` in `internal/observability/metrics.go`) spikes anomalously, or `authserver_key_rotation_total` (canonical: `KeyRotationTotal` in `internal/observability/metrics.go`) increments without an operator action.
 
 ### Contain
 1. Rotate immediately. Every new JWT signs under a fresh `kid`:
@@ -189,7 +189,7 @@ sum(rate(authserver_refresh_token_reuse_total[5m])) > 0.1
 ### Symptoms
 - Secret-scanning alert from your code host.
 - Provider security team contact.
-- Anomalous `upstream.token.issued` rows (canonical: `internal/domain/audit/entity.go:60`) for users who never used the integration.
+- Anomalous `upstream.token.issued` rows (canonical: `ActionUpstreamTokenIssued` in `internal/domain/audit/entity.go`) for users who never used the integration.
 
 ### Detect
 ```bash
@@ -198,7 +198,7 @@ curl -fsS "http://localhost:9001/admin/audit?action=upstream.token.issued&since=
   -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, actor_id, client_id, detail}'
 ```
 
-Prometheus: `rate(authserver_upstream_token_issued_total[5m])` (canonical: `internal/observability/metrics.go:224`) — spike for one provider.
+Prometheus: `rate(authserver_upstream_token_issued_total[5m])` (canonical: `UpstreamTokenIssuedTotal` in `internal/observability/metrics.go`) — spike for one provider.
 
 ### Contain
 1. **Rotate the upstream secret at the provider.** GitHub: regenerate the OAuth app secret. Google: rotate the OAuth client. Slack: regenerate the app credentials.
@@ -221,7 +221,7 @@ Prometheus: `rate(authserver_upstream_token_issued_total[5m])` (canonical: `inte
 ### Post-incident
 - Move provider secrets to a managed store if they were env-only.
 - Adopt provider-side IP allowlists where supported.
-- Watch `authserver_connection_connect_total` (canonical: `internal/observability/metrics.go:241`) for a flood of reconnects in the recovery window — that's expected.
+- Watch `authserver_connection_connect_total` (canonical: `ConnectionConnectTotal` in `internal/observability/metrics.go`) for a flood of reconnects in the recovery window — that's expected.
 
 ---
 
@@ -230,7 +230,7 @@ Prometheus: `rate(authserver_upstream_token_issued_total[5m])` (canonical: `inte
 A bearer-of-DPoP-token attack — replaying a stolen DPoP proof with a stolen token.
 
 ### Symptoms
-- `authplane_dpop_proofs_rejected_total` (canonical: `internal/observability/metrics.go:270`) rate climbs.
+- `authplane_dpop_proofs_rejected_total` (canonical: `DPoPProofsRejected` in `internal/observability/metrics.go`) rate climbs.
 - Operators see `nonce`-mismatch or `jti`-collision messages in the structured log.
 - Customer reports of "weird tool calls" from one user's MCP server.
 
@@ -280,6 +280,11 @@ The MCP server itself is the primary enforcement point for DPoP — the AS only 
 | `revoke-broker` does not stop the agent from using the upstream | Already-vended upstream tokens are not AS-revocable | Coordinate with the upstream provider's revocation API. |
 | Suspended client's tokens still work | Suspend blocks new issuance; existing tokens valid until `exp` | Revoke at issuance level with `admin issuance revoke` for each `JTI`. |
 | Audit log misses the mutation you ran | The mutation hit a different instance / database; or you ran against a config that doesn't audit | Confirm `storage.driver` is shared; check `audit.enabled`. |
+| `AuditEventsDropped` fires (`authserver_audit_events_dropped_total` > 0) | The audit store rejected a write (connection loss, disk full, schema drift); the event went to the structured log only | Fix the store, then reconstruct the gap from the structured log (every dropped event is logged in full under the message `audit event dropped — not persisted`); the audit trail is not self-healing. |
+| `CIMDFetchSuppressedSpike` fires (`authserver_cimd_fetch_suppressed_total` sustained) | Someone is driving CIMD fetches through unauthenticated `GET /oauth/authorize` with caller-chosen `client_id` URLs | Rate-limit `/oauth/authorize` at the edge for the source IPs; the negative cache and in-flight cap already bound the outbound load. |
+| `HTTPServerErrorRatio` fires (5xx > 5%) | Database or signing backend unavailable, or a bad deploy | Break down by `http_route`; check `authserver_db_operation_duration_seconds` and the structured error logs for the failing dependency. |
+| `TokenIssuanceP99Slow` fires (p99 > 2s) | Slow database, slow signer (Vault Transit round trip), or key reload storm | Compare `authserver_db_operation_duration_seconds` and `authserver_key_reload_duration_seconds`; for Vault, check for `vault token renewal failed` in the logs. |
+| `HighAuthDenialRate` fires (`authserver_auth_denied_total` > 10/s) | Credential stuffing or address enumeration (`reason=user_not_found`), or a regression in the login path | Break down by `reason`; rate-limit the login route at the edge for the source IPs. |
 
 ## Related
 

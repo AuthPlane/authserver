@@ -225,7 +225,7 @@ var clientListCmd = &cobra.Command{
 func init() {
 	// client create flags (stubs for ).
 	clientCreateCmd.Flags().String("name", "", "Client name (required)")
-	clientCreateCmd.Flags().String("grant-types", "authorization_code", "Comma-separated grant types")
+	clientCreateCmd.Flags().String("grant-types", "authorization_code,refresh_token", "Comma-separated grant types")
 	clientCreateCmd.Flags().String("redirect-uris", "", "Comma-separated redirect URIs")
 	clientCreateCmd.Flags().String("scope", "", "Space-separated scopes")
 	clientCreateCmd.Flags().String("auth-method", "none", "Token endpoint auth method")

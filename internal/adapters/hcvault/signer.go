@@ -34,20 +34,30 @@ func (s *VaultSigner) Public() crypto.PublicKey {
 
 // Sign signs digest with the Vault Transit key.
 //
-// CRITICAL: The digest parameter is already hashed by go-jose before calling Sign.
-// We set prehashed=true in the Vault API call to prevent double-hashing.
+// crypto.Signer.Sign carries no context, so the Vault call runs under a
+// background context and the Vault client's HTTP timeout is the safety net.
+// Callers that hold a request context use SignContext so the Vault span
+// joins the request trace.
+func (s *VaultSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return s.SignContext(context.Background(), digest, opts)
+}
+
+// SignContext signs digest with the Vault Transit key under ctx, so the
+// VaultClient.Sign span is a child of whatever span ctx carries.
+//
+// CRITICAL: The digest parameter is already hashed by go-jose before calling
+// SignContext. We set prehashed=true in the Vault API call to prevent
+// double-hashing.
 //
 // For ECDSA keys, Vault returns raw R||S format, but go-jose expects ASN.1 DER
 // encoding. This method handles the conversion.
-func (s *VaultSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+func (s *VaultSigner) SignContext(ctx context.Context, digest []byte, _ crypto.SignerOpts) ([]byte, error) {
 	// Encode the pre-hashed digest as base64 for the Vault API.
 	b64Digest := base64.StdEncoding.EncodeToString(digest)
 
 	// Call Vault Transit sign endpoint with prehashed=true.
-	// Use a background context since crypto.Signer.Sign doesn't accept context.
-	// The Vault client's HTTP timeout provides the safety net.
 	sig, err := s.client.Sign(
-		context.Background(),
+		ctx,
 		s.keyName,
 		b64Digest,
 		s.hashAlg,

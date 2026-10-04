@@ -1,7 +1,7 @@
 # Tier 01 — Basic MCP server (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 49 lines · SDK: go-sdk v0.3.0**
+**Auth-specific code: 5 lines · Total example: 49 lines · SDK: go-sdk v0.4.0**
 <!-- loccount:end -->
 
 A minimal MCP server protected by Authplane-issued JWTs. Everything you
@@ -86,7 +86,7 @@ this right; you'll only hit it if you changed `MCP_PORT`.
 `brew install jq` (macOS) or `apt install jq` (Debian/Ubuntu).
 
 **`missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`**
-`go get github.com/authplane/go-sdk/mcp@v0.3.0` pulls the `mcp` adapter but
+`go get github.com/authplane/go-sdk/mcp@v0.4.0` pulls the `mcp` adapter but
 not its transitive `go-sdk/core` dependency, so the next `go build` fails on
 the missing checksum. Run `go mod tidy` (or
 `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.3.0`) to record

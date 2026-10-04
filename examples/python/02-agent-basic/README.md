@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (Python)
 
 <!-- loccount:begin -->
-**Auth-specific code: 8 lines · Total example: 58 lines · SDK: python-sdk 0.4.0**
+**Auth-specific code: 8 lines · Total example: 58 lines · SDK: python-sdk 0.5.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP

@@ -71,7 +71,7 @@ observability:
       insecure: true
 ```
 
-Each log line includes `trace_id`, `span_id`, `request_id`, `client_id`, and the grant name — click a trace in Grafana Tempo to pivot to logs in Loki.
+Every log line written inside a request carries `trace_id`, `span_id` and `request_id`, injected by the logger handler from the request context. `client_id` and the grant name are on the lines where the handler knows them — token issuance, refusal, revocation — not on every line. Click a trace in Grafana Tempo to pivot to logs in Loki.
 
 ### 4. Use the bundled LGTM stack (optional)
 
@@ -161,7 +161,7 @@ groups:
           summary: "Token issuance p99 > 2s"
 ```
 
-For the Vault-Transit deploy, also alert on `WARN vault renewal failed` log occurrences (Loki query) — once the in-flight Vault token expires, signing stops. See [Vault Transit → Runbook](hashicorp-vault-transit.md#runbook).
+For the Vault-Transit deploy, also alert on `WARN vault token renewal failed` log occurrences (Loki query) — once the in-flight Vault token expires, signing stops. See [Vault Transit → Runbook](hashicorp-vault-transit.md#runbook).
 
 ## Verify
 

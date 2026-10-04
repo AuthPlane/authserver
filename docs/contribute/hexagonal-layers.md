@@ -28,8 +28,16 @@ Read the arrows as "is allowed to import". The crucial inversions:
 
 - `internal/services/` calls `internal/ports/output/` interfaces;
   adapters implement them. Services never see concrete adapter types.
-- `internal/ports/` imports only `internal/domain/` and the standard
-  library — no `services`, no `adapters`, no `config`, no `crypto`.
+- `internal/ports/` imports only `internal/domain/`, the standard
+  library, and `go-jose` (for the JWKS type on the IdP port) — no
+  `services`, no `adapters`, no `config`, no `crypto`.
+- `internal/services/` imports `internal/domain/`, `internal/ports/`,
+  `internal/brokerproto/`, `internal/issuer/`, `internal/crypto/`,
+  `internal/observability/`, the OpenTelemetry *API* packages and
+  `go-jose`. Nothing else: no `adapters`, no `config`, no `api`. The
+  list is a freeze of what services use today, not an invitation — the
+  aim is to move `crypto` and `go-jose` behind ports over time, so a new
+  service must not widen it.
 - `api/` imports `internal/ports/input/`, `internal/domain/`, and
   `internal/config/`. It never reaches into `internal/services/`
   directly, nor into `internal/adapters/`.
@@ -37,7 +45,9 @@ Read the arrows as "is allowed to import". The crucial inversions:
 Encyclopedia rationale + diagram in
 [`docs/concepts/architecture.md`](../concepts/architecture.md). Boundary
 enforcement is implemented in the `check-imports` target of the
-[`Makefile`](../../Makefile).
+[`Makefile`](../../Makefile): it walks every directory under
+`internal/domain/` (so a new aggregate is checked the moment it exists),
+then checks `ports`, `services` and `api/` against their allowlists.
 
 ## Decision table
 

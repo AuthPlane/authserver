@@ -290,7 +290,7 @@ func (s *TokenStore) ConsumeRefreshToken(ctx context.Context, id string) (*token
 // token is rejected by the refresh flow before any reuse check, so retaining
 // it provides no security value.
 func (s *TokenStore) PurgeExpired(ctx context.Context) (int64, error) {
-	ctx, span := s.tracer.Start(ctx, "Postgres.PurgeExpired.RefreshTokens")
+	ctx, span := s.tracer.Start(ctx, "Postgres.PurgeExpiredRefreshTokens")
 	defer span.End()
 	start := time.Now()
 

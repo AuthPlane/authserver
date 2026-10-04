@@ -21,9 +21,12 @@ The OAuth `client_id` and the Resource `slug` are distinct identities with an N:
 
 **Default:** empty list = **default-deny**. No client may act AS the Resource. (Not the same as `policy.exchange.allowed_client_ids`, which is permissive when empty — but only for a client exchanging a token issued to itself; delegating another client's token needs an explicit entry there, or an entry in this list, which says the caller *is* the Resource.)
 
-**You need this when:** an OAuth client authenticates to `/oauth/token` and the broker agent-attestation gate must resolve that client to its actor MCP — i.e., any time an agent or gateway exchanges a token for a broker Resource and no [fronting link](../../concepts/glossary.md#glossary-fronting-link) covers the source/target pair.
+**You need this when:**
 
-**You don't need this when:** the exchange targets a Mint Resource, or a fronting link already covers the (source → target) pair, or the dispatch doesn't hit the gate (direct user→MCP, refresh, `client_credentials`, `jwt-bearer`, authorization code).
+- an OAuth client authenticates to `/oauth/token` and the broker agent-attestation gate must resolve that client to its actor MCP — i.e., any time an agent or gateway exchanges a token for a broker Resource and no [fronting link](../../concepts/glossary.md#glossary-fronting-link) covers the source/target pair;
+- a gateway exchanges through a fronting link. The caller must be listed here on the **source** Resource (or in the target's `policy.exchange.allowed_client_ids`); any other client is refused with `access_denied`.
+
+**You don't need this when:** the exchange targets a Mint Resource directly with no fronting link, or the dispatch doesn't hit the gate (direct user→MCP, refresh, `client_credentials`, `jwt-bearer`, authorization code).
 
 **You also need this for introspection.** A resource server calling
 `POST /oauth/introspect` about a token one of its clients presented is asking

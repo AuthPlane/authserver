@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -175,8 +176,10 @@ func TestHasRedirectURI_LoopbackPortIgnored(t *testing.T) {
 func TestCreateParamsDefaults(t *testing.T) {
 	p := CreateParams{Name: "Test"}
 	p.Defaults()
-	if len(p.GrantTypes) != 1 || p.GrantTypes[0] != "authorization_code" {
-		t.Errorf("default grant_types = %v, want [authorization_code]", p.GrantTypes)
+	// Not RFC 7591's [authorization_code]: refresh is honored only for
+	// clients registered for it, so the default carries refresh_token too.
+	if !slices.Equal(p.GrantTypes, []string{"authorization_code", "refresh_token"}) {
+		t.Errorf("default grant_types = %v, want [authorization_code refresh_token]", p.GrantTypes)
 	}
 	if len(p.ResponseTypes) != 1 || p.ResponseTypes[0] != "code" {
 		t.Errorf("default response_types = %v, want [code]", p.ResponseTypes)

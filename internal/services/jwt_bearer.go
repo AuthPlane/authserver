@@ -294,7 +294,21 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 	// composed ceiling — silent narrowing here was the MED 4-style bug that
 	// hid client / assertion misconfiguration and inverted RFC 6749 §5.2
 	// invalid_scope semantics. Mirrors the client_credentials fix.
+	//
+	// An empty client ceiling grants nothing. That is the machine-grant rule
+	// (dcr.go: "deny-all on the machine grants"), and open DCR hands out
+	// exactly such clients — a jwt-bearer client registered there carries no
+	// scope until an operator grants some. Refused here rather than left to
+	// fall through: with an assertion and a request that both omit scope the
+	// set reaching the policy below would be empty, and the policy's own
+	// maximum would fill it.
 	clientScopes := scope.Parse(c.Scope)
+	if clientScopes.IsEmpty() {
+		span.RecordError(domain.ErrInvalidScope)
+		span.SetStatus(codes.Error, "client has no registered scope")
+		s.recordDenied(ctx, req.ClientID, "client_scope_empty")
+		return nil, fmt.Errorf("%w: client has no registered scope", domain.ErrInvalidScope)
+	}
 	effectiveScopes := clientScopes
 
 	if assertion.Scope != "" {
@@ -337,11 +351,9 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 			s.recordDenied(ctx, req.ClientID, "policy_denied")
 			return nil, policyErr
 		}
-		// Adopt the policy's decision. Usually a narrowing, but not always:
-		// when the set entering evaluation is empty — a client with no
-		// registered scope, an assertion and a request that both omit it —
-		// the policy's own maximum becomes the effective set. So a client
-		// whose ceiling is empty can still mint a scoped token here.
+		// Adopt the policy's decision. The set entering evaluation is never
+		// empty — step 11 refuses a client with no registered scope — so the
+		// policy can only narrow it, never supply scopes the client lacks.
 		effectiveScopes = decision.EffectiveScope
 	}
 
@@ -374,8 +386,15 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		resolvedSub, mapErr := s.mappingService.ResolveSubject(ctx, idp.ID, assertion.Issuer, assertion.Subject, xaaCfg.SubjectMode)
 		if mapErr != nil {
 			span.RecordError(mapErr)
-			span.SetStatus(codes.Error, "subject mapping failed")
-			s.recordDenied(ctx, req.ClientID, "subject_mapping_failed")
+			reason := "subject_mapping_failed"
+			if errors.Is(mapErr, errMappedUserInactive) {
+				// The mapping resolved to a local user who has since been
+				// disabled. Every other grant stops for that account, and
+				// introspection reports its existing tokens inactive.
+				reason = "subject_inactive"
+			}
+			span.SetStatus(codes.Error, reason)
+			s.recordDenied(ctx, req.ClientID, reason)
 			return nil, mapErr
 		}
 		sub = resolvedSub
@@ -424,7 +443,7 @@ func (s *JWTBearerService) GrantJWTBearer(ctx context.Context, req input.JWTBear
 		KeyID:      sk.KeyID,
 	}
 
-	accessToken, err := crypto.SignAccessToken(kp, claims)
+	accessToken, err := crypto.SignAccessTokenContext(ctx, kp, claims)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

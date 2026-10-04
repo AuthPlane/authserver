@@ -77,7 +77,10 @@ func (s *AuditService) Record(ctx context.Context, e audit.Event) {
 	s.log(ctx, e)
 }
 
-// stamp fills the id and correlates the event with the active trace.
+// stamp fills the id, correlates the event with the active trace, and
+// attributes it to the caller's IP when the context carries one. An IP the
+// emit site set explicitly wins; events raised outside an HTTP request keep
+// an empty IP.
 func (s *AuditService) stamp(ctx context.Context, e audit.Event) audit.Event {
 	if e.ID == "" {
 		e.ID = crypto.GenerateRandomString(16)
@@ -85,6 +88,11 @@ func (s *AuditService) stamp(ctx context.Context, e audit.Event) audit.Event {
 	if e.TraceID == "" {
 		if spanCtx := oteltrace.SpanContextFromContext(ctx); spanCtx.HasTraceID() {
 			e.TraceID = spanCtx.TraceID().String()
+		}
+	}
+	if e.IP == "" {
+		if ip, ok := observability.ClientIPFromContext(ctx); ok {
+			e.IP = ip
 		}
 	}
 	return e

@@ -553,7 +553,7 @@ func TestConsent_BackButtonReplay_DoesNotRevokeLiveTokens(t *testing.T) {
 		ID:                      crypto.GenerateClientID(),
 		Name:                    "Back Button Client",
 		RedirectURIs:            []string{"https://app.example.com/callback"},
-		GrantTypes:              []string{"authorization_code"},
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
 		Status:                  client.StatusActive,

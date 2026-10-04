@@ -125,6 +125,9 @@ var resourceCreateCmd = &cobra.Command{
 		backendKindRaw, _ := cmd.Flags().GetString("backend-kind")
 		brokerProviderID, _ := cmd.Flags().GetString("broker-provider")
 		displayName, _ := cmd.Flags().GetString("display-name")
+		if cmd.Flags().Changed("description") {
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning: --description is ignored; resources have no description field (use --display-name)")
+		}
 
 		if slug == "" {
 			return fmt.Errorf("--slug is required")
@@ -264,7 +267,9 @@ var resourceRuntimeClientCmd = &cobra.Command{
 	Long: "Manage the OAuth client_ids authorized to act AS this Resource at " +
 		"runtime. Empty list = no client may act as this Resource " +
 		"(default-deny); multi-entry models multi-tier deployments where each " +
-		"tier authenticates with its own credentials but maps to the same Resource.",
+		"tier authenticates with its own credentials but maps to the same Resource. " +
+		"A gateway that exchanges through a fronting link from this Resource " +
+		"must be listed here.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 }
@@ -527,7 +532,8 @@ func init() {
 	resourceCreateCmd.Flags().String("backend-kind", "", "Backend kind: mint | broker (required)")
 	resourceCreateCmd.Flags().String("broker-provider", "", "Broker provider id (required for broker resources)")
 	resourceCreateCmd.Flags().String("display-name", "", "Human-readable display name")
-	resourceCreateCmd.Flags().String("description", "", "Free-form description (kept for forward compat; not persisted today)")
+	resourceCreateCmd.Flags().String("description", "", "Ignored; resources have no description field")
+	_ = resourceCreateCmd.Flags().MarkHidden("description")
 	resourceCreateCmd.Flags().StringArray("scopes", nil,
 		"Repeatable scope tuple 'name|upstream|description' (any field optional). "+
 			"Mutually exclusive with --scopes-file.")
@@ -539,8 +545,10 @@ func init() {
 	resourceCreateCmd.Flags().StringSlice("policy-allowed-return-urls", nil,
 		"Comma-separated return URLs accepted by the broker connect flow.")
 	resourceCreateCmd.Flags().StringSlice("policy-runtime-client-ids", nil,
-		"Comma-separated client_ids authorized to act AS this Resource at runtime "+
-			". Empty = default-deny (no client may act as this Resource).")
+		"Comma-separated client_ids authorized to act AS this Resource at runtime: "+
+			"its resource server's clients (introspection, broker attestation) and the "+
+			"gateway that exchanges through a fronting link from it. "+
+			"Empty = default-deny (no client may act as this Resource).")
 
 	resourceUpdateCmd.Flags().String("id", "", "Resource id (required)")
 	resourceUpdateCmd.Flags().String("slug", "", "New slug")

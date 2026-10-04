@@ -44,7 +44,7 @@ The `Labels` column lists the OTel attributes that emit sites attach via `metric
 | `authplane_xaa_subject_resolutions_total` | counter | outcome | Total XAA subject mapping resolutions | `XAASubjectResolutions` in `internal/observability/metrics.go` |
 | `authplane_resource_server_ops_total` | counter | op | Total resource server admin operations | `ResourceServerOps` in `internal/observability/metrics.go` |
 | `authplane_allowlist_ops_total` | counter | op | Total cross-client allowlist admin operations | `AllowlistOps` in `internal/observability/metrics.go` |
-| `authserver_http_requests_total` | counter | method, path, status | Total HTTP requests | `HTTPRequestsTotal` in `internal/observability/metrics.go` |
+| `authserver_http_requests_total` | counter | http_method, http_route, http_status_code (OTel `http.method` / `http.route` / `http.status_code`, exported with underscores) | Total HTTP requests | `HTTPRequestsTotal` in `internal/observability/metrics.go` |
 
 ## Histograms (seconds)
 
@@ -58,7 +58,7 @@ The `Labels` column lists the OTel attributes that emit sites attach via `metric
 | `authserver_introspection_duration_seconds` | histogram | (none) | Token introspection duration | `IntrospectionDuration` in `internal/observability/metrics.go` |
 | `authserver_key_reload_duration_seconds` | histogram | (none) | JWKS cache reload duration | `KeyReloadDuration` in `internal/observability/metrics.go` |
 | `authserver_upstream_token_issuance_duration_seconds` | histogram | provider | Upstream-format token issuance duration | `UpstreamTokenIssuanceDuration` in `internal/observability/metrics.go` |
-| `authserver_http_request_duration_seconds` | histogram | method, path, status | HTTP request duration | `HTTPRequestDuration` in `internal/observability/metrics.go` |
+| `authserver_http_request_duration_seconds` | histogram | http_method, http_route, http_status_code (same attributes as `authserver_http_requests_total`) | HTTP request duration | `HTTPRequestDuration` in `internal/observability/metrics.go` |
 
 ## Gauges (UpDownCounters)
 

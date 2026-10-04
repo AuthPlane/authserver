@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -290,4 +292,335 @@ func slicesEqualInt(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+// 014 rebuilds users to make email nullable. The upgrade has to keep every
+// row and column, keep every child row (a DROP TABLE with foreign keys on
+// would cascade-delete them), leave foreign keys enforced afterwards, and
+// let any number of users have no email while a present one stays unique.
+func TestMigration014_UpgradeFrom013PreservesUsersAndChildren(t *testing.T) {
+	ctx := context.Background()
+	db := openAt013(t)
+
+	seed014Fixture(t, db.DB)
+	before := dumpUsers(t, db.DB)
+	shapeAt013 := tableInfo(t, db.DB, "users")
+	children := countChildren(t, db.DB)
+
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate 013 → 014: %v", err)
+	}
+
+	// Every row and column survives; the only change is a federated user's
+	// '' email becoming NULL.
+	want := map[string][]string{}
+	for id, row := range before {
+		want[id] = append([]string(nil), row...)
+	}
+	want["fed-noemail"][1] = "NULL"
+	if got := dumpUsers(t, db.DB); !reflect.DeepEqual(got, want) {
+		t.Errorf("users after 014:\n got %v\nwant %v", got, want)
+	}
+	if got := countChildren(t, db.DB); got != children {
+		t.Errorf("child rows after 014: %d, want %d (rebuild cascaded)", got, children)
+	}
+
+	var fk int
+	if err := db.DB.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 1 {
+		t.Errorf("foreign_keys after migrate = %d (%v), want 1", fk, err)
+	}
+	for _, idx := range []string{"idx_users_provider_sub", "idx_users_created_at"} {
+		var n int
+		_ = db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&n)
+		if n != 1 {
+			t.Errorf("index %s missing after 014", idx)
+		}
+	}
+	// Child FKs still point at users and are enforced.
+	if _, err := db.DB.ExecContext(ctx,
+		`INSERT INTO token_families (id, client_id, user_id, created_at) VALUES ('tf-ghost', 'c1', 'no-such-user', '2026-01-01T00:00:00Z')`); err == nil {
+		t.Error("token_families accepted a user_id with no users row: FK lost in rebuild")
+	}
+	// Deleting a user still cascades to its children.
+	if _, err := db.DB.ExecContext(ctx, `DELETE FROM users WHERE id = 'local-b'`); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	var orphan int
+	_ = db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM token_families WHERE user_id = 'local-b'`).Scan(&orphan)
+	if orphan != 0 {
+		t.Error("ON DELETE CASCADE from users lost in rebuild")
+	}
+
+	// New shape: email nullable, NULLs distinct, present emails unique.
+	for _, ins := range []string{
+		`INSERT INTO users (id, email, provider, provider_sub, created_at, updated_at) VALUES ('n1', NULL, 'oidc', 'x1', 't', 't')`,
+		`INSERT INTO users (id, email, provider, provider_sub, created_at, updated_at) VALUES ('n2', NULL, 'oidc', 'x2', 't', 't')`,
+	} {
+		if _, err := db.DB.ExecContext(ctx, ins); err != nil {
+			t.Fatalf("insert email-less user: %v", err)
+		}
+	}
+	if _, err := db.DB.ExecContext(ctx,
+		`INSERT INTO users (id, email, created_at, updated_at) VALUES ('dup', 'a@corp.example', 't', 't')`); err == nil {
+		t.Error("duplicate present email accepted after 014")
+	}
+
+	// Apart from email's NOT NULL, the column set is what 013 had.
+	after := tableInfo(t, db.DB, "users")
+	for i := range shapeAt013 {
+		if shapeAt013[i].name == "email" {
+			shapeAt013[i].notNull = 0
+		}
+	}
+	if !reflect.DeepEqual(after, shapeAt013) {
+		t.Errorf("users columns after 014:\n got %+v\nwant %+v", after, shapeAt013)
+	}
+}
+
+// The down migration restores the 013 shape when at most one user has no
+// email, and refuses (leaving the schema as is) when two or more do.
+func TestMigration014_Down(t *testing.T) {
+	ctx := context.Background()
+	downSQL, err := migrations.Migrations.ReadFile("014_user_email_nullable.down.sql")
+	if err != nil {
+		t.Fatalf("read down: %v", err)
+	}
+	applyDown := func(db *sql.DB) error {
+		if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+			return err
+		}
+		defer func() { _, _ = db.ExecContext(ctx, `PRAGMA foreign_keys = ON`) }()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, string(downSQL)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
+	}
+
+	t.Run("OneEmailless_RestoresShape", func(t *testing.T) {
+		db := openAt013(t)
+		seed014Fixture(t, db.DB)
+		shapeAt013 := tableInfo(t, db.DB, "users")
+		before := dumpUsers(t, db.DB)
+		children := countChildren(t, db.DB)
+		if err := db.Migrate(ctx); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		if err := applyDown(db.DB); err != nil {
+			t.Fatalf("down: %v", err)
+		}
+		if got := tableInfo(t, db.DB, "users"); !reflect.DeepEqual(got, shapeAt013) {
+			t.Errorf("users columns after down:\n got %+v\nwant %+v", got, shapeAt013)
+		}
+		if got := dumpUsers(t, db.DB); !reflect.DeepEqual(got, before) {
+			t.Errorf("users after up+down:\n got %v\nwant %v", got, before)
+		}
+		if got := countChildren(t, db.DB); got != children {
+			t.Errorf("child rows after down: %d, want %d", got, children)
+		}
+	})
+
+	t.Run("TwoEmailless_Refuses", func(t *testing.T) {
+		db := openAt013(t)
+		seed014Fixture(t, db.DB)
+		if err := db.Migrate(ctx); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		if _, err := db.DB.ExecContext(ctx,
+			`INSERT INTO users (id, email, provider, provider_sub, created_at, updated_at) VALUES ('n2', NULL, 'oidc', 'x2', 't', 't')`); err != nil {
+			t.Fatalf("insert second email-less user: %v", err)
+		}
+		before := dumpUsers(t, db.DB)
+		if err := applyDown(db.DB); err == nil {
+			t.Fatal("down succeeded with two email-less users; it cannot restore UNIQUE NOT NULL")
+		}
+		if got := dumpUsers(t, db.DB); !reflect.DeepEqual(got, before) {
+			t.Errorf("failed down changed users:\n got %v\nwant %v", got, before)
+		}
+	})
+}
+
+// openAt013 returns an in-memory database migrated through 013 only — the
+// state a v0.2.1 install is in before upgrading.
+func openAt013(t *testing.T) *sqlite.DB {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sqlite.Open(":memory:", observability.NewNoop())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.DB.ExecContext(ctx, `CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')))`); err != nil {
+		t.Fatalf("schema_migrations: %v", err)
+	}
+	entries, err := fs.ReadDir(migrations.Migrations, ".")
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	type mig struct {
+		v    int
+		name string
+	}
+	var ups []mig
+	for _, e := range entries {
+		var v int
+		if !strings.HasSuffix(e.Name(), ".up.sql") {
+			continue
+		}
+		if _, err := fmt.Sscanf(e.Name(), "%d_", &v); err != nil || v > 13 {
+			continue
+		}
+		ups = append(ups, mig{v, e.Name()})
+	}
+	sort.Slice(ups, func(i, j int) bool { return ups[i].v < ups[j].v })
+	for _, m := range ups {
+		data, _ := fs.ReadFile(migrations.Migrations, m.name)
+		if _, err := db.DB.ExecContext(ctx, string(data)); err != nil {
+			t.Fatalf("apply %s: %v", m.name, err)
+		}
+		if _, err := db.DB.ExecContext(ctx, `INSERT INTO schema_migrations (version) VALUES (?)`, m.v); err != nil {
+			t.Fatalf("record %d: %v", m.v, err)
+		}
+	}
+	return db
+}
+
+// seed014Fixture writes local and federated users (one federated user with
+// the empty-string email the pre-014 code stored for a missing claim) and rows in
+// every table that cascades from users.
+func seed014Fixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	stmts := []string{
+		`INSERT INTO users (id, email, name, password_hash, role, status, provider, provider_sub, version, created_at, updated_at) VALUES
+			('local-a', 'a@corp.example', 'Alice', '$2a$12$hashA', 'admin', 'active', 'local', '', 3, '2026-01-01T00:00:00.123456789Z', '2026-02-01T00:00:00Z'),
+			('local-b', 'b@corp.example', '', '$2a$12$hashB', 'user', 'disabled', 'local', '', 1, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'),
+			('fed-email', 'f@corp.example', 'Fed', '', 'user', 'active', 'oidc', 'okta-1', 5, '2026-01-03T00:00:00Z', '2026-03-01T00:00:00Z'),
+			('fed-noemail', '', 'No Mail', '', 'user', 'active', 'oidc', 'okta-2', 2, '2026-01-04T00:00:00Z', '2026-01-05T00:00:00Z')`,
+		`INSERT INTO clients (id, issued_at, updated_at) VALUES ('c1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO resources (id, slug, display_name, uri, backend_kind, created_at, updated_at) VALUES ('r1', 'r1', 'r1', 'https://r1.example/mcp', 'mint', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO broker_providers (id, slug, display_name, protocol, created_at, updated_at) VALUES ('p1', 'p1', 'p1', 'oauth', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+	}
+	for _, id := range []string{"local-a", "local-b", "fed-email", "fed-noemail"} {
+		stmts = append(stmts,
+			fmt.Sprintf(`INSERT INTO token_families (id, client_id, user_id, created_at) VALUES ('tf-%s', 'c1', '%s', '2026-01-01T00:00:00Z')`, id, id),
+			fmt.Sprintf(`INSERT INTO consent_grants (id, user_id, client_id, resource_id, created_at, updated_at) VALUES ('cg-%s', '%s', 'c1', 'r1', 't', 't')`, id, id),
+			fmt.Sprintf(`INSERT INTO broker_grants (id, user_id, broker_provider_id, credential_data, enc_backend, created_at, updated_at) VALUES ('bg-%s', '%s', 'p1', x'00', 'aes', 't', 't')`, id, id),
+		)
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			t.Fatalf("seed: %v\n%s", err, s)
+		}
+	}
+}
+
+// dumpUsers returns every users row keyed by id, each column rendered with
+// quote() so NULL and the empty string stay distinguishable.
+func dumpUsers(t *testing.T, db *sql.DB) map[string][]string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `SELECT id, quote(email), quote(name), quote(password_hash),
+		quote(role), quote(status), quote(provider), quote(provider_sub), quote(version), quote(created_at), quote(updated_at)
+		FROM users`)
+	if err != nil {
+		t.Fatalf("dump users: %v", err)
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		r := make([]string, 11)
+		ptrs := make([]any, 11)
+		for i := range r {
+			ptrs[i] = &r[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out[r[0]] = r
+	}
+	return out
+}
+
+func countChildren(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(), `SELECT
+		(SELECT COUNT(*) FROM token_families) + (SELECT COUNT(*) FROM consent_grants) + (SELECT COUNT(*) FROM broker_grants)`).Scan(&n); err != nil {
+		t.Fatalf("count children: %v", err)
+	}
+	return n
+}
+
+type colInfo struct {
+	cid     int
+	name    string
+	typ     string
+	notNull int
+	dflt    sql.NullString
+	pk      int
+}
+
+func tableInfo(t *testing.T, db *sql.DB, table string) []colInfo {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)`, table)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	defer rows.Close()
+	var out []colInfo
+	for rows.Next() {
+		var c colInfo
+		if err := rows.Scan(&c.cid, &c.name, &c.typ, &c.notNull, &c.dflt, &c.pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// 016 keeps refresh for clients stored before the refresh_token grant was
+// enforced: an exact ["authorization_code"] gains refresh_token, every other
+// list is left as stored.
+func TestMigration016_BackfillsRefreshGrant(t *testing.T) {
+	ctx := context.Background()
+	db := openAt013(t)
+
+	stored := map[string]string{
+		"authcode-only": `["authorization_code"]`,
+		"both":          `["authorization_code","refresh_token"]`,
+		"machine":       `["client_credentials"]`,
+		"mixed":         `["authorization_code","client_credentials"]`,
+	}
+	for id, gt := range stored {
+		if _, err := db.DB.ExecContext(ctx, `INSERT INTO clients (id, grant_types, issued_at, updated_at)
+			VALUES (?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, id, gt); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	want := map[string]string{
+		"authcode-only": `["authorization_code","refresh_token"]`,
+		"both":          stored["both"],
+		"machine":       stored["machine"],
+		"mixed":         stored["mixed"],
+	}
+	for id, w := range want {
+		var got string
+		if err := db.DB.QueryRowContext(ctx, `SELECT grant_types FROM clients WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if got != w {
+			t.Errorf("%s grant_types = %s, want %s", id, got, w)
+		}
+	}
 }

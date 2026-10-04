@@ -195,14 +195,11 @@ func TestAuthenticate_EveryDenialIsAudited(t *testing.T) {
 			if !ok {
 				t.Fatal("the denial recorded no user.login_failed event")
 			}
-			if !strings.Contains(ev.Detail, tt.wantReason) {
-				t.Errorf("detail = %q, want it to contain %q", ev.Detail, tt.wantReason)
+			if ev.Detail != tt.wantReason {
+				t.Errorf("detail = %q, want exactly %q", ev.Detail, tt.wantReason)
 			}
-			if !strings.HasPrefix(ev.Detail, tt.wantReason+" ") {
-				t.Errorf("detail = %q, want it to lead with %q", ev.Detail, tt.wantReason)
-			}
-			if !strings.Contains(ev.Detail, `email="`+tt.email+`"`) {
-				t.Errorf("detail = %q, want it to name the submitted address, quoted", ev.Detail)
+			if strings.Contains(ev.Detail, tt.email) {
+				t.Errorf("detail = %q, want it free of the submitted address", ev.Detail)
 			}
 			// The address that matched no account has no actor to name; the
 			// others do, and a trail that omits the user id makes a
@@ -250,10 +247,11 @@ func TestAuthenticate_UnusableStoredHashNeverAdmits(t *testing.T) {
 }
 
 // Detail is contracted as greppable key=value and the address is raw form input.
-// With the address first and unquoted, a submitted value carrying a space and
-// its own "reason=" produced a row whose first reason= the attacker chose — so a
-// probe against a nonexistent address could file itself as a wrong password.
-// The sibling auth.locked_out event was fixed the same way; see
+// A submitted value carrying a space and its own "reason=" once produced a row
+// whose first reason= the attacker chose — so a probe against a nonexistent
+// address could file itself as a wrong password. The address no longer reaches
+// the row at all, so nothing the form posts can shape it. The sibling
+// auth.locked_out event holds the same line; see
 // TestRecordLockout_DetailResistsInjectionViaTheAddress.
 func TestAuthenticate_AuditDetailResistsInjectionViaTheAddress(t *testing.T) {
 	svc, rec := newAuthTimingFixture(t)
@@ -267,12 +265,10 @@ func TestAuthenticate_AuditDetailResistsInjectionViaTheAddress(t *testing.T) {
 	if !ok {
 		t.Fatal("the denial recorded no user.login_failed event")
 	}
-	if !strings.HasPrefix(ev.Detail, "reason=user_not_found ") {
-		t.Errorf("detail = %q, want the real reason first", ev.Detail)
+	if ev.Detail != "reason=user_not_found" {
+		t.Errorf("detail = %q, want exactly the real reason", ev.Detail)
 	}
-	// Quoting is what stops the borrowed delimiter: the whole address, spaces
-	// and all, has to sit inside one quoted value.
-	if !strings.Contains(ev.Detail, `email="`+forged+`"`) {
-		t.Errorf("detail = %q, want the address quoted whole", ev.Detail)
+	if strings.Contains(ev.Detail, "attacker@example.com") {
+		t.Errorf("detail = %q, want it free of the submitted address", ev.Detail)
 	}
 }

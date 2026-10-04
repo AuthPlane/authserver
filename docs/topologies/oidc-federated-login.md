@@ -142,7 +142,7 @@ provisioning behavior.
 |---|---|
 | Login click | AS (via the federation service `internal/services/oidc.go`) redirects to the provider's authorize URL with PKCE. |
 | Callback | AS exchanges the auth code for an ID token at the provider's `token_url`. Validates ID-token signature against the provider's JWKS. |
-| User reconciliation | Looks up `users` by (`provider`, `provider_sub`). If new, creates a `users` row with the upstream `email`. |
+| User reconciliation | Looks up `users` by (`provider`, `provider_sub`). If new, creates a `users` row with the upstream `email`, or with no email (NULL) when the IdP sends none. Never matches by email: if the upstream email already belongs to another account, the login is refused (HTTP 409) and audited with `reason=email_in_use`. |
 | Audit | Emits `audit_events.action = user.oidc_login` on success, `user.oidc_login_failed` on rejection. |
 | Session | Establishes an AS browser session for the user. |
 | Resumed `/authorize` | Continues the original OAuth request from where it left off. From here on, the flow is identical to [single-mcp.md](single-mcp.md). |
@@ -159,7 +159,7 @@ Confirm the user row records the federation source:
 ```bash
 sqlite3 data/authserver.db \
   "SELECT id, email, provider, provider_sub
-   FROM users WHERE email = '<email>';"
+   FROM users WHERE provider = 'oidc' AND provider_sub = '<sub>';"
 ```
 
 Audit query (login events):

@@ -39,17 +39,17 @@ Tell the user to install one of these, **at the exact version shown**. Each adap
 
 | Stack | Install (pinned) | Import / call |
 |---|---|---|
-| Python · FastMCP | `pip install authplane-fastmcp==0.4.0` | `from authplane_fastmcp import authplane_auth` |
-| Python · official MCP Python SDK | `pip install authplane-mcp==0.4.0` | `from authplane_mcp import ...` |
-| Python · any other framework (FastAPI, Starlette, raw ASGI) | `pip install authplane-sdk==0.4.0` | `from authplane import AuthplaneResource` |
-| TypeScript · Express + `@modelcontextprotocol/sdk` | `npm i @authplane/mcp@0.4.0` | `import { authplaneMcpAuth } from "@authplane/mcp"` |
-| TypeScript · FastMCP | `npm i @authplane/fastmcp@0.4.0` | `import { authplaneFastMcpAuth } from "@authplane/fastmcp"` |
-| TypeScript · any other framework | `npm i @authplane/sdk@0.4.0` | `import { AuthplaneResource } from "@authplane/sdk/core"` (the package has no root export) |
-| Go · official MCP Go SDK | `go get github.com/authplane/go-sdk/mcp@v0.3.0` | `import "github.com/authplane/go-sdk/mcp/pkg/authplanemcp"` |
-| Go · `net/http` resource server | `go get github.com/authplane/go-sdk/http@v0.3.0` | `import "github.com/authplane/go-sdk/http/pkg/authplanehttp"` |
-| Go · raw token client (agent side) | `go get github.com/authplane/go-sdk/core@v0.3.0` | `import "github.com/authplane/go-sdk/core/authplane"` |
+| Python · FastMCP | `pip install authplane-fastmcp==0.5.0` | `from authplane_fastmcp import authplane_auth` |
+| Python · official MCP Python SDK | `pip install authplane-mcp==0.5.0` | `from authplane_mcp import ...` |
+| Python · any other framework (FastAPI, Starlette, raw ASGI) | `pip install authplane-sdk==0.5.0` | `from authplane import AuthplaneResource` |
+| TypeScript · Express + `@modelcontextprotocol/sdk` | `npm i @authplane/mcp@0.5.0` | `import { authplaneMcpAuth } from "@authplane/mcp"` |
+| TypeScript · FastMCP | `npm i @authplane/fastmcp@0.5.0` | `import { authplaneFastMcpAuth } from "@authplane/fastmcp"` |
+| TypeScript · any other framework | `npm i @authplane/sdk@0.5.0` | `import { AuthplaneResource } from "@authplane/sdk/core"` (the package has no root export) |
+| Go · official MCP Go SDK | `go get github.com/authplane/go-sdk/mcp@v0.4.0` | `import "github.com/authplane/go-sdk/mcp/pkg/authplanemcp"` |
+| Go · `net/http` resource server | `go get github.com/authplane/go-sdk/http@v0.4.0` | `import "github.com/authplane/go-sdk/http/pkg/authplanehttp"` |
+| Go · raw token client (agent side) | `go get github.com/authplane/go-sdk/core@v0.4.0` | `import "github.com/authplane/go-sdk/core/authplane"` |
 
-**Go: `go get .../mcp` (or `.../http`) is not enough on its own.** Both adapters import `github.com/authplane/go-sdk/core` transitively, and `go get` of the adapter alone does *not* record `core` in your `go.sum`. The next `go build` then fails with `missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`. Fix it by running **`go mod tidy`** immediately after `go get` (or `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.3.0` — naming the import path pulls its full transitive set). This is the one place "one package, exact version" doesn't hold: `core` rides along whether you name it or not.
+**Go: `go get .../mcp` (or `.../http`) is not enough on its own.** Both adapters import `github.com/authplane/go-sdk/core` transitively, and `go get` of the adapter alone does *not* record `core` in your `go.sum`. The next `go build` then fails with `missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`. Fix it by running **`go mod tidy`** immediately after `go get` (or `go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.4.0` — naming the import path pulls its full transitive set). This is the one place "one package, exact version" doesn't hold: `core` rides along whether you name it or not.
 
 Python users: SDK packages require **Python 3.11+** (`requires-python = ">=3.11"`); the examples here use 3.12 images.
 TypeScript users: SDK packages are **ESM-only** and require **Node.js 22+**.

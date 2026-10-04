@@ -2150,3 +2150,121 @@ func TestTokenExchangeService_Dispatch_SelfExchange_CarriesLineageAndIsRevocable
 		t.Fatalf("cascade for the client's own grant: n=%d err=%v, want 1", n, err)
 	}
 }
+
+// An omitted scope on a direct (non-fronted) Mint exchange used to issue a
+// token with an empty scope: the catalog check, the subject-scope ceiling and
+// the consent coverage check all pass on an empty request. Every authorizing
+// branch now defaults to what an explicit request could have named, or
+// refuses with invalid_scope.
+
+func TestDispatchMint_OmittedScope_PerAuthorizingBranch(t *testing.T) {
+	type branch int
+	const (
+		allowlisted              branch = iota // cross-client, policy.exchange.allowed_client_ids
+		runtimeBound                           // cross-client, policy.runtime.client_ids
+		sameClientNoSelfExchange               // same client, allow_self_exchange off → consent
+		selfExchange                           // same client, allow_self_exchange on → no consent
+	)
+	cases := []struct {
+		name      string
+		branch    branch
+		consent   []string // nil: no consent grant seeded
+		subject   string
+		wantScope string // "" means refused with invalid_scope
+	}{
+		{"allowlisted/identity-only subject", allowlisted, []string{"tasks.read", "tasks.write"}, "", "tasks.read tasks.write"},
+		{"allowlisted/scoped subject narrows", allowlisted, []string{"tasks.read", "tasks.write"}, "tasks.write", "tasks.write"},
+		{"allowlisted/subject disjoint from consent", allowlisted, []string{"tasks.read"}, "tasks.write", ""},
+		{"runtime-bound/consented scopes", runtimeBound, []string{"tasks.read"}, "", "tasks.read"},
+		{"same-client consent/consented scopes", sameClientNoSelfExchange, []string{"tasks.write"}, "", "tasks.write"},
+		{"self-exchange/subject scopes in catalog", selfExchange, nil, "tasks.read unrelated", "tasks.read"},
+		{"self-exchange/identity-only subject", selfExchange, nil, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := output.TokenExchangeConfig{AllowSelfExchange: tc.branch == selfExchange, MaxChainDepth: 5, TokenExpiry: 15 * time.Minute}
+			setup := newDispatchSetupWithConfig(t, cfg)
+			ctx := context.Background()
+
+			agent, agentSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+			caller, callerSecret := agent, agentSecret
+			var policy resource.Policy
+			switch tc.branch {
+			case allowlisted:
+				caller, callerSecret = setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+				policy.Exchange.AllowedClientIDs = []string{caller.ID}
+			case runtimeBound:
+				caller, callerSecret = setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+				policy.Runtime.ClientIDs = []string{caller.ID}
+			}
+			mintRes := setup.seedMintResourcePolicy(t, "omit-mcp", []string{"tasks.read", "tasks.write"}, policy)
+			setup.seedUser(t, "user-omit")
+			if tc.consent != nil {
+				setup.seedConsentGrant(t, "user-omit", agent.ID, mintRes.ID, tc.consent)
+			}
+
+			subjectClaims := identitySubjectClaims(agent.ID)
+			subjectClaims.Subject = "user-omit"
+			subjectClaims.Scope = tc.subject
+			resp, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+				SubjectToken:     setup.mintSubjectToken(t, subjectClaims),
+				SubjectTokenType: token.TokenTypeAccessToken,
+				ClientID:         caller.ID,
+				ClientSecret:     callerSecret,
+				Resource:         "omit-mcp",
+			})
+			if tc.wantScope == "" {
+				if !errors.Is(err, domain.ErrInvalidScope) {
+					t.Fatalf("want invalid_scope, got resp=%+v err=%v", resp, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Exchange: %v", err)
+			}
+			if resp.Scope != tc.wantScope {
+				t.Errorf("response scope = %q, want %q", resp.Scope, tc.wantScope)
+			}
+			if got := parseClaims(t, resp.AccessToken)["scope"]; got != tc.wantScope {
+				t.Errorf("token scope = %v, want %q", got, tc.wantScope)
+			}
+		})
+	}
+}
+
+// The resource-less (legacy inline) path inherits the subject's scopes when
+// scope is omitted; a subject with none must be refused rather than issued
+// an empty-scope token.
+func TestExchange_NoResource_OmittedScope(t *testing.T) {
+	setup := newDispatchSetup(t)
+	ctx := context.Background()
+	self, selfSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+
+	scoped := defaultSubjectClaims(self.ID)
+	scoped.Scope = "read write"
+	resp, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, scoped),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         self.ID,
+		ClientSecret:     selfSecret,
+	})
+	if err != nil {
+		t.Fatalf("scoped subject: %v", err)
+	}
+	if resp.Scope != "read write" {
+		t.Errorf("scoped subject: scope = %q, want the inherited %q", resp.Scope, "read write")
+	}
+
+	for _, sc := range []string{"", "   "} {
+		_, err = setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+			SubjectToken:     setup.mintSubjectToken(t, identitySubjectClaims(self.ID)),
+			SubjectTokenType: token.TokenTypeAccessToken,
+			ClientID:         self.ID,
+			ClientSecret:     selfSecret,
+			Scope:            sc,
+		})
+		if !errors.Is(err, domain.ErrInvalidScope) {
+			t.Errorf("identity-only subject, scope %q: want invalid_scope, got %v", sc, err)
+		}
+	}
+}

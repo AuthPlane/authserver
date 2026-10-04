@@ -140,7 +140,7 @@ func (s *tokenTestSetup) createSessionWithCode(t *testing.T, isPublic bool) (*cl
 		ID:                      crypto.GenerateClientID(),
 		Name:                    "Token Test Client",
 		RedirectURIs:            []string{"https://app.example.com/callback"},
-		GrantTypes:              []string{"authorization_code"},
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
 		Status:                  client.StatusActive,
@@ -843,7 +843,7 @@ func (s *tokenTestSetup) exchangeForTokensConfidential(t *testing.T) (*input.Tok
 		ID:                      crypto.GenerateClientID(),
 		Name:                    "Refresh Conf Client",
 		RedirectURIs:            []string{"https://app.example.com/callback"},
-		GrantTypes:              []string{"authorization_code"},
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "client_secret_basic",
 		SecretHash:              hash,
@@ -3021,5 +3021,82 @@ func TestRefresh_FamilyRevokedDuringMint_RefusedAndRowRevoked(t *testing.T) {
 	}
 	if !sawRefreshRow {
 		t.Fatal("the refused refresh wrote no issuance row; the test is not exercising the residue")
+	}
+}
+
+// setClientGrantTypes rewrites a stored client's grant_types, standing in for
+// an operator PATCH /admin/clients/{id}.
+func (s *tokenTestSetup) setClientGrantTypes(t *testing.T, c *client.Client, grantTypes []string) {
+	t.Helper()
+	current, err := s.h.Stores.Client.GetByID(context.Background(), c.ID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+	current.GrantTypes = grantTypes
+	current.UpdatedAt = time.Now().UTC()
+	if err := s.h.Stores.Client.Update(context.Background(), current); err != nil {
+		t.Fatalf("update client grant_types: %v", err)
+	}
+	*c = *current
+}
+
+// A client registered for authorization_code alone gets an access token and
+// no refresh token: grant_types (RFC 7591 §2) lists the grants the client may
+// use at the token endpoint, and refresh_token is not among them.
+func TestToken_ExchangeCode_RefreshGrantNotRegistered_NoRefreshToken(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	c, _, code, verifier := setup.createSessionWithCode(t, true)
+	setup.setClientGrantTypes(t, c, []string{"authorization_code"})
+
+	resp, err := setup.tokenSvc.ExchangeCode(context.Background(), input.ExchangeCodeRequest{
+		Code:         code,
+		RedirectURI:  "https://app.example.com/callback",
+		ClientID:     c.ID,
+		CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp.AccessToken == "" {
+		t.Error("access_token is empty")
+	}
+	if resp.RefreshToken != "" {
+		t.Error("refresh_token issued to a client not registered for the refresh_token grant")
+	}
+}
+
+// A refresh token presented by a client that is not (or no longer) registered
+// for the refresh_token grant is refused with unauthorized_client (RFC 6749
+// §5.2), and the refusal does not spend it: once the grant is restored the
+// same token still rotates, so neither consumption nor reuse detection ran.
+func TestRefresh_RefreshGrantNotRegistered_UnauthorizedClient_DoesNotConsume(t *testing.T) {
+	setup := newTokenTestSetup(t)
+	initial, c, _ := setup.exchangeForTokens(t, true)
+	if initial.RefreshToken == "" {
+		t.Fatal("precondition: a client registered for refresh_token gets a refresh token")
+	}
+
+	setup.setClientGrantTypes(t, c, []string{"authorization_code"})
+	_, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if !errors.Is(err, domain.ErrUnauthorizedClient) {
+		t.Fatalf("refresh without the grant: err = %v, want ErrUnauthorizedClient", err)
+	}
+	if domain.ErrorCode(err) != "unauthorized_client" {
+		t.Errorf("error code = %q, want unauthorized_client", domain.ErrorCode(err))
+	}
+
+	setup.setClientGrantTypes(t, c, []string{"authorization_code", "refresh_token"})
+	rotated, err := setup.tokenSvc.RefreshToken(context.Background(), input.RefreshTokenRequest{
+		RefreshToken: initial.RefreshToken,
+		ClientID:     c.ID,
+	})
+	if err != nil {
+		t.Fatalf("refresh after restoring the grant: %v (the refused request spent the token)", err)
+	}
+	if rotated.RefreshToken == "" {
+		t.Error("rotation issued no refresh token")
 	}
 }

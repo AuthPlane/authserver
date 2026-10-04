@@ -69,6 +69,33 @@ Is error = "consent_required"?
 Is error = "unsupported_grant_type"?
   → The grant type isn't enabled in config.
   → Example: client_credentials.enabled is false.
+
+Is error = "invalid_target"?
+  → The `resource` you named is not one this grant can mint for.
+  → Check: is it registered (GET /admin/resources)? Was it authorized by
+    the code or refresh token you're redeeming?
+  → Token exchange never returns this code: an unknown resource there is
+    "not_found", and a resource that won't accept your client is "access_denied".
+```
+
+### I'm registering a client and it failed
+
+```
+Is error = "invalid_client_metadata"?
+  → A field in the registration body failed validation. The description
+    names the field — an unsupported grant_type, response_type, or
+    token_endpoint_auth_method, an application_type outside the allowed set,
+    or a redirect_uri that isn't https (http is allowed for localhost only).
+  → If the description names a grant, that grant is disabled server-side;
+    it tells you which config flag enables it.
+
+Is error = "invalid_redirect_uri"?
+  → dcr.mode is approved_redirects and one of your redirect_uris isn't in
+    dcr.approved_redirects. Exact string match — no wildcards, no prefixes.
+
+Is error = "access_denied"?
+  → dcr.mode is admin_only. Ask an operator to create the client via
+    POST /admin/clients.
 ```
 
 ### I'm calling the admin API and it failed
@@ -111,6 +138,28 @@ The client can't be authenticated.
 
 **Note:** The response always includes `WWW-Authenticate: Basic realm="authserver"` for 401s.
 
+### `invalid_client_metadata` — HTTP 400
+
+Returned by `POST /oauth/register` (RFC 7591 dynamic client registration) when a field in the registration body fails validation. The `error_description` names the field and the value that was refused, so read it before changing anything.
+
+| When you see it | What happened | How to fix |
+|---|---|---|
+| "unsupported grant_type" | You asked for a grant the server has not enabled (`client_credentials`, token exchange, jwt-bearer) or one it does not offer at all. When the grant exists but is off, the description also names the env var that turns it on (`AUTHPLANE_CLIENT_CREDENTIALS_ENABLED`, `AUTHPLANE_TOKEN_EXCHANGE_ENABLED`, `AUTHPLANE_XAA_ENABLED`). | Drop the grant from `grant_types`, or have an operator enable it. Machine clients (`client_credentials`) are created through `POST /admin/clients`, not DCR. |
+| "unsupported response_type" | Only `code` is supported | Set `response_types` to `["code"]` or omit it. |
+| "unsupported token_endpoint_auth_method" | The value is not one the server accepts | Use `none` (public client) or `client_secret_basic` / `client_secret_post`. |
+| "redirect_uri … must use https" | A `redirect_uris` entry is plain `http` on a non-loopback host, or has a fragment, or is missing scheme/host | Use `https://` URLs. `http://` is accepted for `localhost` / loopback only. No fragments. |
+| Unknown `application_type` | The value is outside the allowed set | Use `web` or `native`, or omit the field. |
+
+### `invalid_redirect_uri` — HTTP 400
+
+Returned by `POST /oauth/register` when `dcr.mode` is `approved_redirects` and one of the submitted `redirect_uris` is not in `dcr.approved_redirects`. The comparison is an exact string match: no wildcards, no prefix matching, no normalization (RFC 9700 / OAuth Security BCP).
+
+| When you see it | What happened | How to fix |
+|---|---|---|
+| "redirect_uri not allowed" | The URI is not on the operator's approved list | Register with a URI from the list, or have an operator add yours to `dcr.approved_redirects` (`AUTHPLANE_DCR_APPROVED_REDIRECTS`). Watch for trailing slashes and port numbers — they must match byte-for-byte. |
+
+If `dcr.mode` is `admin_only`, registration fails with `access_denied` (HTTP 403) instead; the client has to be created through the admin API.
+
 ### `invalid_grant` — HTTP 400
 
 The authorization grant (code, token, or credentials) is invalid, expired, or revoked.
@@ -136,6 +185,7 @@ The requested scope isn't available.
 | Scope not in client's set | The client has registered scopes, but you asked for one outside that set | Narrow the request, or widen the client's scope via the admin API. |
 | `client_credentials`: "created through dynamic registration" | The client came from `POST /oauth/register` or CIMD, which create user-delegated clients. Machine clients are pre-registered through the admin API | Create the machine client with `POST /admin/clients` instead. Granting scopes to the dynamically registered one is not the fix. |
 | `client_credentials`: "the client has no registered scopes" | An admin-provisioned client was created without any scope | Grant scopes: `PATCH /admin/clients/{id}` with `{"scope": "..."}`, then confirm with `GET /admin/clients/{id}`. |
+| `client_credentials`: "not declared by the target resource" / "none of the client's registered scopes is declared by the target resource" | The request names a `resource`, and the scope asked for (or, with `scope` omitted, every scope the client holds) is not in that Resource's catalog | Request a scope the Resource declares, or add it to the Resource's catalog if it belongs there. |
 | jwt-bearer: "the requested scope is invalid or not allowed" | Same empty client scope, but this grant fails even when the request omits `scope`: the assertion's scopes intersect the empty ceiling to nothing. Unlike `client_credentials` it does not *yet* name the cause — the description is still the generic one, and closing that gap is tracked separately | Grant the client's scopes as above; if the token is meant to carry none, the assertion has to omit `scope` too. |
 | Token exchange: scope escalation | You requested broader scopes than the subject token has | You can only narrow scopes during exchange, never broaden them. |
 
@@ -146,6 +196,7 @@ The client is registered but not authorized for the requested operation.
 | When you see it | What happened | How to fix |
 |---|---|---|
 | Wrong grant_type | Client's `grant_types` doesn't include the requested grant | Re-register the client with the needed grant type. Example: add `"client_credentials"` or `"urn:ietf:params:oauth:grant-type:token-exchange"`. |
+| `refresh_token`: "the client is not registered for the refresh_token grant" | The client's `grant_types` does not include `refresh_token`. Such a client is issued no refresh token on the `authorization_code` exchange, and a refresh token it already holds is refused | Add `"refresh_token"` to the client's `grant_types` (`PATCH /admin/clients/{id}`). A client that omits `grant_types` at registration gets `["authorization_code", "refresh_token"]`. |
 
 ### `unsupported_grant_type` — HTTP 400
 
@@ -155,6 +206,18 @@ The grant type isn't supported or isn't enabled.
 |---|---|---|
 | Grant not enabled | The feature is disabled in config | Enable it: `client_credentials.enabled: true` or `token_exchange.enabled: true` |
 | Unknown grant_type | Typo or unsupported value | Supported: `authorization_code`, `refresh_token`, `client_credentials`, `urn:ietf:params:oauth:grant-type:token-exchange`, `urn:ietf:params:oauth:grant-type:jwt-bearer` |
+
+### `invalid_target` — HTTP 400
+
+The `resource` parameter (RFC 8707) names something this request cannot mint for. The code comes from RFC 8693; authserver emits it on the `authorization_code`, `refresh_token` and `client_credentials` grants, on jwt-bearer, and on the upstream connect flow. Token exchange is the exception: a `resource` that does not resolve there comes back as `not_found`, and a Resource that exists but does not list your client comes back as `access_denied`.
+
+| When you see it | What happened | How to fix |
+|---|---|---|
+| `authorization_code` / `refresh_token`: "resource … is not a registered resource" | The `resource` value does not resolve to any registered Resource | Use the Resource's identifier or slug exactly as registered (`GET /admin/resources`). Scheme and host compare case-insensitively; path, query, and trailing slash must match byte-for-byte. |
+| `client_credentials`: "resource … is not a registered resource" | The `resource` value matches no registered Resource URI | Use the Resource's `uri` exactly as registered (`GET /admin/resources`). |
+| `authorization_code` / `refresh_token`: "resource … was not authorized by this grant" | The code or refresh token was issued for a different Resource | A grant is bound to the Resource named at `/authorize`. Run a new authorization for the Resource you want, or omit `resource` to get the one the grant already carries. |
+| jwt-bearer: "resource is required (xaa.require_resource=true)" | The operator set `xaa.require_resource` and neither the request nor the assertion names a `resource` | Send `resource` on the token request, or put it in the ID-JAG assertion. |
+| `GET /connect/{provider}`: "is not broker-backed" / "has no per-user connect step" / "no broker resource references provider" | The connect flow was started for a provider or resource that has nothing to connect: the resource is Mint, not Broker; the provider protocol is `api_key` or `service_account` (no user step); or no Broker Resource points at that provider | Only OAuth-protocol Broker Resources have a connect step. Check `GET /admin/broker-providers` and the Resource's `provider` binding. |
 
 ### `invalid_dpop_proof` — HTTP 400
 
@@ -281,3 +344,6 @@ Not all errors are retryable. Save yourself debugging time:
 | `invalid_scope` | **No** | Scopes are wrong. Fix the request. |
 | `unauthorized_client` | **No** | Client config is wrong. Update registration. |
 | `access_denied` | **No** | Policy prevents this exchange. Update the allowlist. |
+| `invalid_target` | **No** | The `resource` is unregistered or not covered by this grant. Fix the value or re-authorize for it. |
+| `invalid_client_metadata` | **No** | The registration body is wrong. Fix the field the description names and register again. |
+| `invalid_redirect_uri` | **No** | The URI is not on the approved list. Use an approved one, or have an operator add yours. |

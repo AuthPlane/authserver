@@ -396,7 +396,19 @@ func stdFixture(t *testing.T) *frontingFixture {
 	f := newFrontingFixture(t)
 	f.source = f.seedResource(frSourceSlug, frSourceURI, []string{"A", "B", "C"})
 	f.target = f.seedResource(frTargetSlug, frTargetURI, []string{"AA", "BB", "CC"})
+	// The exchanging agent is the gateway: the source names it as its
+	// runtime client, which is what lets it drive a fronted exchange.
+	f.bindGateway(frAgentID)
 	return f
+}
+
+// bindGateway lists clientID in the source resource's policy.runtime.client_ids.
+func (f *frontingFixture) bindGateway(clientID string) {
+	f.t.Helper()
+	f.source.Policy.Runtime.ClientIDs = append(f.source.Policy.Runtime.ClientIDs, clientID)
+	if err := f.resources.Update(context.Background(), f.source); err != nil {
+		f.t.Fatalf("bind gateway %q to %q: %v", clientID, f.source.Slug, err)
+	}
 }
 
 func subjectClaimsForFronting(scopeStr, agentClientID string, audience []string) *crypto.AccessTokenClaims {
@@ -469,18 +481,18 @@ func TestDispatchMint_Fronted_HappyPath_OptionBeta(t *testing.T) {
 	}
 }
 
-// TestDispatchMint_Fronted_InnerActorIsRequester pins the regression that surfaced
-// in the e2e merge gate: the inner actor (`act.act.sub`) must be the
-// /oauth/token caller (`req.ClientID`), NOT the subject token's `client_id`. In a
-// gateway-fanout topology where the GW mints its own token and an agent later
-// exchanges it, those two values diverge — without this test, every other Task B
-// fixture sets them equal and the bug stays invisible.
+// TestDispatchMint_Fronted_InnerActorIsRequester pins the gateway-fanout
+// fallback: when the subject token's client_id IS the source slug (the
+// gateway was the OAuth client at /authorize), copying it to act.act.sub
+// would collapse both act layers onto one value, so the inner actor is the
+// /oauth/token caller (req.ClientID) instead.
 func TestDispatchMint_Fronted_InnerActorIsRequester(t *testing.T) {
 	const (
 		gwAsSubjectClient = "mcp-gw"       // who the GW token was issued to
 		exchangingAgent   = "agent-fanout" // who calls /oauth/token
 	)
 	f := stdFixture(t)
+	f.bindGateway(exchangingAgent)
 	f.seedFrontingLink(frSourceSlug, frTargetSlug, resource.ScopeMap{
 		"A": {"AA"}, "B": {"BB"},
 	})
@@ -507,6 +519,63 @@ func TestDispatchMint_Fronted_InnerActorIsRequester(t *testing.T) {
 	if got, _ := innerAct["sub"].(string); got != exchangingAgent {
 		t.Errorf("act.act.sub = %v, want %q (req.ClientID — the exchanger). Got %q would mean the inner actor was sourced from subjectClaims.ClientID, masking the gateway-fanout pattern.",
 			innerAct["sub"], exchangingAgent, got)
+	}
+}
+
+// TestDispatchMint_Fronted_InnerActorIsSubjectAgent pins the documented
+// gateway shape: the gateway (req.ClientID) and the agent (the subject
+// token's client) are different clients, and the issued token must anchor
+// the agent at act.act.sub — the gateway is represented by act.sub (the
+// source slug) and by the audit row's client_id.
+func TestDispatchMint_Fronted_InnerActorIsSubjectAgent(t *testing.T) {
+	const gatewayClient = "gw-oauth-client"
+	f := stdFixture(t)
+	f.bindGateway(gatewayClient)
+	f.seedFrontingLink(frSourceSlug, frTargetSlug, resource.ScopeMap{"A": {"AA"}})
+
+	subj := subjectClaimsForFronting("A", frAgentID, []string{frSourceURI})
+	_, parsed, err := f.dispatchMintFronted(input.TokenExchangeRequest{
+		ClientID: gatewayClient,
+		Resource: frTargetSlug,
+		Scope:    "AA",
+	}, subj, f.target)
+	if err != nil {
+		t.Fatalf("dispatchMint: %v", err)
+	}
+	if got, _ := parsed.Act["sub"].(string); got != frSourceSlug {
+		t.Errorf("act.sub = %v, want %q", parsed.Act["sub"], frSourceSlug)
+	}
+	innerAct, _ := parsed.Act["act"].(map[string]interface{})
+	if innerAct == nil {
+		t.Fatal("act.act missing")
+	}
+	if got, _ := innerAct["sub"].(string); got != frAgentID {
+		t.Errorf("act.act.sub = %q, want the agent %q (the subject token's client), not the gateway %q", got, frAgentID, gatewayClient)
+	}
+	if _, deeper := innerAct["act"]; deeper {
+		t.Errorf("unexpected third act layer: %v", innerAct["act"])
+	}
+	found := false
+	for _, ev := range f.auditRec.take() {
+		if ev.Action != audit.ActionTokenExchanged || !strings.Contains(ev.Detail, "type=mint_dispatch") {
+			continue
+		}
+		found = true
+		if ev.ClientID != gatewayClient {
+			t.Errorf("token.exchanged client_id = %q, want the gateway %q", ev.ClientID, gatewayClient)
+		}
+		for _, want := range []string{
+			"subject_client=" + frAgentID + " ",
+			"actor_client=" + gatewayClient + " ",
+			"via_link=" + frSourceSlug + "->" + frTargetSlug,
+		} {
+			if !strings.Contains(ev.Detail, want) {
+				t.Errorf("audit detail %q missing %q", ev.Detail, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no token.exchanged type=mint_dispatch audit event")
 	}
 }
 
@@ -1326,6 +1395,7 @@ func TestDispatchFrontedBroker_SubjectClient_IsSubjectTokenClient(t *testing.T) 
 	)
 
 	f := stdBrokerFixture(t)
+	f.bindGateway(exchangingAgent)
 	f.seedFrontingLink(frSourceSlug, frBrokerTargetSlug, resource.ScopeMap{
 		"tool:list": {"readonly"},
 	})
@@ -1358,10 +1428,18 @@ func TestDispatchFrontedBroker_SubjectClient_IsSubjectTokenClient(t *testing.T) 
 			t.Errorf("audit detail %q: subject_client must be the subject token's client (%q), not req.ClientID (%q)",
 				ev.Detail, gwAsSubjectClient, exchangingAgent)
 		}
-		// Sanity: actor_client is source.Slug per Option β semantics.
-		wantActorClient := "actor_client=" + frSourceSlug
-		if !strings.Contains(ev.Detail, wantActorClient) {
-			t.Errorf("audit detail %q: actor_client must be source slug %q", ev.Detail, frSourceSlug)
+		// The authenticated caller is recorded in client_id and
+		// actor_client; the source slug lives in via_link. Both used to
+		// carry the source slug, so the row never named who called
+		// /oauth/token.
+		if ev.ClientID != exchangingAgent {
+			t.Errorf("audit client_id = %q, want the authenticated caller %q", ev.ClientID, exchangingAgent)
+		}
+		if want := "actor_client=" + exchangingAgent + " "; !strings.Contains(ev.Detail, want) {
+			t.Errorf("audit detail %q: actor_client must be the authenticated caller %q", ev.Detail, exchangingAgent)
+		}
+		if want := "via_link=" + frSourceSlug + "->" + frBrokerTargetSlug; !strings.Contains(ev.Detail, want) {
+			t.Errorf("audit detail %q: missing %q", ev.Detail, want)
 		}
 		return
 	}
@@ -1399,6 +1477,10 @@ func TestDispatchFrontedBroker_Audit_DenialEmitsDeniedReason(t *testing.T) {
 		if ev.Action == audit.ActionTokenExchangeDenied &&
 			strings.Contains(ev.Detail, "denied_reason=upstream_connection_missing") {
 			found = true
+			// The denial row names the caller like the success row does.
+			if ev.ClientID != frAgentID || !strings.Contains(ev.Detail, "actor_client="+frAgentID+" ") {
+				t.Errorf("denial row client_id=%q detail=%q: want client_id and actor_client = the caller %q", ev.ClientID, ev.Detail, frAgentID)
+			}
 		}
 	}
 	if !found {
@@ -1433,5 +1515,197 @@ func TestDispatchFrontedBroker_Audit_DenialEmitsExactlyOneEvent(t *testing.T) {
 	}
 	if denials != 1 {
 		t.Errorf("denial emitted %d token.exchange_denied events, want exactly 1", denials)
+	}
+}
+
+// -- Omitted scope on the fronted paths --
+//
+// RFC 8693 lets an exchange omit scope. On a fronted exchange the fronting
+// link is the whole authorization, so an omitted scope must be derived from
+// what the subject token's source scopes reach through the link, and refused
+// when they reach nothing. Before this, an omitted scope skipped the
+// source-scope gate entirely: any subject token for the source was issued a
+// scope-less token for the target (Mint) or the user's full upstream
+// credential (Broker).
+
+func TestDispatchMint_Fronted_OmittedScope_DerivedFromSubject(t *testing.T) {
+	f := stdFixture(t)
+	f.seedFrontingLink(frSourceSlug, frTargetSlug, resource.ScopeMap{
+		"A": {"AA", "BB"}, "B": {"CC"},
+	})
+	subj := subjectClaimsForFronting("A", frAgentID, []string{frSourceURI})
+	resp, parsed, err := f.dispatchMintFronted(input.TokenExchangeRequest{
+		ClientID: frAgentID,
+		Resource: frTargetSlug,
+	}, subj, f.target)
+	if err != nil {
+		t.Fatalf("dispatchMint: %v", err)
+	}
+	gotScopes := strings.Fields(parsed.Scope)
+	sort.Strings(gotScopes)
+	if want := []string{"AA", "BB"}; !reflect.DeepEqual(gotScopes, want) {
+		t.Errorf("token scope = %v, want %v (B -> CC must not be granted to a subject without B)", gotScopes, want)
+	}
+	if resp.Scope != "AA BB" {
+		t.Errorf("response scope = %q, want %q", resp.Scope, "AA BB")
+	}
+}
+
+func TestDispatchMint_Fronted_OmittedScope_SubjectReachesNothing_Refused(t *testing.T) {
+	f := stdFixture(t)
+	f.seedFrontingLink(frSourceSlug, frTargetSlug, resource.ScopeMap{"A": {"AA"}})
+	for _, subjectScope := range []string{"Z", ""} {
+		t.Run("subject="+subjectScope, func(t *testing.T) {
+			subj := subjectClaimsForFronting(subjectScope, frAgentID, []string{frSourceURI})
+			resp, _, err := f.dispatchMintFronted(input.TokenExchangeRequest{
+				ClientID: frAgentID,
+				Resource: frTargetSlug,
+			}, subj, f.target)
+			if err == nil || resp != nil {
+				t.Fatalf("expected refusal, got resp=%+v err=%v", resp, err)
+			}
+			if !errors.Is(err, domain.ErrInvalidScope) {
+				t.Errorf("error does not wrap ErrInvalidScope: %v", err)
+			}
+		})
+	}
+}
+
+// The derived set follows the explicit path's rule: with several source keys
+// mapping to one target, only the lexicographically smallest opens it, so an
+// omitted scope grants nothing an explicit request would be refused.
+func TestDispatchMint_Fronted_OmittedScope_MultiSourceMatchesExplicitRule(t *testing.T) {
+	f := stdFixture(t)
+	f.seedFrontingLink(frSourceSlug, frTargetSlug, resource.ScopeMap{
+		"a": {"AA"}, "b": {"AA", "BB"},
+	})
+	subj := subjectClaimsForFronting("b", frAgentID, []string{frSourceURI})
+	_, parsed, err := f.dispatchMintFronted(input.TokenExchangeRequest{
+		ClientID: frAgentID,
+		Resource: frTargetSlug,
+	}, subj, f.target)
+	if err != nil {
+		t.Fatalf("dispatchMint: %v", err)
+	}
+	if parsed.Scope != "BB" {
+		t.Errorf("token scope = %q, want %q", parsed.Scope, "BB")
+	}
+	_, _, explicitErr := f.dispatchMintFronted(input.TokenExchangeRequest{
+		ClientID: frAgentID,
+		Resource: frTargetSlug,
+		Scope:    "AA",
+	}, subj, f.target)
+	if explicitErr == nil {
+		t.Fatal("explicit AA should be refused for a subject holding only b")
+	}
+}
+
+func TestDispatchFrontedBroker_OmittedScope_SubjectLacksSource_NoVend(t *testing.T) {
+	f := stdBrokerFixture(t)
+	f.seedFrontingLink(frSourceSlug, frBrokerTargetSlug, resource.ScopeMap{
+		"tool:list": {"readonly"},
+	})
+	f.seedActiveGrant(frUserID, []string{"calendar.readonly"})
+	f.adapter.vendAccessToken = "upstream-token-xyz"
+
+	subj := subjectClaimsForFronting("tool:other", frAgentID, []string{frSourceURI})
+	link := mustGetFrontingLink(t, f, frSourceSlug, frBrokerTargetSlug)
+	resp, err := f.svc.dispatchFrontedBroker(context.Background(), noopSpan(), time.Now(),
+		input.TokenExchangeRequest{ClientID: frAgentID, Resource: frBrokerTargetSlug},
+		subj, f.brokerTarget, f.source, link)
+	if err == nil || resp != nil {
+		t.Fatalf("expected refusal, got resp=%+v err=%v", resp, err)
+	}
+	var cre *domain.ConsentRequiredError
+	if !errors.As(err, &cre) || cre.DeniedReason != "subject_scope_insufficient" {
+		t.Errorf("want ConsentRequiredError subject_scope_insufficient, got %v", err)
+	}
+	if f.adapter.vendCalls != 0 {
+		t.Errorf("adapter.vendCalls = %d, want 0: the upstream credential must not be vended", f.adapter.vendCalls)
+	}
+}
+
+func TestDispatchFrontedBroker_OmittedScope_SubjectHoldsSource_Vends(t *testing.T) {
+	f := stdBrokerFixture(t)
+	f.seedFrontingLink(frSourceSlug, frBrokerTargetSlug, resource.ScopeMap{
+		"tool:list": {"readonly"},
+	})
+	f.seedActiveGrant(frUserID, []string{"calendar.readonly"})
+	f.adapter.vendAccessToken = "upstream-token-xyz"
+
+	subj := subjectClaimsForFronting("tool:list", frAgentID, []string{frSourceURI})
+	link := mustGetFrontingLink(t, f, frSourceSlug, frBrokerTargetSlug)
+	resp, err := f.svc.dispatchFrontedBroker(context.Background(), noopSpan(), time.Now(),
+		input.TokenExchangeRequest{ClientID: frAgentID, Resource: frBrokerTargetSlug},
+		subj, f.brokerTarget, f.source, link)
+	if err != nil {
+		t.Fatalf("dispatchFrontedBroker: %v", err)
+	}
+	if resp.AccessToken != "upstream-token-xyz" || f.adapter.vendCalls != 1 {
+		t.Errorf("resp=%+v vendCalls=%d, want the vended token once", resp, f.adapter.vendCalls)
+	}
+}
+
+// -- Who may drive a fronted exchange --
+//
+// The fronting link replaces the user's consent on the target, so it must
+// not be usable by any client holding the token-exchange grant: only the
+// gateway (the source's runtime client) or a client the target's exchange
+// allowlist names.
+
+func TestDispatchMint_Fronted_ForeignCallerRefused(t *testing.T) {
+	f := stdFixture(t)
+	f.seedFrontingLink(frSourceSlug, frTargetSlug, resource.ScopeMap{"A": {"AA"}})
+	subj := subjectClaimsForFronting("A", frAgentID, []string{frSourceURI})
+	for _, scopeParam := range []string{"AA", ""} {
+		resp, _, err := f.dispatchMintFronted(input.TokenExchangeRequest{
+			ClientID: "dcr-registered-stranger",
+			Resource: frTargetSlug,
+			Scope:    scopeParam,
+		}, subj, f.target)
+		if resp != nil || !errors.Is(err, domain.ErrTokenExchangeNotAuthorized) {
+			t.Fatalf("scope=%q: want ErrTokenExchangeNotAuthorized and no token, got resp=%v err=%v", scopeParam, resp, err)
+		}
+		if !strings.Contains(err.Error(), "policy.runtime.client_ids") {
+			t.Errorf("error should name the fix: %v", err)
+		}
+	}
+}
+
+func TestDispatchMint_Fronted_TargetAllowlistedCallerAccepted(t *testing.T) {
+	f := stdFixture(t)
+	f.target.Policy.Exchange.AllowedClientIDs = []string{"gateway-backend"}
+	if err := f.resources.Update(context.Background(), f.target); err != nil {
+		t.Fatal(err)
+	}
+	f.seedFrontingLink(frSourceSlug, frTargetSlug, resource.ScopeMap{"A": {"AA"}})
+	subj := subjectClaimsForFronting("A", frAgentID, []string{frSourceURI})
+	_, parsed, err := f.dispatchMintFronted(input.TokenExchangeRequest{
+		ClientID: "gateway-backend",
+		Resource: frTargetSlug,
+	}, subj, f.target)
+	if err != nil {
+		t.Fatalf("allowlisted caller refused: %v", err)
+	}
+	if parsed.Scope != "AA" {
+		t.Errorf("scope = %q, want AA", parsed.Scope)
+	}
+}
+
+func TestDispatchFrontedBroker_ForeignCallerRefused_NoVend(t *testing.T) {
+	f := stdBrokerFixture(t)
+	f.seedFrontingLink(frSourceSlug, frBrokerTargetSlug, resource.ScopeMap{"tool:list": {"readonly"}})
+	f.seedActiveGrant(frUserID, []string{"calendar.readonly"})
+	f.adapter.vendAccessToken = "upstream-token-xyz"
+	subj := subjectClaimsForFronting("tool:list", frAgentID, []string{frSourceURI})
+	link := mustGetFrontingLink(t, f, frSourceSlug, frBrokerTargetSlug)
+	resp, err := f.svc.dispatchFrontedBroker(context.Background(), noopSpan(), time.Now(),
+		input.TokenExchangeRequest{ClientID: "dcr-registered-stranger", Resource: frBrokerTargetSlug, Scope: "readonly"},
+		subj, f.brokerTarget, f.source, link)
+	if resp != nil || !errors.Is(err, domain.ErrTokenExchangeNotAuthorized) {
+		t.Fatalf("want ErrTokenExchangeNotAuthorized and no token, got resp=%v err=%v", resp, err)
+	}
+	if f.adapter.vendCalls != 0 {
+		t.Errorf("vendCalls = %d, want 0: a foreign caller must not reach the upstream credential", f.adapter.vendCalls)
 	}
 }

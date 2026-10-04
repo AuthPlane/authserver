@@ -147,6 +147,49 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 104,
+      "title": "Authorization Flow & CIMD Latency",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "End-to-end authorization flow duration, from session creation to code issuance (authserver_auth_flow_duration_seconds).",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 10 }, "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 15,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(authserver_auth_flow_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(authserver_auth_flow_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(authserver_auth_flow_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p99", "refId": "C" }
+      ],
+      "title": "Authorization Flow Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Outbound CIMD document fetch round trip (authserver_cimd_fetch_duration_seconds). Cache hits and suppressed fetches contribute no samples.",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 10 }, "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 16,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(authserver_cimd_fetch_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(authserver_cimd_fetch_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(authserver_cimd_fetch_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p99", "refId": "C" }
+      ],
+      "title": "CIMD Fetch Duration",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
       "id": 102,
       "title": "Key Management & OIDC",
       "type": "row"
@@ -157,7 +200,7 @@
         "defaults": { "custom": { "fillOpacity": 15 }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 15 },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 24 },
       "id": 8,
       "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -173,7 +216,7 @@
         "defaults": { "custom": { "fillOpacity": 15 }, "unit": "short" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 15 },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 24 },
       "id": 9,
       "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -188,7 +231,7 @@
         "defaults": { "custom": { "fillOpacity": 10 }, "unit": "s" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 15 },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 24 },
       "id": 10,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -203,7 +246,7 @@
         "defaults": { "custom": { "fillOpacity": 10 }, "unit": "s" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 15 },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 24 },
       "id": 11,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -214,44 +257,45 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
       "id": 103,
       "title": "Broker & HTTP",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Broker-path token exchanges (authplane_token_exchange_total{kind=\"fronted\"}) alongside upstream connection connect / disconnect operations.",
       "fieldConfig": {
         "defaults": { "custom": { "fillOpacity": 15 }, "unit": "ops" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
       "id": 12,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "sum(rate(authserver_token_exchange_total{job=~\"$job\",backend_kind=\"broker\"}[$__rate_interval]))", "legendFormat": "Broker exchange", "refId": "A" },
+        { "expr": "sum(rate(authplane_token_exchange_total{job=~\"$job\",kind=\"fronted\"}[$__rate_interval]))", "legendFormat": "Broker exchange (fronted)", "refId": "A" },
         { "expr": "sum(rate(authserver_connection_connect_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Connect", "refId": "B" },
-        { "expr": "sum(rate(authserver_broker_refresh_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Refresh", "refId": "C" },
-        { "expr": "sum(rate(authserver_connection_disconnect_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Disconnect", "refId": "D" }
+        { "expr": "sum(rate(authserver_connection_disconnect_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "Disconnect", "refId": "C" }
       ],
       "title": "Upstream Connection Operations Rate",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "authserver_token_issuance_duration_seconds restricted to grant_type=\"token_exchange\" (the broker / fronted exchange path). The former vault-vend histogram no longer exists.",
       "fieldConfig": {
         "defaults": { "custom": { "fillOpacity": 10 }, "unit": "s" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
       "id": 13,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (le) (rate(authserver_vault_vend_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p50", "refId": "A" },
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(authserver_vault_vend_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p95", "refId": "B" },
-        { "expr": "histogram_quantile(0.99, sum by (le) (rate(authserver_vault_vend_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p99", "refId": "C" }
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(authserver_token_issuance_duration_seconds_bucket{job=~\"$job\",grant_type=\"token_exchange\"}[$__rate_interval])))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(authserver_token_issuance_duration_seconds_bucket{job=~\"$job\",grant_type=\"token_exchange\"}[$__rate_interval])))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(authserver_token_issuance_duration_seconds_bucket{job=~\"$job\",grant_type=\"token_exchange\"}[$__rate_interval])))", "legendFormat": "p99", "refId": "C" }
       ],
-      "title": "Vault Vend Duration",
+      "title": "Token Exchange Issuance Duration",
       "type": "timeseries"
     },
     {
@@ -260,7 +304,7 @@
         "defaults": { "custom": { "fillOpacity": 10 }, "unit": "s" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
       "id": 14,
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -268,6 +312,61 @@
         { "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(authserver_http_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval])))", "legendFormat": "p95 {{http_route}}", "refId": "B" }
       ],
       "title": "HTTP Duration by Route",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "id": 105,
+      "title": "XAA / Federation",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Cross-app access policy evaluations (authplane_xaa_policy_evaluation_total).",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 }, "unit": "ops" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 42 },
+      "id": 17,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(authplane_xaa_policy_evaluation_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "{{outcome}}", "refId": "A" }
+      ],
+      "title": "XAA Policy Evaluations by Outcome",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Subject-mapping resolutions against the federated IdP (authplane_xaa_subject_resolutions_total).",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 }, "unit": "ops" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 42 },
+      "id": 18,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(authplane_xaa_subject_resolutions_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "{{outcome}}", "refId": "A" }
+      ],
+      "title": "XAA Subject Resolutions by Outcome",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Admin operations on XAA IdP records (authplane_xaa_idp_operations_total).",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 }, "unit": "ops" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 42 },
+      "id": 19,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (op) (rate(authplane_xaa_idp_operations_total{job=~\"$job\"}[$__rate_interval]))", "legendFormat": "{{op}}", "refId": "A" }
+      ],
+      "title": "XAA IdP Operations by Op",
       "type": "timeseries"
     }
   ],

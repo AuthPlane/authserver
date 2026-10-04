@@ -208,6 +208,10 @@ refresh tokens unconditionally.
 5. Open **Clients** → **New client**. Same shape as
    [mcp-gateway-mint.md](mcp-gateway-mint.md) Admin UI Step 4 with
    scope `tool:list tool:create`.
+6. Open **Resources** → `mcp-gw` → **Runtime clients (act AS this
+   resource)** and add the gateway's `client_id`. Only a client listed
+   here may exchange through the fronting link; any other caller gets
+   `access_denied` (see [Who may use the fronting link](mcp-gateway-mint.md#who-may-use-the-fronting-link)).
 
 ### Via CLI
 
@@ -274,6 +278,12 @@ authserver admin client create \
   --grant-types=client_credentials,urn:ietf:params:oauth:grant-type:token-exchange \
   --auth-method=client_secret_basic \
   --scope="tool:list tool:create"
+
+# 6. Declare it as the gateway (use the client_id printed by step 5).
+#    Only a client listed here may exchange through the fronting link.
+authserver admin resource runtime-client add \
+  --slug=mcp-gw \
+  --client-id=<gateway-client-id>
 ```
 
 ### Via REST API
@@ -327,6 +337,11 @@ curl -X POST "$ADMIN/admin/clients" \
        "grant_types":["client_credentials","urn:ietf:params:oauth:grant-type:token-exchange"],
        "token_endpoint_auth_method":"client_secret_basic",
        "scope":"tool:list tool:create"}'
+
+# 6. Declare it as the gateway (client_id from the step 5 response)
+curl -X POST "$ADMIN/admin/resources/mcp-gw/policy/runtime/client-ids" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"client_id":"<gateway-client-id>"}'
 ```
 
 ### Run the gateway
@@ -344,7 +359,8 @@ The exchange goes through `TokenExchangeService` → `BrokerIssuer`:
 | Authenticate caller | Validates Basic auth → resolves the gateway's `client_id`. |
 | Resolve `subject_token` | Pulls out `aud` (= `mcp-gw` URI) and `sub` (= agent). |
 | Per-MCP consent gate | `consent_grants(user, agent, mcp-gw)` lookup — required at the **source** MCP. |
-| Fronting-link gate | `fronting_links(source=mcp-gw, target=google-cal)` lookup — hit → fronted path. The fronting link bypasses the broker actor-attestation gate that would otherwise require `policy.runtime.client_ids`. |
+| Fronting-link gate | `fronting_links(source=mcp-gw, target=google-cal)` lookup — hit → fronted path. The link replaces the broker actor-attestation gate. |
+| Gateway check | The caller must be listed in `mcp-gw`'s `policy.runtime.client_ids` (or in `google-cal`'s `policy.exchange.allowed_client_ids`). Otherwise `access_denied` and no upstream call; audit `reason=fronting_caller_not_authorized`. |
 | `broker_grants` lookup | `broker_grants(user, google_provider)` — miss → returns `consent_required` with `consent_url`. |
 | Vend | `output.BrokerProtocol` adapter (`oauth` for Google) calls upstream `token_url` with the stored refresh token; per request, never cached. Three-bound enforcement: requested ⊆ `consent_grants.scopes` ⊆ `broker_grants.scopes_granted`. |
 | Issue + audit | `issuances(subject_user_id, client_id, resource_id=google-cal, agent_id, agent_chain)` row written. `audit_events` action `token.exchanged`; `detail` records `type=broker_dispatch chain_kind=fronted target_kind=broker via_link=mcp-gw->google-cal`. **The wire token (upstream bearer) carries no chain claims** — the chain is audit-only. |
@@ -405,8 +421,11 @@ sqlite3 data/authserver.db \
 ```
 
 `detail` carries `type=broker_dispatch chain_kind=fronted target_kind=broker
-via_link=mcp-gw->google-cal`, with the original agent's `sub` carried
-on the `audit_events.actor_id` column.
+via_link=mcp-gw->google-cal`. The user's `sub` is on the
+`audit_events.actor_id` column; the gateway's OAuth `client_id` — the
+client that called `/oauth/token` — is on the `client_id` column and in
+`actor_client=`; the agent the user authorized is in `subject_client=`.
+`token.exchange_denied` rows on this path carry the same fields.
 
 ## See also
 

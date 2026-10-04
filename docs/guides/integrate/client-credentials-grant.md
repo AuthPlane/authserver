@@ -135,11 +135,17 @@ Machine tokens are JWTs (RFC 9068). The defining difference from user tokens: `s
 
 ## Scope resolution
 
+A `client_credentials` client is not tied to any one Resource, so when the request names a `resource`, every scope on the token must be both in the client's registered set and declared in that Resource's scope catalog.
+
 | Request includes `scope`? | Outcome |
 |---|---|
-| Yes, all requested scopes are in the client's registered set | Token gets exactly the requested scopes |
+| Yes, all requested scopes are in the client's registered set (and, with `resource=`, in the Resource's catalog) | Token gets exactly the requested scopes |
 | Yes, but some requested scopes are NOT in the registered set | Request fails with `invalid_scope` |
-| No | Token gets ALL the client's registered scopes |
+| Yes, with `resource=`, but some requested scopes are NOT in the Resource's catalog | Request fails with `invalid_scope` |
+| No, with `resource=` | Token gets the client's registered scopes that the Resource declares; if there are none, the request fails with `invalid_scope` |
+| No, without `resource=` | Token gets ALL the client's registered scopes (audienced to the issuer) |
+
+A `resource` that is not registered fails with `invalid_target` (RFC 8707 §2).
 
 Always request only what you need — a stolen token with fewer scopes does less damage.
 
@@ -170,6 +176,8 @@ echo "$ACCESS_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss,sub,aud,sc
 | `invalid_scope` — "created through dynamic registration" | The client came from `POST /oauth/register` or CIMD, which create user-delegated clients | Create a machine client instead: `authserver admin client create --grant-types client_credentials --scope '...'`. Patching the DCR client is not the fix |
 | `invalid_scope` — "the client has no registered scopes" | An admin-provisioned client was created without any scope | Grant them: `authserver admin client update --id <id> --scope '...'` |
 | `invalid_scope` — "exceeds the client's registered scopes" | The client has scopes, but the request asked for one outside that set | Narrow the request, or widen the client with `authserver admin client update --id <id> --scope '...'`, then confirm the result with `GET /admin/clients/{id}`, which returns the client's current `scope`. The CLI does not print the ceiling yet |
+| `invalid_scope` — "not declared by the target resource" / "none of the client's registered scopes is declared by the target resource" | The scope asked for (or, with `scope` omitted, every scope the client holds) is not in the catalog of the Resource named by `resource=` | Request a scope that Resource declares (`GET /admin/resources`), or add the scope to the Resource's catalog if it belongs there |
+| `invalid_target` — "is not a registered resource" | The `resource=` value matches no registered Resource URI | Use the Resource's `uri` exactly as registered (`GET /admin/resources`) |
 | Token mints fine but MCP server rejects with audience mismatch | Missing or wrong `resource=` on the token request | Add `-d "resource=<canonical-uri>"` matching the Resource's `--uri` byte-for-byte |
 | Stolen `client_secret` | Logs, env-var dumps, leaked Docker images | (1) `PATCH /admin/clients/{id}/suspend`, (2) `POST /oauth/revoke` for live tokens, (3) `authserver admin client rotate-secret --id <id>` ([cli.md#cli-admin-client-rotate-secret](../../reference/cli.md#cli-admin-client-rotate-secret)), (4) audit logs |
 

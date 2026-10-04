@@ -568,7 +568,7 @@ func newJWTBearerWithPolicySetup(t *testing.T, subjectMode string) *jwtBearerTes
 		obs, services.NewAuditService(setup.h.Stores.Audit, obs),
 	)
 	mappingSvc := services.NewSubjectMappingService(
-		setup.h.Stores.SubjectMapping, setup.h.Stores.IDP, obs,
+		setup.h.Stores.SubjectMapping, setup.h.Stores.IDP, setup.h.Stores.User, obs,
 	)
 	setup.svc.WithPolicy(policySvc, mappingSvc)
 	return setup
@@ -863,7 +863,9 @@ func TestJWTBearerGrant_SubjectMapping_ExplicitMapping(t *testing.T) {
 		t.Fatalf("save policy: %v", err)
 	}
 
-	// Create a subject mapping for user@acme.com → local-user-123.
+	// Create a subject mapping for user@acme.com → local-user-123, an
+	// existing local account.
+	testdata.EnsureUser(t, setup.h.Stores.User, "local-user-123")
 	if err := setup.h.Stores.SubjectMapping.Save(ctx, xaa.SubjectMapping{
 		ID:          crypto.GenerateRandomString(16),
 		IDPID:       idpEntity.ID,
@@ -1420,5 +1422,191 @@ func TestJWTBearerGrant_RequireResource_RequestResourceAccepted(t *testing.T) {
 	}
 	if aud := audienceOf(t, resp.AccessToken); len(aud) != 1 || aud[0] != "https://api.example.com" {
 		t.Errorf("aud = %v, want [https://api.example.com]", aud)
+	}
+}
+
+// --- Empty client ceiling and disabled mapped users ---
+
+// savePermissivePolicy stores an enabled policy for the test IdP with the
+// given scope maximum (nil = no scope restriction).
+func (s *jwtBearerTestSetup) savePermissivePolicy(t *testing.T, scopes []string) {
+	t.Helper()
+	ctx := context.Background()
+	idpEntity, err := s.h.Stores.IDP.GetByIssuer(ctx, idpIssuer)
+	if err != nil {
+		t.Fatalf("get idp: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := s.h.Stores.XAAPolicy.Save(ctx, xaa.Policy{
+		ID: crypto.GenerateRandomString(16), Name: "allow", IDPID: idpEntity.ID,
+		Scopes: scopes, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("save policy: %v", err)
+	}
+}
+
+// wantJWTBearerDenied asserts a jwt_bearer.denied row carries reason.
+func (s *jwtBearerTestSetup) wantJWTBearerDenied(t *testing.T, clientID, reason string) {
+	t.Helper()
+	rows, err := s.h.Stores.Audit.Query(context.Background(), output.AuditFilter{
+		Action: "jwt_bearer.denied", ClientID: clientID, Limit: 50,
+	})
+	if err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	for _, r := range rows {
+		if r.Detail == "reason="+reason {
+			return
+		}
+	}
+	t.Fatalf("no jwt_bearer.denied row with reason=%s for %s (rows: %+v)", reason, clientID, rows)
+}
+
+// TestJWTBearerGrant_EmptyClientCeiling_PolicyCannotFill pins the machine-grant
+// rule: a client with no registered scope is granted nothing. Before, an
+// assertion and a request that both omitted scope let the XAA policy's
+// maximum become the issued scope.
+func TestJWTBearerGrant_EmptyClientCeiling_PolicyCannotFill(t *testing.T) {
+	setup := newJWTBearerWithPolicySetup(t, "auto_map")
+	setup.savePermissivePolicy(t, []string{"read"})
+	c, secret := setup.createJWTBearerClient(t, "")
+
+	assertion := setup.validAssertion(c.ID)
+	assertion.Scope = ""
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion: setup.signTestIDJAG(t, assertion), ClientID: c.ID, ClientSecret: secret,
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("err = %v (resp %+v), want ErrInvalidScope for an empty client ceiling", err, resp)
+	}
+	setup.wantJWTBearerDenied(t, c.ID, "client_scope_empty")
+}
+
+// TestJWTBearerGrant_EmptyClientCeiling_NoPolicy_Refused pins the same rule
+// without the policy engine: no scope-less token is minted either.
+func TestJWTBearerGrant_EmptyClientCeiling_NoPolicy_Refused(t *testing.T) {
+	setup := newJWTBearerTestSetup(t)
+	c, secret := setup.createJWTBearerClient(t, "")
+
+	assertion := setup.validAssertion(c.ID)
+	assertion.Scope = ""
+	_, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion: setup.signTestIDJAG(t, assertion), ClientID: c.ID, ClientSecret: secret,
+	})
+	if !errors.Is(err, domain.ErrInvalidScope) {
+		t.Fatalf("err = %v, want ErrInvalidScope", err)
+	}
+}
+
+// mapToLocalUser creates a local user, disabled when asked, and maps the test
+// assertion's subject (user@acme.com) to it.
+func (s *jwtBearerTestSetup) mapToLocalUser(t *testing.T, userID string, disabled bool) {
+	t.Helper()
+	ctx := context.Background()
+	testdata.EnsureUser(t, s.h.Stores.User, userID)
+	if disabled {
+		testdata.DisableUser(t, s.h.Stores.User, userID)
+	}
+	idpEntity, err := s.h.Stores.IDP.GetByIssuer(ctx, idpIssuer)
+	if err != nil {
+		t.Fatalf("get idp: %v", err)
+	}
+	if err := s.h.Stores.SubjectMapping.Save(ctx, xaa.SubjectMapping{
+		ID: crypto.GenerateRandomString(16), IDPID: idpEntity.ID,
+		IDPSubject: "user@acme.com", LocalUserID: userID, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save mapping: %v", err)
+	}
+}
+
+// TestJWTBearerGrant_MappedLocalUserDisabled_InvalidGrant pins that a subject
+// mapping to a disabled local user stops the grant, as code redemption and
+// refresh do for that account.
+func TestJWTBearerGrant_MappedLocalUserDisabled_InvalidGrant(t *testing.T) {
+	for _, mode := range []string{"auto_map", "strict"} {
+		t.Run(mode, func(t *testing.T) {
+			setup := newJWTBearerWithPolicySetup(t, mode)
+			setup.savePermissivePolicy(t, nil)
+			setup.mapToLocalUser(t, "bob-local", true)
+			c, secret := setup.createJWTBearerClient(t, "read write")
+
+			_, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+				Assertion: setup.signTestIDJAG(t, setup.validAssertion(c.ID)), ClientID: c.ID, ClientSecret: secret, Scope: "read",
+			})
+			if !errors.Is(err, domain.ErrInvalidGrant) {
+				t.Fatalf("err = %v, want ErrInvalidGrant for a disabled mapped user", err)
+			}
+			setup.wantJWTBearerDenied(t, c.ID, "subject_inactive")
+		})
+	}
+}
+
+// TestJWTBearerGrant_MappedLocalUserActive_Issued is the positive half.
+func TestJWTBearerGrant_MappedLocalUserActive_Issued(t *testing.T) {
+	setup := newJWTBearerWithPolicySetup(t, "strict")
+	setup.savePermissivePolicy(t, nil)
+	setup.mapToLocalUser(t, "bob-local", false)
+	c, secret := setup.createJWTBearerClient(t, "read write")
+
+	resp, err := setup.svc.GrantJWTBearer(context.Background(), input.JWTBearerRequest{
+		Assertion: setup.signTestIDJAG(t, setup.validAssertion(c.ID)), ClientID: c.ID, ClientSecret: secret, Scope: "read",
+	})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	tok, _ := jwt.ParseSigned(resp.AccessToken, []jose.SignatureAlgorithm{jose.ES256})
+	var claims map[string]any
+	_ = tok.UnsafeClaimsWithoutVerification(&claims)
+	if claims["sub"] != "bob-local" {
+		t.Errorf("sub = %v, want bob-local", claims["sub"])
+	}
+}
+
+// A mapping whose local user no longer exists (deleted after the mapping was
+// made) must stop issuing tokens for that account, as a disabled one does.
+func TestJWTBearerGrant_MappedLocalUserMissing_InvalidGrant(t *testing.T) {
+	setup := newJWTBearerWithPolicySetup(t, "auto_map")
+	setup.savePermissivePolicy(t, nil)
+	ctx := context.Background()
+	idpEntity, err := setup.h.Stores.IDP.GetByIssuer(ctx, idpIssuer)
+	if err != nil {
+		t.Fatalf("get idp: %v", err)
+	}
+	if err := setup.h.Stores.SubjectMapping.Save(ctx, xaa.SubjectMapping{
+		ID: crypto.GenerateRandomString(16), IDPID: idpEntity.ID,
+		IDPSubject: "user@acme.com", LocalUserID: "deleted-local-user", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save mapping: %v", err)
+	}
+	c, secret := setup.createJWTBearerClient(t, "read write")
+	_, err = setup.svc.GrantJWTBearer(ctx, input.JWTBearerRequest{
+		Assertion: setup.signTestIDJAG(t, setup.validAssertion(c.ID)), ClientID: c.ID, ClientSecret: secret, Scope: "read",
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant for a mapping to a missing user", err)
+	}
+	setup.wantJWTBearerDenied(t, c.ID, "subject_inactive")
+}
+
+// Creating a mapping refuses a local_user_id that names no account.
+func TestSubjectMapping_CreateRefusesUnknownLocalUser(t *testing.T) {
+	setup := newJWTBearerWithPolicySetup(t, "auto_map")
+	ctx := context.Background()
+	idpEntity, err := setup.h.Stores.IDP.GetByIssuer(ctx, idpIssuer)
+	if err != nil {
+		t.Fatalf("get idp: %v", err)
+	}
+	obs := observability.NewNoop()
+	svc := services.NewSubjectMappingService(setup.h.Stores.SubjectMapping, setup.h.Stores.IDP, setup.h.Stores.User, obs)
+	if _, err := svc.CreateMapping(ctx, input.CreateMappingRequest{
+		IDPID: idpEntity.ID, IDPSubject: "user@acme.com", LocalUserID: "nobody",
+	}); !errors.Is(err, domain.ErrUserNotFound) {
+		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+	testdata.EnsureUser(t, setup.h.Stores.User, "real-user")
+	if _, err := svc.CreateMapping(ctx, input.CreateMappingRequest{
+		IDPID: idpEntity.ID, IDPSubject: "user@acme.com", LocalUserID: "real-user",
+	}); err != nil {
+		t.Fatalf("mapping to an existing user refused: %v", err)
 	}
 }

@@ -75,6 +75,26 @@ make docs-check
 If anything is red, fix it before tagging — there's no clean way to
 unship a tag once it has triggered goreleaser.
 
+Then verify the image you are about to ship, not only the source tree:
+
+```bash
+# skip: builds and runs containers
+docker build -f build/Dockerfile -t authplane/authserver:X.Y.Z-rc .
+SMOKE_AUTHSERVER_IMAGE=authplane/authserver:X.Y.Z-rc make docs-smoke
+```
+
+`docs-smoke` runs every example under `examples/` — the Python,
+TypeScript and Go SDK clients — against that image.
+
+Finally, upgrade real data. For the previous patch and the previous minor,
+on SQLite and on Postgres: start the published image, provision a
+resource, clients and a user and mint and revoke a token through the API,
+stop it, start the candidate on the same volume, and confirm that every
+pre-upgrade row is intact, each migration is recorded once, the old token
+still introspects active, the revoked one stays revoked, and the old
+client secret still mints. Then start the previous image again on the
+upgraded data: a patch must roll back cleanly.
+
 ## 5. Land on `main` and tag
 
 ```bash

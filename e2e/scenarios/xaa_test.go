@@ -276,11 +276,12 @@ func TestXAA_SubjectMapping_ExplicitMap(t *testing.T) {
 		IDPID: idpID,
 	})
 
-	// Create explicit subject mapping.
+	// Create explicit subject mapping to an existing local account.
+	localUserID := h.CreateUser("mapped-alice@example.com", "password123")
 	h.CreateSubjectMapping(input.CreateMappingRequest{
 		IDPID:       idpID,
 		IDPSubject:  "mapped@testcorp.com",
-		LocalUserID: "local-alice-123",
+		LocalUserID: localUserID,
 	})
 
 	clientID, clientSecret := h.RegisterConfidentialClient(
@@ -298,8 +299,8 @@ func TestXAA_SubjectMapping_ExplicitMap(t *testing.T) {
 	// Verify the subject in the token claims is the local user.
 	claims := parseJWTClaims(t, tr.AccessToken)
 	sub, _ := claims["sub"].(string)
-	if sub != "local-alice-123" {
-		t.Errorf("sub = %q, want %q", sub, "local-alice-123")
+	if sub != localUserID {
+		t.Errorf("sub = %q, want %q", sub, localUserID)
 	}
 }
 

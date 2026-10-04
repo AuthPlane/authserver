@@ -138,35 +138,35 @@ func (s *ClientCredentialsService) Exchange(ctx context.Context, req input.Clien
 		return nil, domain.ErrUnauthorizedClient
 	}
 
-	// 3. Determine effective scopes.
-	clientScopes := scope.Parse(c.Scope)
-	var effectiveScopes scope.Set
-
-	if req.Scope != "" {
-		requestedScopes := scope.Parse(req.Scope)
-		// Fail closed when the request exceeds what the client is registered
-		// for. Silent narrowing (Intersect) hid overbroad or buggy client
-		// behavior; RFC 6749 §5.2 names invalid_scope for this case.
-		if !requestedScopes.IsSubset(clientScopes) {
-			scopeErr := scopeDenialError(c, clientScopes)
-			span.RecordError(scopeErr)
-			span.SetStatus(codes.Error, scopeErr.Error())
-			s.recordDenied(ctx, req.ClientID, "invalid_scope")
-			return nil, scopeErr
+	// 3. Resolve the resource parameter (RFC 8707). Before scope, because the
+	// target's catalog is one of the two bounds on what may be issued. An
+	// unregistered resource is invalid_target (RFC 8707 §2), the same answer
+	// the authorization_code and refresh_token grants give.
+	var catalog scope.Set
+	if req.Resource != "" {
+		info, resErr := s.lookupResource(ctx, req.Resource)
+		if resErr != nil {
+			span.RecordError(resErr)
+			span.SetStatus(codes.Error, resErr.Error())
+			return nil, resErr
 		}
-		effectiveScopes = requestedScopes
-	} else {
-		// No scope requested — use all registered scopes.
-		effectiveScopes = clientScopes
+		if info == nil {
+			targetErr := fmt.Errorf("%w: resource %q is not a registered resource", domain.ErrInvalidTarget, req.Resource)
+			span.RecordError(targetErr)
+			span.SetStatus(codes.Error, targetErr.Error())
+			s.recordDenied(ctx, req.ClientID, "invalid_target")
+			return nil, targetErr
+		}
+		catalog = scope.New(info.Scopes...)
 	}
 
-	// 4. Validate resource parameter (RFC 8707).
-	if req.Resource != "" && !s.isKnownResource(ctx, req.Resource) {
-		resourceErr := fmt.Errorf("%w: unknown resource %q", domain.ErrInvalidScope, req.Resource)
-		span.RecordError(resourceErr)
-		span.SetStatus(codes.Error, resourceErr.Error())
-		s.recordDenied(ctx, req.ClientID, "invalid_resource")
-		return nil, resourceErr
+	// 4. Determine effective scopes.
+	effectiveScopes, scopeErr := clientCredentialsScope(c, req.Scope, req.Resource != "", catalog)
+	if scopeErr != nil {
+		span.RecordError(scopeErr)
+		span.SetStatus(codes.Error, scopeErr.Error())
+		s.recordDenied(ctx, req.ClientID, "invalid_scope")
+		return nil, scopeErr
 	}
 
 	// 5. Validate DPoP proof if present (RFC 9449).
@@ -240,7 +240,7 @@ func (s *ClientCredentialsService) Exchange(ctx context.Context, req input.Clien
 		KeyID:      sk.KeyID,
 	}
 
-	accessToken, err := crypto.SignAccessToken(kp, claims)
+	accessToken, err := crypto.SignAccessTokenContext(ctx, kp, claims)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -494,22 +494,70 @@ func (s *ClientCredentialsService) recordDPoPMetric(ctx context.Context, err err
 	}
 }
 
-// isKnownResource checks whether the resource URI is registered.
-func (s *ClientCredentialsService) isKnownResource(ctx context.Context, resource string) bool {
+// lookupResource returns the registered resource whose URI is uri, or nil
+// when none is. A store failure is returned as an error rather than read as
+// "unknown": answering invalid_target for an outage would tell the client its
+// request is wrong when the server is.
+func (s *ClientCredentialsService) lookupResource(ctx context.Context, uri string) (*ResourceInfo, error) {
 	if s.resources == nil {
-		return false
+		return nil, nil
 	}
 	resources, err := s.resources.List(ctx)
 	if err != nil {
-		s.logger.WarnContext(ctx, "resource lookup failed, treating resource as unknown", "error", err)
-		return false
+		return nil, fmt.Errorf("list resources: %w", err)
 	}
-	for _, r := range resources {
-		if r.URI == resource {
-			return true
+	for i := range resources {
+		if resources[i].URI == uri {
+			return &resources[i], nil
 		}
 	}
-	return false
+	return nil, nil
+}
+
+// clientCredentialsScope decides the scope a client_credentials token
+// carries. Nothing on this grant ties a client to a resource, so when the
+// request names one (hasResource) the token is bounded twice: by the client's
+// registered ceiling and by the resource's catalog. A requested scope outside
+// either is refused; an omitted scope becomes ceiling ∩ catalog, and an empty
+// intersection is refused rather than issued as a scope-less token audienced
+// to the resource. Without that last rule a client with no ceiling at all —
+// one registered anonymously through open DCR — could mint for any resource
+// simply by omitting scope.
+//
+// Without a resource the token is audienced to the issuer, which no resource
+// server accepts, so only the ceiling applies and an omitted scope is the
+// whole ceiling, as documented.
+func clientCredentialsScope(c *client.Client, requested string, hasResource bool, catalog scope.Set) (scope.Set, error) {
+	ceiling := scope.Parse(c.Scope)
+
+	// A whitespace-only scope parses to nothing and is treated as omitted, so
+	// it cannot be used to obtain an empty-scope token for a resource.
+	if asked := scope.Parse(requested); !asked.IsEmpty() {
+		// Fail closed when the request exceeds what the client is registered
+		// for. Silent narrowing (Intersect) hid overbroad or buggy client
+		// behavior; RFC 6749 §5.2 names invalid_scope for this case.
+		if !asked.IsSubset(ceiling) {
+			return nil, scopeDenialError(c, ceiling)
+		}
+		if hasResource && !asked.IsSubset(catalog) {
+			return nil, fmt.Errorf("%w: the requested scope is not declared by the target resource",
+				domain.ErrInvalidScope)
+		}
+		return asked, nil
+	}
+
+	if !hasResource {
+		return ceiling, nil
+	}
+	effective := ceiling.Intersect(catalog)
+	if effective.IsEmpty() {
+		if ceiling.IsEmpty() {
+			return nil, scopeDenialError(c, ceiling)
+		}
+		return nil, fmt.Errorf("%w: none of the client's registered scopes is declared by the "+
+			"target resource", domain.ErrInvalidScope)
+	}
+	return effective, nil
 }
 
 // scopeDenialError explains why a requested scope was refused. The token
@@ -533,11 +581,13 @@ func (s *ClientCredentialsService) isKnownResource(ctx context.Context, resource
 // later granted scopes to is diagnosed as overreaching rather than blamed on
 // the door it came through.
 //
-// Only the first two cases are reachable in v0.2.0. Authorize calls this only
-// when a ceiling is set (case 1), and client_credentials only for a client
-// holding that grant (case 2). The empty-ceiling branches below are the
-// v0.3.0 path, when an absent ceiling starts being refused; they are written
-// now so the diagnosis lands with the change rather than after it.
+// Authorize calls this only when a ceiling is set (case 1). client_credentials
+// calls it for a client holding that grant, so of the empty-ceiling cases it
+// reaches the self-registered machine client (case 2) and the
+// admin-provisioned client never granted scopes (the default case). The
+// delegated empty-ceiling branch is the v0.3.0 path, when an absent ceiling
+// starts being refused on authorize; it is written now so the diagnosis lands
+// with the change rather than after it.
 func scopeDenialError(c *client.Client, clientScopes scope.Set) error {
 	// ASCII only: RFC 6749 5.2 defines error_description as NQSCHAR.
 	switch {

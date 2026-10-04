@@ -60,10 +60,10 @@ func TestNonFrontedMintToBroker_ReturnsFrontingLinkMissing(t *testing.T) {
 		t.Errorf("error = %q, want invalid_request", oe.Error)
 	}
 	for _, want := range []string{
-		fbGWSlug,         // source slug named
-		fbCalSlug,        // target slug named
-		"fronting_links", // operator-facing keyword
-		"docs/how-to/topologies/mcp-gateway-broker.md", // doc pointer
+		fbGWSlug,                                // source slug named
+		fbCalSlug,                               // target slug named
+		"fronting_links",                        // operator-facing keyword
+		"docs/topologies/mcp-gateway-broker.md", // doc pointer
 	} {
 		if !strings.Contains(oe.ErrorDescription, want) {
 			t.Errorf("error_description missing %q\ngot: %s", want, oe.ErrorDescription)

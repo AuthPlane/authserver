@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (TypeScript)
 
 <!-- loccount:begin -->
-**Auth-specific code: 6 lines · Total example: 62 lines · SDK: ts-sdk 0.4.0**
+**Auth-specific code: 6 lines · Total example: 62 lines · SDK: ts-sdk 0.5.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP
