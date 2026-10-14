@@ -68,6 +68,7 @@ authserver release.
 make ci-local
 make test-integration
 make test-integration-postgres
+make test-integration-vault
 make test-e2e
 make docs-check
 ```

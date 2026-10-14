@@ -65,8 +65,9 @@ func TestKeyStoreListener_ReceivesNotification(t *testing.T) {
 		listenerDone <- listener.Run(ctx)
 	}()
 
-	// Give the listener time to connect and issue LISTEN.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the listener to connect: it reloads once right after LISTEN.
+	waitForCount(t, &reloadCount, 1)
+	base := reloadCount.Load()
 
 	// Save a key — this triggers a NOTIFY via the database trigger.
 	k := newHATestSigningKey(t, "kid-listener-test")
@@ -76,7 +77,7 @@ func TestKeyStoreListener_ReceivesNotification(t *testing.T) {
 
 	// Wait for the notification to propagate (should be <100ms).
 	deadline := time.After(5 * time.Second)
-	for reloadCount.Load() == 0 {
+	for reloadCount.Load() == base {
 		select {
 		case <-deadline:
 			t.Fatal("timeout waiting for listener reload callback")
@@ -85,9 +86,8 @@ func TestKeyStoreListener_ReceivesNotification(t *testing.T) {
 		}
 	}
 
-	got := reloadCount.Load()
-	if got < 1 {
-		t.Errorf("expected at least 1 reload call, got %d", got)
+	if got := reloadCount.Load(); got <= base {
+		t.Errorf("expected a reload after the notification, got %d (baseline %d)", got, base)
 	}
 
 	// Cancel and verify clean shutdown.
@@ -128,8 +128,9 @@ func TestKeyStoreListener_MultipleNotifications(t *testing.T) {
 		_ = listener.Run(ctx)
 	}()
 
-	// Give the listener time to connect.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the listener to connect: it reloads once right after LISTEN.
+	waitForCount(t, &reloadCount, 1)
+	base := reloadCount.Load()
 
 	// Save multiple keys — each triggers a notification.
 	for i, kid := range []string{"kid-multi-1", "kid-multi-2", "kid-multi-3"} {
@@ -143,18 +144,17 @@ func TestKeyStoreListener_MultipleNotifications(t *testing.T) {
 
 	// Wait for all notifications to propagate.
 	deadline := time.After(5 * time.Second)
-	for reloadCount.Load() < 3 {
+	for reloadCount.Load() < base+3 {
 		select {
 		case <-deadline:
-			t.Fatalf("timeout: expected at least 3 reload calls, got %d", reloadCount.Load())
+			t.Fatalf("timeout: expected at least 3 reload calls after connecting, got %d", reloadCount.Load()-base)
 		default:
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
 
-	got := reloadCount.Load()
-	if got < 3 {
-		t.Errorf("expected at least 3 reload calls, got %d", got)
+	if got := reloadCount.Load() - base; got < 3 {
+		t.Errorf("expected at least 3 reload calls after connecting, got %d", got)
 	}
 
 	cancel()
@@ -218,6 +218,11 @@ func TestKeyStoreListener_NotifyTriggersReload_Within500ms(t *testing.T) {
 		_ = listener2.Run(ctx2)
 	}()
 	time.Sleep(500 * time.Millisecond)
+	// Discard the reload the listener does right after LISTEN.
+	select {
+	case <-reloadCh:
+	default:
+	}
 
 	saveStart = time.Now()
 	k := newHATestSigningKey(t, "kid-timing-test")
@@ -236,4 +241,72 @@ func TestKeyStoreListener_NotifyTriggersReload_Within500ms(t *testing.T) {
 	}
 
 	cancel2()
+}
+
+// waitForCount waits until c reaches at least n.
+func waitForCount(t *testing.T, c *atomic.Int32, n int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.Load() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout: count %d, want at least %d", c.Load(), n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+type countingInvalidator struct{ n atomic.Int32 }
+
+func (c *countingInvalidator) InvalidateCache(context.Context) error {
+	c.n.Add(1)
+	return nil
+}
+
+// A rotation committed while the listener's connection is down sends a
+// notification nobody hears. On reconnecting, the listener invalidates the
+// cached key and reloads anyway, so the rotation is picked up.
+func TestKeyStoreListener_ReloadsAfterReconnect(t *testing.T) {
+	db := testdata.SetupTestPGDB(t, pgContainerDSN)
+	obs := observability.NewNoop()
+	enc, err := aesmaster.New(testMasterKeyHex, obs)
+	if err != nil {
+		t.Fatalf("create encryptor: %v", err)
+	}
+	store := pgadapter.NewHAKeyStore(db.Pool, enc, obs)
+
+	var reloads atomic.Int32
+	inv := &countingInvalidator{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listener := pgadapter.NewKeyStoreListener(testDBDSN(t, db.Pool), inv, func(context.Context) error {
+		reloads.Add(1)
+		return nil
+	}, obs)
+	go func() { _ = listener.Run(ctx) }()
+	waitForCount(t, &reloads, 1)
+
+	// Cut the listener's connection, then rotate before it can reconnect
+	// (the first reconnect waits a second).
+	var dbName string
+	if err := db.Pool.QueryRow(ctx, `SELECT current_database()`).Scan(&dbName); err != nil {
+		t.Fatalf("current database: %v", err)
+	}
+	tag, err := db.Pool.Exec(ctx,
+		`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+		  WHERE datname = $1 AND query ILIKE 'LISTEN%' AND pid <> pg_backend_pid()`, dbName)
+	if err != nil {
+		t.Fatalf("terminate listener connection: %v", err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("terminated %d listener connections, want 1", tag.RowsAffected())
+	}
+	before, invBefore := reloads.Load(), inv.n.Load()
+	if err := store.Save(ctx, newHATestSigningKey(t, "kid-during-outage")); err != nil {
+		t.Fatalf("save during the outage: %v", err)
+	}
+
+	waitForCount(t, &reloads, before+1)
+	if inv.n.Load() <= invBefore {
+		t.Error("the listener reloaded after reconnecting without invalidating the cached key")
+	}
 }

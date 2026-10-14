@@ -124,7 +124,7 @@ All endpoints are documented from their route registration site in `api/public/*
 **Auth** — none (public; request-body parameters identify the caller)  
 **Source** — `api/public/wellknown/routes.go:44`
 
-**Response 200** — JWKS document (public keys only). Cache-Control `max-age=300`.
+**Response 200** — JWKS document (public keys only): the current signing key and at most one previous key, or `{"keys":[]}` until the first key exists. Cache-Control `public, max-age=3600`. The server caches the document for up to 60 seconds, and reloads it before signing with a key it does not carry.
 
 ---
 
@@ -345,7 +345,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Auth** — none (public; request-body parameters identify the caller)  
 **Source** — `api/public/oauth/routes.go:176`
 
-**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009).
+**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009), also for an unknown, foreign or already revoked token. **Response 503** — `temporarily_unavailable` with `Retry-After`: a store could not record the revocation, so the token may still be valid and the client should retry (RFC 7009 §2.2.1).
 
 ---
 
@@ -805,7 +805,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Auth** — `Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY`  
 **Source** — `api/admin/routes.go:117`
 
-**Response 200** — [`rotateKeyResponse`](#dto-rotate-key-response).
+Makes a new key current; the key that was current becomes the previous key, and the key before it leaves the JWKS, so tokens it signed stop verifying. Writes a `key.rotated` audit row. **Response 200** — [`rotateKeyResponse`](#dto-rotate-key-response), with the `kid` the key store holds (on `vault_transit`, `<key_name>-v<version>`).
 
 ---
 

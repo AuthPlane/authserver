@@ -205,10 +205,16 @@ func (s *IntrospectionService) IntrospectToken(ctx context.Context, req input.In
 	// 4. Determine if this is a machine token by checking the machine token store.
 	// Machine tokens include client_credentials, jwt-bearer, and token exchange grants.
 	// Previously used sub == client_id heuristic, but jwt-bearer tokens have federated subjects.
+	// A lookup failure answers inactive as a server fault: a token revoked
+	// only in this store would otherwise pass the checks below.
 	isMachineToken := false
 	if s.machineTokens != nil && claims.JTI != "" {
 		mt, mtErr := s.machineTokens.GetByJTI(ctx, claims.JTI)
-		if mtErr == nil && mt != nil {
+		if mtErr != nil {
+			s.logger.WarnContext(ctx, "introspection: machine token lookup failed", "jti", claims.JTI, "error", mtErr)
+			return s.inactiveServerFault(ctx, start), nil
+		}
+		if mt != nil {
 			isMachineToken = true
 			if mt.Revoked {
 				s.logger.InfoContext(ctx, "introspection: machine token revoked", "jti", claims.JTI, "client_id", claims.ClientID)

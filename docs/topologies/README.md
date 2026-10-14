@@ -121,15 +121,22 @@ authserver-side state.
 | Mode | Where | Best for |
 |---|---|---|
 | **Admin UI** | `http://localhost:9001` (React SPA embedded in the AS binary) | Exploring, one-off setup, visual confirmation |
-| **CLI** | `authserver admin <subcommand>` | Local development, scripting, single-host operators |
+| **CLI** | `authserver admin <subcommand>`, run with the server's configuration ([forms per deployment](../guides/operate/admin-cli.md#run-the-cli-against-the-servers-data)) | Local development, scripting, single-host operators |
 | **REST API** | `POST /admin/...` against `:9001` | CI/CD pipelines, infrastructure-as-code, multi-environment provisioning |
 
-Auth applies uniformly across all three: all three modes use the same
-admin API key from the `AUTHPLANE_ADMIN_API_KEY` env var (or YAML
-`admin.api_key`). The Admin UI prompts for it on first load and stores
-it in `sessionStorage` (cleared when the browser tab closes); the CLI
-and REST API read it directly from the env. Set it once before any of
-the three modes work.
+The Admin UI and the REST API authenticate with the admin API key from
+the `AUTHPLANE_ADMIN_API_KEY` env var (or YAML `admin.api_key`). The
+Admin UI prompts for it on first load and stores it in `sessionStorage`
+(cleared when the browser tab closes); REST calls send it as a bearer
+token. The CLI does not call the server: it opens the server's database
+and key store itself, so it must run with the server's configuration —
+`--config` with the file the server runs with, or the server's
+`AUTHPLANE_*` environment (see the
+[forms per deployment](../guides/operate/admin-cli.md#run-the-cli-against-the-servers-data)).
+Run bare, it uses a default SQLite database in the working directory,
+not the server's. It validates the configuration as the server does, so
+when the server gets its session secret or admin key from the
+environment rather than the YAML, give the CLI the same variables.
 
 Each topology page presents the three modes as parallel self-contained
 sections so you never need to mix curl and CLI in the same walkthrough.

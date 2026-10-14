@@ -151,6 +151,13 @@ func (s *ConnectService) StartConnect(
 			span.SetStatus(codes.Error, "originating resource is not broker-backed")
 			return "", fmt.Errorf("%w: resource %q is not broker-backed", domain.ErrInvalidTarget, resourceSlug)
 		}
+		// The resource decides the upstream scopes and the return-URL
+		// allowlist, and the grant is stored under this provider, so it must
+		// be one of this provider's resources.
+		if target.BrokerProviderID != provider.ID {
+			span.SetStatus(codes.Error, "originating resource belongs to another provider")
+			return "", fmt.Errorf("%w: resource %q is not backed by provider %q", domain.ErrInvalidTarget, resourceSlug, providerSlug)
+		}
 	} else {
 		// connect_pending_states.resource_id is a NOT NULL FK to resources(id).
 		// When the caller didn't supply ?resource=, fall through to the
@@ -326,8 +333,17 @@ func (s *ConnectService) CompleteConnect(
 			return CompleteConnectResult{}, fmt.Errorf("resolve originating resource: %w", err)
 		}
 	}
+	// StartConnect only stores a resource of this provider, but the resource
+	// may have been moved to another provider since, and states stored
+	// before that check existed carry no such guarantee. Refuse before the
+	// code is exchanged.
 	if res == nil {
-		res = &resource.Resource{}
+		span.SetStatus(codes.Error, "pending state names no resource")
+		return CompleteConnectResult{}, fmt.Errorf("%w: pending state names no resource", domain.ErrInvalidTarget)
+	}
+	if res.BrokerProviderID != provider.ID {
+		span.SetStatus(codes.Error, "originating resource does not belong to the provider")
+		return CompleteConnectResult{}, fmt.Errorf("%w: pending resource %q is not backed by provider %q", domain.ErrInvalidTarget, res.Slug, provider.Slug)
 	}
 
 	connectCfg, err := s.connectConfig.Config(ctx)

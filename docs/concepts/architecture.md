@@ -274,7 +274,7 @@ See [Observability with Prometheus and OTel](../guides/deploy/observability-prom
 ## Docker image
 
 The production Docker image uses a multi-stage build:
-1. `golang:1.26-alpine` — builds the binary
+1. `golang:1.26.9-alpine` — builds the binary
 2. `gcr.io/distroless/static-debian12:nonroot` — runtime (no shell, no package manager)
 
 The image runs as UID 65534 (nonroot), exposes ports 9000 and 9001, and is under 50MB.

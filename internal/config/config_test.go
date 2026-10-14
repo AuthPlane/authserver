@@ -879,6 +879,21 @@ func TestIsLocalhostIssuer(t *testing.T) {
 		{"https://auth.example.com", false},
 		{"http://localhost.evil.com", false},
 		{"", false},
+		{"http://localhost:9000/realm", true},
+		// Userinfo puts the real host after '@': these are auth.example.com.
+		{"https://localhost:@auth.example.com", false},
+		{"https://localhost:443@auth.example.com", false},
+		{"https://127.0.0.1:x@auth.example.com", false},
+		{"http://[::1]:9000@auth.example.com", false},
+		{"http://user@localhost:9000", false},
+		// The "@" sits in the fragment or query; the host is localhost.
+		{"http://localhost#@auth.example.com", true},
+		{"http://localhost?@auth.example.com", true},
+		// The scheme is case-insensitive; the host match is not.
+		{"HTTP://localhost:9000", true},
+		{"http://LOCALHOST:9000", false},
+		{"ftp://localhost", false},
+		{"localhost:9000", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.issuer, func(t *testing.T) {
@@ -1789,5 +1804,35 @@ func TestEnvDefaultClientScopeUnsetKeepsYAMLValue(t *testing.T) {
 	if cfg.OAuth.DefaultClientScope != "from-yaml" {
 		t.Errorf("DefaultClientScope = %q, want the YAML value to survive an unset env var",
 			cfg.OAuth.DefaultClientScope)
+	}
+}
+
+// An issuer whose real host is public must get the production checks even when
+// its string starts like a localhost URL.
+func TestValidate_UserinfoIssuerGetsProductionChecks(t *testing.T) {
+	for _, issuer := range []string{
+		"https://localhost:@auth.example.com",
+		"https://127.0.0.1:x@auth.example.com",
+	} {
+		t.Run(issuer, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Server.Issuer = issuer
+			cfg.Session.Secret = ""
+			cfg.Session.Secure = false
+			err := cfg.Validate()
+			for _, want := range []string{
+				"session.secret is required when server.issuer is not localhost",
+				"session.secure must be true when server.issuer is not localhost",
+			} {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("Validate() = %v; want an error containing %q", err, want)
+				}
+			}
+			cfg.Admin.Enabled = true
+			cfg.Admin.APIKey = ""
+			if err := cfg.ValidateAdminAPIKey(); err == nil || !strings.Contains(err.Error(), "admin.api_key is required") {
+				t.Errorf("ValidateAdminAPIKey() = %v; want the admin.api_key required error", err)
+			}
+		})
 	}
 }

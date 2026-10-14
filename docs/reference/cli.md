@@ -516,7 +516,7 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 
 **Short** — Manage signing keys
 
-**Source** — `cmd/authserver/admin_key.go:11`
+**Source** — `cmd/authserver/admin_key.go:19`
 
 ## `authserver admin key list`
 
@@ -526,7 +526,11 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 
 **Short** — List signing keys
 
-**Source** — `cmd/authserver/admin_key.go:42`
+**Long**
+
+> List the signing keys in the key store the server uses. Takes the same --config or AUTHPLANE_SIGNING_KEY_STORE / AUTHPLANE_SIGNING_KEY_PATH as key rotate, refuses to run without one, and prints the key store it read first.
+
+**Source** — `cmd/authserver/admin_key.go:59`
 
 ## `authserver admin key rotate`
 
@@ -536,7 +540,11 @@ The `authserver` binary exposes the operator surface for the Authplane MCP Autho
 
 **Short** — Rotate the signing key
 
-**Source** — `cmd/authserver/admin_key.go:20`
+**Long**
+
+> Rotate the signing key in the key store the server uses. Pass the server's own config file with --config (the Helm chart mounts it at /etc/authplane/config.yaml), or set AUTHPLANE_SIGNING_KEY_STORE or AUTHPLANE_SIGNING_KEY_PATH as the server does. With neither, the command refuses to run rather than rotate a default key store the server never reads. The key store acted on is printed first.
+
+**Source** — `cmd/authserver/admin_key.go:28`
 
 ## `authserver admin provider`
 

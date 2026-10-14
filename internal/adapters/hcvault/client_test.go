@@ -108,7 +108,7 @@ func TestClient_Sign_MockServer(t *testing.T) {
 	}
 	defer c.Close()
 
-	sig, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", 0)
+	sig, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", "", 0)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
@@ -382,26 +382,6 @@ func TestClient_ResponseWithinLimit(t *testing.T) {
 	}
 }
 
-func TestClient_AddressAndMount(t *testing.T) {
-	obs := observability.NewNoop()
-	c, err := NewClient(context.Background(), ClientConfig{
-		Address: "http://vault:8200",
-		Token:   "tok",
-		Mount:   "my-transit",
-	}, obs)
-	if err != nil {
-		t.Fatalf("create client: %v", err)
-	}
-	defer c.Close()
-
-	if c.Address() != "http://vault:8200" {
-		t.Errorf("Address() = %q, want http://vault:8200", c.Address())
-	}
-	if c.Mount() != "my-transit" {
-		t.Errorf("Mount() = %q, want my-transit", c.Mount())
-	}
-}
-
 // transitSignOK answers a Transit sign request the way Vault does, recording
 // the token and body it received so a test can assert what crossed a redirect.
 func transitSignOK(t *testing.T, gotToken *string, gotBody *map[string]interface{}) http.HandlerFunc {
@@ -452,7 +432,7 @@ func TestClient_FollowsSingleRedirect_HAStandby(t *testing.T) {
 	defer standby.Close()
 
 	c := newTestClient(t, standby.URL)
-	sig, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", 0)
+	sig, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", "", 0)
 	if err != nil {
 		t.Fatalf("sign via one redirect: %v", err)
 	}
@@ -483,7 +463,7 @@ func TestClient_RefusesSecondRedirectHop(t *testing.T) {
 	defer first.Close()
 
 	c := newTestClient(t, first.URL)
-	_, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", 0)
+	_, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", "", 0)
 	var verr *VaultError
 	if !errors.As(err, &verr) || verr.StatusCode != http.StatusTemporaryRedirect {
 		t.Fatalf("err = %v, want *VaultError with status 307", err)
@@ -510,7 +490,7 @@ func TestClient_RefusesHTTPSToHTTPDowngrade(t *testing.T) {
 	// lives on the http.Client, not the transport.
 	c.httpClient.Transport = secure.Client().Transport
 
-	_, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", 0)
+	_, err := c.Sign(context.Background(), "mykey", "dGVzdA==", "sha2-256", "", 0)
 	if err == nil || !strings.Contains(err.Error(), "downgrade") {
 		t.Fatalf("err = %v, want a downgrade refusal", err)
 	}

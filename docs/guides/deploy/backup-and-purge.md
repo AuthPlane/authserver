@@ -144,14 +144,14 @@ The CronJob **must** share the same storage env (`AUTHPLANE_STORAGE_*`) as the `
 
 ## Selective purging
 
-`--only=name1,name2` runs a subset. Run high-churn tables hourly, the rest daily:
+`--only=name1,name2` runs a subset. Run high-churn tables hourly, the rest daily. On a host install, run `purge` the way the timer above does — as the service user, with the secrets from `/etc/authserver/secrets.env`: without `AUTHPLANE_SESSION_SECRET` and `AUTHPLANE_ADMIN_API_KEY` it refuses to load a configuration whose issuer is not localhost (`session.secret is required when server.issuer is not localhost`). For a timer, give each unit `EnvironmentFile=/etc/authserver/secrets.env` and `User=authserver`, as above.
 
 ```bash
 # Hourly — high-churn tables; verified against docs/reference/cli.md#cli-purge
-authserver purge --only=dpop-nonces,assertion-jti,jti --config /etc/authserver/config.yaml
+sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver purge --only=dpop-nonces,assertion-jti,jti --config /etc/authserver/config.yaml'
 
 # Daily — everything else
-authserver purge --config /etc/authserver/config.yaml
+sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver purge --config /etc/authserver/config.yaml'
 ```
 
 ## Exit codes and alerting
@@ -198,7 +198,7 @@ For Kubernetes, use a CronJob with the `postgres:18-alpine` image and the same D
 
 ### Signing keys
 
-The keyfile store writes to `signing.key_path` (default `/var/lib/authserver/keys`). **Lose this directory and every outstanding JWT becomes unverifiable.** Back it up alongside the DB, on the same cadence:
+The keyfile store writes to `signing.key_path` (default `data/keys`, relative to the server's working directory; set an absolute path in production — the examples here use `/var/lib/authserver/keys`). **Lose this directory and every outstanding JWT becomes unverifiable.** Restoring an older copy has the same effect for tokens signed by any key created after that copy was taken. Back it up alongside the DB, on the same cadence:
 
 ```bash
 tar czf /var/backups/keys-$(date +%Y%m%d).tar.gz -C /var/lib/authserver keys
@@ -206,13 +206,13 @@ tar czf /var/backups/keys-$(date +%Y%m%d).tar.gz -C /var/lib/authserver keys
 
 For Vault Transit (`signing.key_store: vault_transit`): the keys live in Vault; back up Vault storage on its own schedule and confirm the Transit key version is recoverable. See [HashiCorp Vault Transit → Runbook](hashicorp-vault-transit.md#runbook).
 
-For Postgres-backed keys (`signing.key_store: postgres_key`): a normal `pg_dump` is sufficient — the keys are AES-encrypted rows in `signing_keys`. Back up the master key (in `data_encryption.aes_master.key_env`) **separately**; if you lose the master, the rows are unrecoverable.
+For Postgres-backed keys (`signing.key_store: postgres_key`): a normal `pg_dump` is sufficient — the keys are rows in `signing_keys`, encrypted by the `data_encryption` driver. Back up the master key (in `data_encryption.aes_master.key_env`) **separately**; if you lose the master, the rows are unrecoverable. As with the key directory, restoring an older dump loses every key created after it.
 
 ## Verify
 
 ```bash
 # Manual one-shot — should print INFO purge completed lines per target
-authserver purge --timeout=5m --config /etc/authserver/config.yaml
+sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver purge --timeout=5m --config /etc/authserver/config.yaml'
 
 # Confirm tables shrink
 psql "$AUTHPLANE_STORAGE_POSTGRES_DSN" -c \

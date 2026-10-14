@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/authplane/authserver/internal/adapters/aesmaster"
@@ -390,5 +391,174 @@ func TestHAKeyStore_EncryptedPEM_IsNotRawPEM(t *testing.T) {
 	block, _ := pem.Decode(encPrivate)
 	if block != nil {
 		t.Fatal("CRITICAL: enc_private is valid PEM — key stored in plaintext, encryption not applied!")
+	}
+}
+
+// Replicas racing on first use end up on one key: the losers' inserts do
+// nothing, so nobody demotes or replaces the key another replica created,
+// and every replica reads the same kid back.
+func TestHAKeyStore_CreateIfAbsent_ConcurrentReplicasShareOneKey(t *testing.T) {
+	db := testdata.SetupTestPGDB(t, pgContainerDSN)
+	enc := newTestEncryptor(t)
+	ctx := context.Background()
+
+	const replicas = 8
+	stores := make([]*pgadapter.HAKeyStore, replicas)
+	for i := range stores {
+		stores[i] = pgadapter.NewHAKeyStore(db.Pool, enc, observability.NewNoop())
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, replicas)
+	for i := range stores {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = stores[i].CreateIfAbsent(ctx, newHATestSigningKey(t, fmt.Sprintf("replica-%d", i)))
+		}(i)
+	}
+	wg.Wait()
+
+	var kid string
+	for i, s := range stores {
+		if errs[i] != nil {
+			t.Fatalf("replica %d CreateIfAbsent: %v", i, errs[i])
+		}
+		cur, err := s.LoadCurrent(ctx)
+		if err != nil || cur == nil {
+			t.Fatalf("replica %d LoadCurrent = %v, %v", i, cur, err)
+		}
+		if kid == "" {
+			kid = cur.KeyID
+		} else if cur.KeyID != kid {
+			t.Errorf("replica %d reads kid %q, another reads %q", i, cur.KeyID, kid)
+		}
+	}
+	var rows int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM signing_keys`).Scan(&rows); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("signing_keys holds %d rows after concurrent first use, want 1", rows)
+	}
+
+	// On a store that already has a key, CreateIfAbsent changes nothing.
+	if err := stores[0].CreateIfAbsent(ctx, newHATestSigningKey(t, "late")); err != nil {
+		t.Fatalf("CreateIfAbsent on an existing key: %v", err)
+	}
+	if cur, err := stores[0].LoadCurrent(ctx); err != nil || cur == nil || cur.KeyID != kid {
+		t.Errorf("LoadCurrent = %v, %v; want %q unchanged", cur, err, kid)
+	}
+}
+
+// newHAKeyStoreWithDB returns the store together with its database so a test
+// can seed rows the public API cannot produce on its own.
+func newHAKeyStoreWithDB(t *testing.T) (*pgadapter.HAKeyStore, *pgadapter.DB) {
+	t.Helper()
+	db := testdata.SetupTestPGDB(t, pgContainerDSN)
+	return pgadapter.NewHAKeyStore(db.Pool, newTestEncryptor(t), observability.NewNoop()), db
+}
+
+func activeKIDs(t *testing.T, store *pgadapter.HAKeyStore) []string {
+	t.Helper()
+	keys, err := store.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("list active: %v", err)
+	}
+	kids := make([]string, 0, len(keys))
+	for _, k := range keys {
+		kids = append(kids, k.KeyID)
+	}
+	return kids
+}
+
+// A rotation must keep the key it demoted, because that key signed every
+// token still in circulation. Which row is "newest" by created_at says
+// nothing about that: created_at is written from each replica's own clock, so
+// under skew the key that was current can carry an older timestamp than a
+// key that was retired before it.
+func TestHAKeyStore_Rotation_KeepsDemotedKeyUnderClockSkew(t *testing.T) {
+	store, db := newHAKeyStoreWithDB(t)
+	ctx := context.Background()
+
+	for _, kid := range []string{"kid-skew-retired", "kid-skew-signing"} {
+		if err := store.Save(ctx, newHATestSigningKey(t, kid)); err != nil {
+			t.Fatalf("save %s: %v", kid, err)
+		}
+	}
+
+	// The signing key was written by a replica whose clock runs an hour
+	// behind, so it looks older than the key it replaced.
+	if _, err := db.Pool.Exec(ctx,
+		`UPDATE signing_keys SET created_at = created_at - INTERVAL '1 hour' WHERE kid = $1`,
+		"kid-skew-signing",
+	); err != nil {
+		t.Fatalf("skew created_at: %v", err)
+	}
+
+	if err := store.Save(ctx, newHATestSigningKey(t, "kid-skew-next")); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	current, err := store.LoadCurrent(ctx)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if current == nil || current.KeyID != "kid-skew-next" {
+		t.Fatalf("current: got %v, want kid-skew-next", current)
+	}
+
+	prev, err := store.LoadPrevious(ctx)
+	if err != nil {
+		t.Fatalf("load previous: %v", err)
+	}
+	if prev == nil || prev.KeyID != "kid-skew-signing" {
+		got := "<nil>"
+		if prev != nil {
+			got = prev.KeyID
+		}
+		t.Fatalf("previous: got %s, want kid-skew-signing (the key that was signing before the rotation)", got)
+	}
+
+	kids := activeKIDs(t, store)
+	if len(kids) != 2 || kids[0] != "kid-skew-next" || kids[1] != "kid-skew-signing" {
+		t.Fatalf("active keys: got %v, want [kid-skew-next kid-skew-signing]", kids)
+	}
+
+	var total int
+	if err := db.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM signing_keys`).Scan(&total); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("rows after rotation: got %d, want 2 (the retired key should be pruned)", total)
+	}
+}
+
+// When no key is current there is nothing this rotation retired, so it has no
+// basis for choosing which non-current key to discard; it must discard none.
+func TestHAKeyStore_SaveWithoutCurrentKey_PrunesNothing(t *testing.T) {
+	store, db := newHAKeyStoreWithDB(t)
+	ctx := context.Background()
+
+	for _, kid := range []string{"kid-orphan-1", "kid-orphan-2"} {
+		if err := store.Save(ctx, newHATestSigningKey(t, kid)); err != nil {
+			t.Fatalf("save %s: %v", kid, err)
+		}
+	}
+	if _, err := db.Pool.Exec(ctx, `UPDATE signing_keys SET is_current = FALSE`); err != nil {
+		t.Fatalf("clear current: %v", err)
+	}
+
+	if err := store.Save(ctx, newHATestSigningKey(t, "kid-orphan-new")); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var nonCurrent int
+	if err := db.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM signing_keys WHERE is_current = FALSE`,
+	).Scan(&nonCurrent); err != nil {
+		t.Fatalf("count non-current: %v", err)
+	}
+	if nonCurrent != 2 {
+		t.Errorf("non-current rows: got %d, want 2 (nothing was demoted, so nothing is pruned)", nonCurrent)
 	}
 }

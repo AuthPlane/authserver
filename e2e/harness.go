@@ -304,6 +304,11 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 
 	// 3. Services — mirrors cmd/authserver/main.go runServe() exactly.
 	jwksSvc := services.NewJWKSService(keyStore, cache.NewMemory[*jose.JSONWebKeySet](), "ES256", obs.WithComponent("jwks"))
+	// The server creates its signing key at startup; the JWKS endpoint no
+	// longer does.
+	if _, err := jwksSvc.GetSigningKey(context.Background()); err != nil {
+		t.Fatalf("create signing key: %v", err)
+	}
 	auditSvc := services.NewAuditService(stores.Audit, obs.WithComponent("audit"))
 
 	dcrMode := hcfg.DCRMode
@@ -443,6 +448,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	)
 
 	revokeSvc := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, static.NewIssuerProvider("http://placeholder"), obs.WithComponent("revoke"), auditSvc, stores.Revocation)
+	revokeSvc.WithIssuanceStore(stores.Issuance)
 
 	// Introspection service — use placeholder issuer, will be rebuilt.
 	introspectSvc := services.NewIntrospectionService(
@@ -625,6 +631,7 @@ func NewTestHarness(t *testing.T, hcfg HarnessConfig) *TestHarness {
 	introspectSvcReal.WithResourceRegistry(resourceRegistry)
 	introspectSvcReal.WithIssuanceStore(stores.Issuance)
 	revokeSvcReal := services.NewRevocationService(stores.Token, stores.Client, stores.MachineToken, jwksSvc, static.NewIssuerProvider(issuerURL), obs.WithComponent("revoke"), auditSvc, stores.Revocation)
+	revokeSvcReal.WithIssuanceStore(stores.Issuance)
 	serverCfg.Issuer = issuerURL
 
 	// Rebuild with correct issuer.
@@ -2032,6 +2039,35 @@ func (h *TestHarness) TokenExchangeWithResource(clientID, clientSecret, subjectT
 		h.T.Fatalf("decode token exchange response: %v", err)
 	}
 	return &tr
+}
+
+// TokenExchangeWithResourceRaw posts a resource-targeted token exchange and
+// returns the HTTP status and body without asserting on either, for tests
+// that compare the outcome before and after a state change.
+func (h *TestHarness) TokenExchangeWithResourceRaw(clientID, clientSecret, subjectToken, subjectTokenType, scope, resource string) (int, []byte) {
+	h.T.Helper()
+
+	form := url.Values{
+		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token":      {subjectToken},
+		"subject_token_type": {subjectTokenType},
+		"client_id":          {clientID},
+		"client_secret":      {clientSecret},
+	}
+	if scope != "" {
+		form.Set("scope", scope)
+	}
+	if resource != "" {
+		form.Set("resource", resource)
+	}
+
+	resp, err := http.PostForm(h.Issuer+"/oauth/token", form)
+	if err != nil {
+		h.T.Fatalf("POST /oauth/token token_exchange: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, body
 }
 
 // TokenExchangeWithResourceExpectError performs a token exchange with resource expecting an error.

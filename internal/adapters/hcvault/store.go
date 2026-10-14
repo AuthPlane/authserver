@@ -2,10 +2,16 @@ package hcvault
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -32,6 +38,11 @@ type Store struct {
 }
 
 var _ output.KeyStore = (*Store)(nil)
+
+// ErrKeyAlgorithmMismatch reports a Transit key whose type cannot produce
+// signatures for the configured signing.algorithm (ES256 needs an ecdsa-p256
+// key, RS256 an RSA key). Tokens signed with such a key never verify.
+var ErrKeyAlgorithmMismatch = errors.New("transit key type does not match signing.algorithm")
 
 // NewStore creates a Vault Transit key store.
 func NewStore(client *Client, keyName, algorithm string, obs *observability.Provider) *Store {
@@ -192,6 +203,30 @@ func (s *Store) Save(ctx context.Context, _ *output.SigningKey) error {
 	return nil
 }
 
+// CreateIfAbsent creates the Transit key when it does not exist. The key
+// argument is ignored: Transit generates its own key material. Creating a
+// key that already exists changes nothing in Vault (whatever its type), so
+// this never rotates, even when several callers race on first use.
+func (s *Store) CreateIfAbsent(ctx context.Context, _ *output.SigningKey) error {
+	ctx, span := s.tracer.Start(ctx, "VaultTransit.CreateIfAbsent")
+	defer span.End()
+	span.SetAttributes(attribute.String("vault.key_name", s.keyName))
+
+	keyType := vaultKeyType(s.algorithm)
+	if keyType == "" {
+		err := fmt.Errorf("unsupported algorithm for Vault Transit: %s", s.algorithm)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	if err := s.client.CreateKey(ctx, s.keyName, keyType); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("create transit key: %w", err)
+	}
+	return nil
+}
+
 // ListActive returns all active signing keys (current + previous if exists).
 func (s *Store) ListActive(ctx context.Context) ([]*output.SigningKey, error) {
 	ctx, span := s.tracer.Start(ctx, "VaultTransit.ListActive")
@@ -246,9 +281,20 @@ func (s *Store) buildSigningKey(resp *transitKeyResponse, version int) (*output.
 		return nil, fmt.Errorf("version %d not found in transit key", version)
 	}
 
+	// The type is checked before parsing because Vault returns some key types
+	// (ed25519) in a form parseTransitPublicKey does not read; a mismatch must
+	// be reported as one, not as a parse failure.
+	if !transitKeyTypeFits(resp.Data.Type, s.algorithm) {
+		return nil, s.keyMismatchError(resp.Data.Type)
+	}
+
 	pub, err := parseTransitPublicKey(keyInfo.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("parse public key v%d: %w", version, err)
+	}
+	if !publicKeyFits(pub, s.algorithm) {
+		return nil, fmt.Errorf("%w: transit key %q v%d holds a %T, signing.algorithm is %s",
+			ErrKeyAlgorithmMismatch, s.keyName, version, pub, s.algorithm)
 	}
 
 	kid := fmt.Sprintf("%s-v%d", s.keyName, version)
@@ -261,6 +307,57 @@ func (s *Store) buildSigningKey(resp *transitKeyResponse, version int) (*output.
 		Algorithm:  s.algorithm,
 		KeyID:      kid,
 	}, nil
+}
+
+// transitKeyTypeFits reports whether a Transit key type can sign for
+// algorithm: ES256 needs ecdsa-p256; RS256 takes any RSA size.
+func transitKeyTypeFits(keyType, algorithm string) bool {
+	switch algorithm {
+	case "ES256":
+		return keyType == "ecdsa-p256"
+	case "RS256":
+		return strings.HasPrefix(keyType, "rsa-")
+	default:
+		return false
+	}
+}
+
+// keyMismatchError tells the operator which remedies exist for a Transit key
+// of keyType under s.algorithm. Changing signing.algorithm is offered only
+// when a supported algorithm fits the key. Vault keeps a key's type — writing
+// the same name with another type changes nothing — so the other remedy is a
+// new key name.
+func (s *Store) keyMismatchError(keyType string) error {
+	remedy := "set signing.vault_transit.key_name to a new key name"
+	if alg := algorithmForTransitKeyType(keyType); alg != "" {
+		remedy = "set signing.algorithm to " + alg + ", or " + remedy
+	}
+	return fmt.Errorf("%w: transit key %q is type %q, which cannot sign %s; %s and create that key with type=%s (re-creating %q with another type changes nothing)",
+		ErrKeyAlgorithmMismatch, s.keyName, keyType, s.algorithm, remedy, vaultKeyType(s.algorithm), s.keyName)
+}
+
+// algorithmForTransitKeyType returns the supported signing.algorithm a
+// Transit key type can sign for, or "" when none can.
+func algorithmForTransitKeyType(keyType string) string {
+	for _, alg := range []string{"ES256", "RS256"} {
+		if transitKeyTypeFits(keyType, alg) {
+			return alg
+		}
+	}
+	return ""
+}
+
+// publicKeyFits reports whether pub is the kind of key algorithm signs with,
+// so the JWKS never pairs e.g. kty=EC with alg=RS256.
+func publicKeyFits(pub crypto.PublicKey, algorithm string) bool {
+	switch k := pub.(type) {
+	case *ecdsa.PublicKey:
+		return algorithm == "ES256" && k.Curve == elliptic.P256()
+	case *rsa.PublicKey:
+		return algorithm == "RS256"
+	default:
+		return false
+	}
 }
 
 // isNotFound checks if a Vault error is a 404.

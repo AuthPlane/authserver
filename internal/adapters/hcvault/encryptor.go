@@ -23,7 +23,7 @@ const driverName = "vault_transit_encrypt"
 var _ output.DataEncryptor = (*Encryptor)(nil)
 
 // Encryptor implements DataEncryptor via the Vault Transit API.
-// It delegates HTTP communication to a shared Client.
+// It delegates HTTP communication to its Client.
 type Encryptor struct {
 	client          *Client
 	keyName         string
@@ -32,7 +32,7 @@ type Encryptor struct {
 	encryptErrors   metric.Int64Counter
 }
 
-// NewEncryptor creates a Vault Transit encrypt adapter using a shared Client.
+// NewEncryptor creates a Vault Transit encrypt adapter on client.
 func NewEncryptor(client *Client, keyName string, obs *observability.Provider) *Encryptor {
 	encryptDuration, _ := obs.Meter.Float64Histogram("authserver_encrypt_duration_seconds",
 		metric.WithDescription("Data encryption operation duration"),
@@ -53,11 +53,6 @@ func NewEncryptor(client *Client, keyName string, obs *observability.Provider) *
 
 // DriverName returns "vault_transit_encrypt".
 func (e *Encryptor) DriverName() string { return driverName }
-
-// Client returns the underlying Vault client.
-// Used by the signing factory to share a client when both signing and
-// encryption target the same Vault server.
-func (e *Encryptor) Client() *Client { return e.client }
 
 // Close stops the underlying Vault client's background renewal goroutine.
 func (e *Encryptor) Close() error {

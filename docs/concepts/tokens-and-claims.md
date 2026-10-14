@@ -81,7 +81,8 @@ Your MCP server verifies tokens locally — no network call to authserver per
 request:
 
 1. Fetch authserver's [JWKS](glossary.md#glossary-jwks) from
-   `/.well-known/jwks.json` (cache it, refresh every 5 minutes).
+   `/.well-known/jwks.json` (cache it — the endpoint sends
+   `Cache-Control: public, max-age=3600` — and re-fetch on an unknown `kid`).
 2. Match the JWT's `kid` header to a key in the JWKS.
 3. Verify the signature using that key.
 4. Check `iss` matches your configured issuer.

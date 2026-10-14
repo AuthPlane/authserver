@@ -34,6 +34,7 @@ metadata: { name: authplane }
 kubectl create secret generic authplane-secrets -n authplane \
   --from-literal=session-secret=$(openssl rand -hex 32) \
   --from-literal=admin-api-key=$(openssl rand -hex 32) \
+  --from-literal=data-enc-key=$(openssl rand -hex 32) \
   --from-literal=postgres-dsn="postgres://authplane:$PG_PASS@postgres.prod.svc:5432/authplane?sslmode=require"
 ```
 
@@ -59,9 +60,7 @@ data:
       driver: postgres                   # AUTHPLANE_STORAGE_DRIVER
     signing:
       algorithm: ES256
-      key_store: postgres_key            # multi-replica safe
-      postgres_key:
-        encryption_key_env: AUTHPLANE_SIGNING_KEY_ENC   # name of the pod env var that holds the key
+      key_store: postgres_key            # multi-replica safe; keys encrypted by data_encryption
     data_encryption:
       driver: aes_master
       aes_master:
@@ -117,8 +116,6 @@ spec:
               valueFrom: { secretKeyRef: { name: authplane-secrets, key: admin-api-key } }
             - name: AUTHPLANE_STORAGE_POSTGRES_DSN
               valueFrom: { secretKeyRef: { name: authplane-secrets, key: postgres-dsn } }
-            - name: AUTHPLANE_SIGNING_KEY_ENC
-              valueFrom: { secretKeyRef: { name: authplane-secrets, key: signing-key-enc } }
             - name: AUTHPLANE_DATA_ENC_KEY
               valueFrom: { secretKeyRef: { name: authplane-secrets, key: data-enc-key } }
           volumeMounts:
@@ -228,7 +225,7 @@ curl -fsS -H "Authorization: Bearer $ADMIN_KEY" http://localhost:9001/admin/stat
 ## Runbook
 
 - **Rolling update**: `kubectl set image deploy/authplane authserver=...`. Migrations apply on each new pod's startup. Old pods drain bounded by `terminationGracePeriodSeconds` (≥ `server.shutdown_wait`).
-- **Rotate signing key**: `kubectl exec deploy/authplane -- authserver admin key rotate` (verified against [`cli.md#cli-admin-key-rotate`](../../reference/cli.md#cli-admin-key-rotate)). With `postgres_key`, NOTIFY propagates within milliseconds.
+- **Rotate signing key**: `kubectl -n authplane exec deploy/authplane -- /authserver admin key rotate --config /config/config.yaml` (verified against [`cli.md#cli-admin-key-rotate`](../../reference/cli.md#cli-admin-key-rotate)). Pass the same `--config` the Deployment above starts the server with; without it the CLI refuses to run rather than rotate a default key store the server never reads. The admin API (`POST /admin/keys/rotate`) does the same and also writes a `key.rotated` audit row. With `postgres_key`, NOTIFY tells every replica as soon as the rotation commits; each pod also publishes the new key before it signs a token with it, and within 60 seconds in any case.
 - **Backup**: see [Backup & purge → PostgreSQL](backup-and-purge.md#postgresql-backup).
 
 ## What can go wrong

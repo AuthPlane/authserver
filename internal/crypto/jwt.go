@@ -291,6 +291,21 @@ func ecDERToRaw(der []byte, alg jose.SignatureAlgorithm) ([]byte, error) {
 	return out, nil
 }
 
+// AccessTokenClockSkew is the clock skew the verifier tolerates on exp and
+// nbf. Times are compared in whole seconds, so a token is accepted until the
+// end of second exp+30: see VerifiableAfterCutoff for state that must
+// outlive every token that still verifies.
+const AccessTokenClockSkew = 30 * time.Second
+
+// VerifiableAfterCutoff returns the purge cutoff for revocation state at now:
+// a token whose exp is at or after the cutoff may still verify, so a revoked
+// or denylisted record for it must be kept. It covers the skew plus the
+// whole-second comparison (a token with exp = T verifies until T+31 s, not
+// T+30 s). Only for state whose loss re-enables a revoked token.
+func VerifiableAfterCutoff(now time.Time) time.Time {
+	return now.Add(-AccessTokenClockSkew - time.Second)
+}
+
 // VerifyAccessToken parses and verifies a JWT access token against the given JWKS.
 // It checks the signature, the typ header, the presence of exp and iat, and the
 // expiry and not-before windows. RFC 9068 §2.2 also makes iss, sub, aud,
@@ -324,9 +339,9 @@ func VerifyAccessToken(token string, jwks *jose.JSONWebKeySet) (*AccessTokenClai
 	}
 
 	now := time.Now().Unix()
-	const clockSkew int64 = 30
+	clockSkew := int64(AccessTokenClockSkew / time.Second)
 
-	// Check expiry (30-second clock skew tolerance). exp is REQUIRED for
+	// Check expiry (AccessTokenClockSkew tolerance). exp is REQUIRED for
 	// at+jwt (RFC 9068 §2.2), so a missing one is rejected rather than
 	// treated as "no expiry to enforce" — see the fail-closed note above.
 	if claims.Expiry == 0 {
@@ -344,7 +359,7 @@ func VerifyAccessToken(token string, jwks *jose.JSONWebKeySet) (*AccessTokenClai
 		return nil, fmt.Errorf("missing iat claim")
 	}
 
-	// Check not-before (30-second clock skew tolerance). Unlike exp, nbf is
+	// Check not-before (AccessTokenClockSkew tolerance). Unlike exp, nbf is
 	// OPTIONAL (RFC 7519 §4.1.5) and RFC 9068 does not require it, so its
 	// absence is a valid token, not a missing required claim: skipping the
 	// check when it is zero is the correct semantics, not a permissive default.

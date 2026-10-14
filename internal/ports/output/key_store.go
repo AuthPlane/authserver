@@ -24,6 +24,11 @@ type SigningKey struct {
 // Implementations range from local PEM files (keyfile adapter) to
 // remote KMS systems. The interface is intentionally minimal to support
 // both local and remote key management.
+//
+// A store may keep its own key material instead of the key it is handed
+// (Vault Transit creates and rotates keys itself), so after Save or
+// CreateIfAbsent the caller reads the key back with LoadCurrent and uses
+// that one.
 type KeyStore interface {
 	// LoadCurrent returns the current signing key pair.
 	// Returns nil, nil if no key exists (first run).
@@ -35,6 +40,12 @@ type KeyStore interface {
 
 	// Save persists a key pair, rotating the current key to previous.
 	Save(ctx context.Context, key *SigningKey) error
+
+	// CreateIfAbsent makes key the current key only when no current key
+	// exists; when one does, it changes nothing and returns nil. First use
+	// calls it instead of Save, so it never rotates or replaces a key another
+	// caller has just created.
+	CreateIfAbsent(ctx context.Context, key *SigningKey) error
 
 	// ListActive returns all active signing keys (current + previous if exists).
 	// Used by JWKS service to build the key set in a single call.

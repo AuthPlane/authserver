@@ -2268,3 +2268,108 @@ func TestExchange_NoResource_OmittedScope(t *testing.T) {
 		}
 	}
 }
+
+// The registry path verifies the actor_token separately from the legacy path;
+// a revoked actor token must be refused there too.
+func TestTokenExchangeService_Dispatch_MintTarget_RevokedActorToken_Rejected(t *testing.T) {
+	setup := newDispatchSetup(t)
+	ctx := context.Background()
+
+	agent, _ := setup.makeAgentClient(t, "agent")
+	delegate, delegateSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "chained-mcp", []string{"chain.read"}, []string{delegate.ID})
+	setup.seedUser(t, "user-dana")
+	setup.seedConsentGrant(t, "user-dana", agent.ID, mintRes.ID, []string{"chain.read"})
+
+	subjectClaims := identitySubjectClaims(agent.ID)
+	subjectClaims.Subject = "user-dana"
+
+	actorClaims := identitySubjectClaims(delegate.ID)
+	actorClaims.Subject = delegate.ID
+	if err := setup.h.Stores.MachineToken.Save(ctx, token.MachineToken{
+		JTI: actorClaims.JTI, ClientID: delegate.ID, IssuedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(time.Hour), Revoked: true,
+	}); err != nil {
+		t.Fatalf("save revoked actor machine token: %v", err)
+	}
+
+	_, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, subjectClaims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ActorToken:       setup.mintSubjectToken(t, actorClaims),
+		ActorTokenType:   token.TokenTypeAccessToken,
+		ClientID:         delegate.ID,
+		ClientSecret:     delegateSecret,
+		Resource:         "chained-mcp",
+		Scope:            "chain.read",
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant for a revoked actor_token", err)
+	}
+}
+
+// Mint dispatch caps exp at the subject token's exp, like the legacy path.
+func TestTokenExchangeService_Dispatch_MintTarget_ExpiryCappedAtSubject(t *testing.T) {
+	setup := newDispatchSetup(t)
+	ctx := context.Background()
+	agent, _ := setup.makeAgentClient(t, "agent")
+	actor, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, []string{actor.ID})
+	setup.seedUser(t, "user-alice")
+	setup.seedConsentGrant(t, "user-alice", agent.ID, mintRes.ID, []string{"tasks.read"})
+
+	claims := identitySubjectClaims(agent.ID)
+	claims.Subject = "user-alice"
+	claims.Expiry = time.Now().Add(2 * time.Minute).Unix()
+
+	resp, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, claims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         actor.ID,
+		ClientSecret:     actorSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	})
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if got := expClaim(t, resp.AccessToken); got != claims.Expiry {
+		t.Errorf("exp = %d, want the subject token's %d", got, claims.Expiry)
+	}
+	if resp.ExpiresIn > 120 || resp.ExpiresIn < 110 {
+		t.Errorf("expires_in = %d, want about 120 (the subject's remaining lifetime)", resp.ExpiresIn)
+	}
+}
+
+func TestTokenExchangeService_Dispatch_MintTarget_ExpiredSubjectWithinSkew_Refused(t *testing.T) {
+	setup := newDispatchSetup(t)
+	ctx := context.Background()
+	agent, _ := setup.makeAgentClient(t, "agent")
+	actor, actorSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "")
+	mintRes := setup.seedMintResource(t, "tasks-mcp", []string{"tasks.read"}, []string{actor.ID})
+	setup.seedUser(t, "user-alice")
+	setup.seedConsentGrant(t, "user-alice", agent.ID, mintRes.ID, []string{"tasks.read"})
+
+	claims := identitySubjectClaims(agent.ID)
+	claims.Subject = "user-alice"
+	claims.Expiry = time.Now().Add(-5 * time.Second).Unix()
+
+	_, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, claims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         actor.ID,
+		ClientSecret:     actorSecret,
+		Resource:         "tasks-mcp",
+		Scope:            "tasks.read",
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant", err)
+	}
+	rows, err := setup.stores.issuances.ListForUser(ctx, "user-alice", time.Time{})
+	if err != nil {
+		t.Fatalf("list issuances: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("issuances = %d, want none for a refused exchange", len(rows))
+	}
+}

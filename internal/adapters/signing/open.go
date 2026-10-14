@@ -4,8 +4,10 @@ package signing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/authplane/authserver/internal/adapters/cache"
 	"github.com/authplane/authserver/internal/adapters/hcvault"
@@ -53,8 +55,8 @@ type OpenResult struct {
 //   - ds: the DataStore (used to extract a pgxpool.Pool for postgres_key; may be nil)
 //   - encryptor: the DataEncryptor (may be nil if data_encryption is not configured)
 //
-// Driver-specific details (Postgres pool, Vault client sharing) are resolved
-// internally via type assertions — callers pass generic interfaces only.
+// Driver-specific details (the Postgres pool) are resolved internally via type
+// assertions — callers pass generic interfaces only.
 func Open(ctx context.Context, cfg *config.Config, ds output.DataStore, encryptor output.DataEncryptor, obs *observability.Provider, opts ...Option) (*OpenResult, error) {
 	var o openOptions
 	for _, opt := range opts {
@@ -70,7 +72,7 @@ func Open(ctx context.Context, cfg *config.Config, ds output.DataStore, encrypto
 		return &OpenResult{Store: store}, nil
 
 	case "vault_transit":
-		return openVaultTransit(ctx, cfg, encryptor, obs)
+		return openVaultTransit(ctx, cfg, obs)
 
 	case "postgres_key":
 		return openPostgresKey(cfg, ds, encryptor, obs, &o)
@@ -80,20 +82,14 @@ func Open(ctx context.Context, cfg *config.Config, ds output.DataStore, encrypto
 	}
 }
 
-// openVaultTransit creates a Vault Transit KeyStore with its client.
-// If encryptor is an *hcvault.Encryptor targeting the same address+mount,
-// its client is reused.
-func openVaultTransit(ctx context.Context, cfg *config.Config, encryptor output.DataEncryptor, obs *observability.Provider) (*OpenResult, error) {
+// openVaultTransit creates a Vault Transit KeyStore on a Vault client built
+// from signing.vault_transit alone. The client is never shared with the
+// vault_transit_encrypt data encryptor, even on the same address and mount:
+// signing must authenticate with signing.vault_transit.token or
+// signing.vault_transit.approle, so a least-privilege setup with separate
+// signing and data credentials works.
+func openVaultTransit(ctx context.Context, cfg *config.Config, obs *observability.Provider) (*OpenResult, error) {
 	vt := cfg.Signing.VaultTransit
-
-	// Try to reuse the encryption client if it targets the same Vault.
-	if enc, ok := encryptor.(*hcvault.Encryptor); ok {
-		c := enc.Client()
-		if c.Address() == vt.Address && c.Mount() == vt.Mount {
-			store := hcvault.NewStore(c, vt.KeyName, cfg.Signing.Algorithm, obs.WithComponent("vault-transit"))
-			return &OpenResult{Store: store}, nil
-		}
-	}
 
 	var appRole *hcvault.AppRoleAuth
 	if vt.AppRole.RoleID != "" {
@@ -116,7 +112,34 @@ func openVaultTransit(ctx context.Context, cfg *config.Config, encryptor output.
 	}
 
 	store := hcvault.NewStore(client, vt.KeyName, cfg.Signing.Algorithm, obs.WithComponent("vault-transit"))
+	if err := checkVaultSigningKey(ctx, store, obs); err != nil {
+		client.Close()
+		return nil, err
+	}
 	return &OpenResult{Store: store, Closer: closerFunc(client.Close)}, nil
+}
+
+// startupKeyCheckTimeout bounds the startup read of the Transit key, so a hung
+// or unreachable Vault delays boot by at most this long rather than by the
+// Vault client timeout (default 10s). A variable only so tests can shorten it.
+var startupKeyCheckTimeout = 2 * time.Second
+
+// checkVaultSigningKey refuses to start when the Transit key exists and its
+// type cannot sign for signing.algorithm: every token it signed would fail
+// verification. Any other outcome — key not created yet, Vault unreachable —
+// is left to the first signing request, as before, so a Vault outage at boot
+// does not become a boot failure.
+func checkVaultSigningKey(ctx context.Context, store *hcvault.Store, obs *observability.Provider) error {
+	checkCtx, cancel := context.WithTimeout(ctx, startupKeyCheckTimeout)
+	defer cancel()
+	_, err := store.LoadCurrent(checkCtx)
+	if errors.Is(err, hcvault.ErrKeyAlgorithmMismatch) {
+		return fmt.Errorf("vault transit signing key: %w", err)
+	}
+	if err != nil {
+		obs.Logger.WarnContext(ctx, "vault transit signing key not checked at startup", "error", err)
+	}
+	return nil
 }
 
 // closerFunc adapts a func() to io.Closer.
@@ -166,7 +189,9 @@ func openPostgresKey(cfg *config.Config, ds output.DataStore, encryptor output.D
 
 	keyCache := o.signingKeyCache
 	if keyCache == nil {
-		keyCache = cache.NewMemory[*output.SigningKey]()
+		// The TTL is a backstop for a missed notification: the listener
+		// invalidates the entry on every key change it hears about.
+		keyCache = newSigningKeyCache(signingKeyCacheTTL)
 	}
 	cachedStore := WrapKeyStore(haStore, keyCache, obs)
 
@@ -191,4 +216,14 @@ func openPostgresKey(cfg *config.Config, ds output.DataStore, encryptor output.D
 			}()
 		},
 	}, nil
+}
+
+// signingKeyCacheTTL bounds how long the postgres_key store serves a cached
+// current key without re-reading it.
+const signingKeyCacheTTL = 60 * time.Second
+
+// newSigningKeyCache returns the postgres_key current-key cache, expiring
+// its entry after ttl.
+func newSigningKeyCache(ttl time.Duration) output.Cache[*output.SigningKey] {
+	return cache.NewMemoryTTLBounded[*output.SigningKey](ttl, 1)
 }

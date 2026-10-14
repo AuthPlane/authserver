@@ -1153,6 +1153,13 @@ func (m *mockKeyStore) Save(_ context.Context, key *output.SigningKey) error {
 	return nil
 }
 
+func (m *mockKeyStore) CreateIfAbsent(_ context.Context, key *output.SigningKey) error {
+	if m.current == nil {
+		m.current = key
+	}
+	return nil
+}
+
 func (m *mockKeyStore) ListActive(_ context.Context) ([]*output.SigningKey, error) {
 	var keys []*output.SigningKey
 	if m.current != nil {

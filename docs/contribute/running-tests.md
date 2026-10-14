@@ -26,13 +26,15 @@ It runs, in order:
 | OSS hygiene | `make check-oss` | Internal Linear tickets / planning paths / workspace URLs in public-scope files |
 | Unit | `make test-unit` | Domain logic, crypto, config, brokerproto registry |
 | Integration | `make test-integration` | Services, adapters (SQLite in-process) and HTTP handlers — about 80% of the test functions |
-| Coverage floor | `make coverage-check` | The merged unit + integration profile below `COVERAGE_FLOOR` (59%, the merged total measured when the gate was added) |
+| Coverage floor | `make coverage-check` | The merged unit + integration profile below `COVERAGE_FLOOR` (61%, the merged total measured when the gate was added) |
 | Vulnerabilities | `make vulncheck` (`govulncheck`) | Third-party CVEs in all three Go modules — the root, `e2e/`, `compliance/` (stdlib-only findings warn) |
 
 If `ci-local` is red, do **not** push. If it goes green but you've
 touched the postgres adapter, schema or migrations, additionally run
-`make test-integration-postgres`; for an upstream-provider adapter or a
-user-facing flow, `make test-e2e` as well (see the table below).
+`make test-integration-postgres`; for the Vault adapter
+(`internal/adapters/hcvault`), `make test-integration-vault`; for an
+upstream-provider adapter or a user-facing flow, `make test-e2e` as well
+(see the table below).
 
 ## Per-layer targets
 
@@ -53,7 +55,7 @@ The Makefile auto-detects the packages so you don't have to enumerate
 them. `test-unit` and `test-integration` each write a coverage profile
 (`coverage-unit.out`, `coverage-integration.out`); `make coverage-check`
 merges them, prints the three totals and fails when the merged total is
-below `COVERAGE_FLOOR` (59%, the merged total measured when the gate was added). The floor is a ratchet: raise it when
+below `COVERAGE_FLOOR` (61%, the merged total measured when the gate was added). The floor is a ratchet: raise it when
 coverage rises; never lower it to make a red run green. `go tool cover
 -html=coverage-merged.out` shows what the last run missed.
 
@@ -64,6 +66,16 @@ Boots a PostgreSQL container via
 (default `5433`), runs `go test -tags=integration_postgres` against
 `internal/adapters/postgres/...`, then tears the container down.
 Required before merging any postgres-adapter change.
+
+### `make test-integration-vault`
+
+Starts a throwaway Vault dev server (`hashicorp/vault:1.21`, the image in
+`deploy/docker-compose.vault.yml`) on `AUTHSERVER_TEST_VAULT_PORT`
+(default `18200`), enables Transit, runs `go test -tags=integration_vault`
+against `internal/adapters/hcvault`, then removes the container. Every
+other Vault test uses an in-process fake, which cannot catch a wrong
+assumption about what Vault does. Required before merging any
+Vault-adapter change.
 
 ### `make test-race`
 
@@ -84,8 +96,10 @@ CI form that fails on any regression against that report.
 ### `make test-e2e`
 
 Build-tagged `e2e`. The scenarios under
-[`e2e/scenarios/`](../../e2e/scenarios/) boot the binary via
-[`e2e/harness.go`](../../e2e/harness.go) and drive it through HTTP.
+[`e2e/scenarios/`](../../e2e/scenarios/) drive the server through HTTP,
+but [`e2e/harness.go`](../../e2e/harness.go) wires its services in process
+(in-memory SQLite, the file key store, static config) rather than starting
+the binary.
 The hard rule (Gate 0): e2e tests **must not import `internal/...`** —
 the harness is the only seam. `make check-imports` enforces it.
 
@@ -134,11 +148,11 @@ the per-adapter test file.
 If `make ci-local` fails before it runs any test, you're probably
 missing one of:
 
-- Go 1.26.6+ (matches `go.mod`; `go version` should report ≥ 1.26.6)
+- Go 1.26.9+ (matches `go.mod`; `go version` should report ≥ 1.26.9)
 - `golangci-lint v2.11+` (`brew install golangci-lint` or
   `curl -sSfL ...`)
 - `govulncheck` (`make vulncheck` installs it if missing)
-- Docker (for `test-integration-postgres`, `docs-smoke` examples that
+- Docker (for `test-integration-postgres`, `test-integration-vault`, `docs-smoke` examples that
   boot a sidecar, and `docker-build`)
 - Node.js 22+ (only if you're touching `web/admin/` — the rest of the
   build is Go-only)

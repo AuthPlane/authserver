@@ -13,6 +13,7 @@
 ## Prereqs
 
 - A Mint Resource that participates in broker dispatch (an "actor MCP" in delegation flows). See [Concepts → Delegation & agent chains](../../concepts/delegation-and-agent-chains.md).
+- The `authserver admin …` commands below must run with the server's configuration (`--config`, or the server's `AUTHPLANE_*` environment) — the per-deployment forms are in [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare, the CLI acts on a default SQLite database in the working directory, not the server's.
 - Concept context: [Resource](../../concepts/glossary.md#glossary-resource), [Resource slug](../../concepts/glossary.md#glossary-resource-slug), [Token exchange](../../concepts/glossary.md#glossary-token-exchange), [Fronting link](../../concepts/glossary.md#glossary-fronting-link).
 
 ## Background — what `runtime.client_ids` does

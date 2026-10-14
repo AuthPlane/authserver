@@ -15,6 +15,21 @@ Secret only renders when aesMasterKey is set. Catch both halves up front.
     {{- fail "config.data_encryption.aes_master.old_key_env is set but no old-key material is available (set secrets.dataEncryption.aesMasterOldKey or supply secrets.dataEncryption.existingSecret with aes-master-old-key)" -}}
   {{- end -}}
 {{- end -}}
+{{- /*
+The keyfile store in an emptyDir is per pod. With more than one pod, each
+generates its own signing key and serves its own JWKS, so a token issued by
+one pod fails verification against the key set another pod serves. A single
+pod only loses its key on restart, which NOTES.txt warns about instead, as
+it does about keyfile on a persistent volume across replicas (keyfile is a
+single-instance store).
+*/ -}}
+{{- if and (eq (include "authplane.signingKeysInEmptyDir" .) "true") (or (gt (int .Values.replicaCount) 1) .Values.autoscaling.enabled) -}}
+  {{- $scale := printf "replicaCount=%d" (int .Values.replicaCount) -}}
+  {{- if .Values.autoscaling.enabled -}}
+    {{- $scale = "autoscaling.enabled=true" -}}
+  {{- end -}}
+  {{- fail (printf "config.signing.key_store=keyfile with persistence.enabled=false and %s: every pod would generate its own signing key in its own emptyDir and serve its own JWKS, so tokens issued by one pod fail verification against another, and every restart replaces a pod's key. The keyfile store is single-instance: for more than one replica use a shared key store, config.signing.key_store=postgres_key or vault_transit (vault.signing.enabled=true), or run one replica with persistence.enabled=true so its key survives restarts." $scale) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

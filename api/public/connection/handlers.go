@@ -164,6 +164,9 @@ func (h *handler) handleCallbackError(w http.ResponseWriter, r *http.Request, er
 		shared.WriteErrorPage(w, r, http.StatusBadRequest, "Invalid State", "The state parameter is invalid or tampered with.")
 	case errors.Is(err, domain.ErrStateForeignUser):
 		shared.WriteErrorPage(w, r, http.StatusForbidden, "Forbidden", "This connect request belongs to a different user.")
+	case errors.Is(err, domain.ErrInvalidTarget):
+		h.obs.Logger.WarnContext(r.Context(), "connect callback refused", "error", err)
+		shared.WriteErrorPage(w, r, http.StatusBadRequest, "Bad Request", "This connect request does not match the provider. Please start again.")
 	default:
 		h.obs.Logger.ErrorContext(r.Context(), "complete connect failed", "error", err)
 		shared.WriteErrorPage(w, r, http.StatusInternalServerError, "Error", "Failed to complete the connection. Please try again.")

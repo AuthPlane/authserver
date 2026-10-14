@@ -12,6 +12,7 @@ import (
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/domain/client"
 	"github.com/authplane/authserver/internal/domain/resource"
+	"github.com/authplane/authserver/internal/domain/token"
 	"github.com/authplane/authserver/internal/domain/user"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
@@ -252,6 +253,18 @@ func IssuanceRevoked(t *testing.T, stores *sqlite.Stores, jti string) bool {
 		t.Fatalf("get issuance %s: no row", jti)
 	}
 	return got.RevokedAt != nil
+}
+
+// BrokenMachineTokenStore wraps a machine-token store whose GetByJTI fails
+// with Err; every other method reaches the wrapped store. It stands in for a
+// store that cannot be read, for the paths that must fail closed then.
+type BrokenMachineTokenStore struct {
+	output.MachineTokenStore
+	Err error
+}
+
+func (b BrokenMachineTokenStore) GetByJTI(context.Context, string) (*token.MachineToken, error) {
+	return nil, b.Err
 }
 
 // BrokenIssuanceStore is an output.IssuanceStore whose every method fails

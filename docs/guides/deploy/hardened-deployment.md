@@ -114,7 +114,7 @@ The API-protected routes (`/admin/clients`, `/admin/users`, `/admin/keys`, etc.)
 ## Container image: digest-pinned bases
 
 `build/Dockerfile` pins both stages by digest, not only by tag —
-`golang:1.26-alpine@sha256:…` for the builder and
+`golang:1.26.9-alpine@sha256:…` for the builder and
 `gcr.io/distroless/static-debian12:nonroot@sha256:…` for the runtime — so a
 tag that is re-pushed upstream cannot change what the image is built from.
 Dependabot bumps the digests. To confirm what a shipped image was built

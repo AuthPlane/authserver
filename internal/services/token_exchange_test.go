@@ -58,8 +58,28 @@ func newTETestSetup(t *testing.T, cfg output.TokenExchangeConfig) *teTestSetup {
 
 func newTETestSetupWithProvider(t *testing.T, teConfig output.TokenExchangeConfigProvider) *teTestSetup {
 	t.Helper()
+	return newTETestSetupWrapped(t, teConfig, nil, nil)
+}
+
+// newTETestSetupWrapped is newTETestSetupWithProvider with the machine-token
+// and revocation stores the service sees replaced by wrapMT / wrapRev (nil
+// keeps the real one). The setup's helper stores stay the real ones.
+func newTETestSetupWrapped(t *testing.T, teConfig output.TokenExchangeConfigProvider,
+	wrapMT func(output.MachineTokenStore) output.MachineTokenStore,
+	wrapRev func(output.RevocationStore) output.RevocationStore,
+) *teTestSetup {
+	t.Helper()
 	stores := testdata.SetupTestStores(t)
 	obs := testObs()
+
+	var machineTokens output.MachineTokenStore = stores.MachineToken
+	if wrapMT != nil {
+		machineTokens = wrapMT(machineTokens)
+	}
+	var revocation output.RevocationStore = stores.Revocation
+	if wrapRev != nil {
+		revocation = wrapRev(revocation)
+	}
 
 	dir := t.TempDir()
 	ks, err := keyfile.New(dir, obs)
@@ -81,10 +101,10 @@ func newTETestSetupWithProvider(t *testing.T, teConfig output.TokenExchangeConfi
 
 	svc := services.NewTokenExchangeService(
 		stores.Client,
-		stores.MachineToken,
+		machineTokens,
 		jwksSvc,
 		jwksSvc,
-		stores.Revocation,
+		revocation,
 		staticIssuerForTest(teIssuer),
 		teConfig,
 		registry,
@@ -1330,7 +1350,7 @@ func TestTokenExchange_RevokedUserSubjectToken_Rejected(t *testing.T) {
 	if err := setup.h.Stores.Revocation.TrackJTI(ctx, jti, "family-1", time.Now().Add(1*time.Hour)); err != nil {
 		t.Fatalf("track JTI: %v", err)
 	}
-	if err := setup.h.Stores.Revocation.RevokeJTI(ctx, jti); err != nil {
+	if err := setup.h.Stores.Revocation.RevokeJTI(ctx, jti, time.Now().Add(1*time.Hour)); err != nil {
 		t.Fatalf("revoke JTI: %v", err)
 	}
 
@@ -1963,5 +1983,349 @@ func TestTokenExchange_StripsNonIdentityClaimsFromInnerHops(t *testing.T) {
 		if _, found := inner[forbidden]; found {
 			t.Errorf("inner act hop still contains forbidden non-identity claim %q after sanitize", forbidden)
 		}
+	}
+}
+
+// --- Revocation of subject and actor tokens -------------------------------
+
+func selfExchangeConfig() output.TokenExchangeConfig {
+	return output.TokenExchangeConfig{AllowSelfExchange: true, MaxChainDepth: 5, TokenExpiry: 15 * time.Minute}
+}
+
+// A token minted by token exchange carries the user's sub and is recorded in
+// the machine-token store; /oauth/revoke revokes it there. It must not seed
+// another exchange afterwards. The revocation check used to look in the
+// machine store only when sub == client_id, so this token was checked
+// against the JTI denylist alone and accepted.
+func TestTokenExchange_RevokedExchangeMintedToken_RejectedAsSubject(t *testing.T) {
+	setup := newTETestSetup(t, selfExchangeConfig())
+	ctx := context.Background()
+	c, secret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+
+	first, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, defaultSubjectClaims(c.ID)),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         c.ID,
+		ClientSecret:     secret,
+	})
+	if err != nil {
+		t.Fatalf("first exchange: %v", err)
+	}
+	if sub := parseClaims(t, first.AccessToken)["sub"]; sub != "user-123" {
+		t.Fatalf("precondition: minted token sub = %v, want the user", sub)
+	}
+
+	revoker := services.NewRevocationService(setup.h.Stores.Token, setup.h.Stores.Client, setup.h.Stores.MachineToken,
+		setup.jwksSvc, staticIssuerForTest(teIssuer), setup.obs, setup.auditSvc, setup.h.Stores.Revocation)
+	if err = revoker.RevokeToken(ctx, input.RevokeRequest{
+		Token: first.AccessToken, TokenTypeHint: "access_token", ClientID: c.ID, ClientSecret: secret,
+	}); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	_, err = setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     first.AccessToken,
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         c.ID,
+		ClientSecret:     secret,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("exchange of a revoked token: err = %v, want ErrInvalidGrant", err)
+	}
+}
+
+// The jwt-bearer grant records its tokens in the machine-token store with the
+// federated user as sub. A revoked one must be refused as subject_token.
+func TestTokenExchange_RevokedMachineRowWithUserSub_RejectedAsSubject(t *testing.T) {
+	setup := newTETestSetup(t, selfExchangeConfig())
+	ctx := context.Background()
+	c, secret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+
+	claims := defaultSubjectClaims(c.ID)
+	claims.Subject = "federated-user@idp.example"
+	if err := setup.h.Stores.MachineToken.Save(ctx, token.MachineToken{
+		JTI: claims.JTI, ClientID: c.ID, IssuedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(time.Hour), Revoked: true,
+	}); err != nil {
+		t.Fatalf("save machine token: %v", err)
+	}
+
+	_, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, claims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         c.ID,
+		ClientSecret:     secret,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant (revoked machine-store token with a user sub)", err)
+	}
+}
+
+type failingMachineTokens struct{ output.MachineTokenStore }
+
+func (failingMachineTokens) GetByJTI(context.Context, string) (*token.MachineToken, error) {
+	return nil, errors.New("machine token store unavailable")
+}
+
+type failingRevocation struct{ output.RevocationStore }
+
+func (failingRevocation) IsRevoked(context.Context, string) (bool, error) {
+	return false, errors.New("revocation store unavailable")
+}
+
+// A revocation lookup that fails must refuse the exchange, as introspection
+// does, rather than treat the token as not revoked.
+func TestTokenExchange_RevocationLookupFailure_Refused(t *testing.T) {
+	cases := []struct {
+		name    string
+		wrapMT  func(output.MachineTokenStore) output.MachineTokenStore
+		wrapRev func(output.RevocationStore) output.RevocationStore
+		sub     func(clientID string) string
+	}{
+		{"machine store fails, machine token", func(m output.MachineTokenStore) output.MachineTokenStore { return failingMachineTokens{m} }, nil,
+			func(clientID string) string { return clientID }},
+		{"machine store fails, user token", func(m output.MachineTokenStore) output.MachineTokenStore { return failingMachineTokens{m} }, nil,
+			func(string) string { return "user-123" }},
+		{"revocation store fails, user token", nil, func(r output.RevocationStore) output.RevocationStore { return failingRevocation{r} },
+			func(string) string { return "user-123" }},
+		{"revocation store fails, machine token", nil, func(r output.RevocationStore) output.RevocationStore { return failingRevocation{r} },
+			func(clientID string) string { return clientID }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newTETestSetupWrapped(t, static.NewTokenExchangeConfigProvider(selfExchangeConfig()), tc.wrapMT, tc.wrapRev)
+			c, secret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+			claims := defaultSubjectClaims(c.ID)
+			claims.Subject = tc.sub(c.ID)
+
+			resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+				SubjectToken:     setup.mintSubjectToken(t, claims),
+				SubjectTokenType: token.TokenTypeAccessToken,
+				ClientID:         c.ID,
+				ClientSecret:     secret,
+			})
+			if err == nil || resp != nil {
+				t.Fatalf("exchange with a failing revocation lookup = (%v, %v); want a refusal", resp, err)
+			}
+			// A fault, not a revocation: a server error, not invalid_grant.
+			if errors.Is(err, domain.ErrInvalidGrant) {
+				t.Fatalf("lookup failure reported as a revoked token (invalid_grant): %v", err)
+			}
+		})
+	}
+}
+
+// failingForJTI fails lookups for one JTI only, so a test can make the actor
+// token's lookup fail while the subject token's succeeds.
+type failingMachineTokensForJTI struct {
+	output.MachineTokenStore
+	jti string
+}
+
+func (f failingMachineTokensForJTI) GetByJTI(ctx context.Context, jti string) (*token.MachineToken, error) {
+	if jti == f.jti {
+		return nil, errors.New("machine token store unavailable")
+	}
+	return f.MachineTokenStore.GetByJTI(ctx, jti)
+}
+
+type failingRevocationForJTI struct {
+	output.RevocationStore
+	jti string
+}
+
+func (f failingRevocationForJTI) IsRevoked(ctx context.Context, jti string) (bool, error) {
+	if jti == f.jti {
+		return false, errors.New("revocation store unavailable")
+	}
+	return f.RevocationStore.IsRevoked(ctx, jti)
+}
+
+// The actor_token's revocation lookup fails closed too, as a server fault.
+func TestTokenExchange_ActorRevocationLookupFailure_Refused(t *testing.T) {
+	actorJTI := crypto.GenerateRandomString(16)
+	cases := []struct {
+		name    string
+		wrapMT  func(output.MachineTokenStore) output.MachineTokenStore
+		wrapRev func(output.RevocationStore) output.RevocationStore
+	}{
+		{"machine store fails for the actor", func(m output.MachineTokenStore) output.MachineTokenStore {
+			return failingMachineTokensForJTI{m, actorJTI}
+		}, nil},
+		{"revocation store fails for the actor", nil, func(r output.RevocationStore) output.RevocationStore {
+			return failingRevocationForJTI{r, actorJTI}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := newTETestSetupWrapped(t, static.NewTokenExchangeConfigProvider(selfExchangeConfig()), tc.wrapMT, tc.wrapRev)
+			c, secret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+			actor := defaultSubjectClaims(c.ID)
+			actor.Subject = c.ID
+			actor.JTI = actorJTI
+
+			resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+				SubjectToken:     setup.mintSubjectToken(t, defaultSubjectClaims(c.ID)),
+				SubjectTokenType: token.TokenTypeAccessToken,
+				ActorToken:       setup.mintSubjectToken(t, actor),
+				ActorTokenType:   token.TokenTypeAccessToken,
+				ClientID:         c.ID,
+				ClientSecret:     secret,
+			})
+			if err == nil || resp != nil {
+				t.Fatalf("exchange with a failing actor revocation lookup = (%v, %v); want a refusal", resp, err)
+			}
+			if errors.Is(err, domain.ErrInvalidGrant) {
+				t.Fatalf("actor lookup failure reported as a revoked token (invalid_grant): %v", err)
+			}
+		})
+	}
+}
+
+// A revoked token must not be accepted as actor_token either: denylisted user
+// tokens and revoked machine tokens alike.
+func TestTokenExchange_RevokedActorToken_Rejected(t *testing.T) {
+	setup := newTETestSetup(t, selfExchangeConfig())
+	ctx := context.Background()
+	c, secret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+
+	// A denylisted user token.
+	userActor := defaultSubjectClaims(c.ID)
+	testdata.EnsureUser(t, setup.h.Stores.User, "user-123")
+	if err := setup.h.Stores.Token.CreateFamily(ctx, &token.Family{
+		ID: "family-actor", ClientID: c.ID, UserID: "user-123", Status: token.FamilyActive, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create family: %v", err)
+	}
+	if err := setup.h.Stores.Revocation.TrackJTI(ctx, userActor.JTI, "family-actor", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	if err := setup.h.Stores.Revocation.RevokeByFamily(ctx, "family-actor"); err != nil {
+		t.Fatalf("revoke family: %v", err)
+	}
+
+	// A revoked machine token.
+	machineActor := defaultSubjectClaims(c.ID)
+	machineActor.Subject = c.ID
+	if err := setup.h.Stores.MachineToken.Save(ctx, token.MachineToken{
+		JTI: machineActor.JTI, ClientID: c.ID, IssuedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(time.Hour), Revoked: true,
+	}); err != nil {
+		t.Fatalf("save machine token: %v", err)
+	}
+
+	for name, actor := range map[string]crypto.AccessTokenClaims{"denylisted user token": userActor, "revoked machine token": machineActor} {
+		t.Run(name, func(t *testing.T) {
+			_, err := setup.svc.Exchange(ctx, input.TokenExchangeRequest{
+				SubjectToken:     setup.mintSubjectToken(t, defaultSubjectClaims(c.ID)),
+				SubjectTokenType: token.TokenTypeAccessToken,
+				ActorToken:       setup.mintSubjectToken(t, actor),
+				ActorTokenType:   token.TokenTypeAccessToken,
+				ClientID:         c.ID,
+				ClientSecret:     secret,
+			})
+			if !errors.Is(err, domain.ErrInvalidGrant) {
+				t.Fatalf("err = %v, want ErrInvalidGrant for a revoked actor_token", err)
+			}
+		})
+	}
+}
+
+// A derived token must not outlive its subject token: otherwise each
+// exchange of the newest token pushes exp further out and access never ends.
+
+func expClaim(t *testing.T, accessToken string) int64 {
+	t.Helper()
+	exp, ok := parseClaims(t, accessToken)["exp"].(float64)
+	if !ok {
+		t.Fatal("issued token has no numeric exp")
+	}
+	return int64(exp)
+}
+
+func TestTokenExchange_Legacy_ExpiryCappedAtSubject(t *testing.T) {
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
+		AllowSelfExchange: true,
+		MaxChainDepth:     5,
+		TokenExpiry:       15 * time.Minute,
+	})
+	subClient, subSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+	claims := defaultSubjectClaims(subClient.ID)
+	claims.Expiry = time.Now().Add(2 * time.Minute).Unix()
+	subjectExp := claims.Expiry
+
+	// T0 -> T1 -> T2: no hop may move exp past T0's.
+	current := setup.mintSubjectToken(t, claims)
+	for hop := 1; hop <= 2; hop++ {
+		resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+			SubjectToken:     current,
+			SubjectTokenType: token.TokenTypeAccessToken,
+			ClientID:         subClient.ID,
+			ClientSecret:     subSecret,
+		})
+		if err != nil {
+			t.Fatalf("hop %d: exchange: %v", hop, err)
+		}
+		if got := expClaim(t, resp.AccessToken); got != subjectExp {
+			t.Errorf("hop %d: exp = %d, want the subject token's %d", hop, got, subjectExp)
+		}
+		if resp.ExpiresIn > 120 || resp.ExpiresIn < 110 {
+			t.Errorf("hop %d: expires_in = %d, want about 120 (the subject's remaining lifetime)", hop, resp.ExpiresIn)
+		}
+		current = resp.AccessToken
+	}
+}
+
+// A subject token that outlives the configured lifetime leaves it in force.
+func TestTokenExchange_Legacy_ExpiryKeepsConfiguredLifetimeWhenShorter(t *testing.T) {
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
+		AllowSelfExchange: true,
+		MaxChainDepth:     5,
+		TokenExpiry:       5 * time.Minute,
+	})
+	subClient, subSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+	before := time.Now()
+	resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, defaultSubjectClaims(subClient.ID)),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         subClient.ID,
+		ClientSecret:     subSecret,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp.ExpiresIn != 300 {
+		t.Errorf("expires_in = %d, want 300", resp.ExpiresIn)
+	}
+	exp := expClaim(t, resp.AccessToken)
+	if lo, hi := before.Add(5*time.Minute).Unix(), time.Now().Add(5*time.Minute).Unix(); exp < lo || exp > hi {
+		t.Errorf("exp = %d, want within [%d, %d]", exp, lo, hi)
+	}
+}
+
+// The verifier tolerates 30 s of clock skew, so a subject token whose exp
+// has just passed still verifies. Exchanging it would mint a token that is
+// already expired; it is refused instead.
+func TestTokenExchange_Legacy_ExpiredSubjectWithinSkew_Refused(t *testing.T) {
+	setup := newTETestSetup(t, output.TokenExchangeConfig{
+		AllowSelfExchange: true,
+		MaxChainDepth:     5,
+		TokenExpiry:       15 * time.Minute,
+	})
+	subClient, subSecret := setup.createTEClient(t, []string{token.GrantTypeTokenExchange}, "read write")
+	claims := defaultSubjectClaims(subClient.ID)
+	claims.Expiry = time.Now().Add(-5 * time.Second).Unix()
+
+	resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
+		SubjectToken:     setup.mintSubjectToken(t, claims),
+		SubjectTokenType: token.TokenTypeAccessToken,
+		ClientID:         subClient.ID,
+		ClientSecret:     subSecret,
+	})
+	if !errors.Is(err, domain.ErrInvalidGrant) {
+		t.Fatalf("err = %v, want ErrInvalidGrant", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
 	}
 }

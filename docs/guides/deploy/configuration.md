@@ -41,7 +41,7 @@ SQLite enables WAL by default (`storage.sqlite.wal: true`) so reads do not block
 | Choice | When | Notes |
 | --- | --- | --- |
 | `keyfile` (default) | Single host | Keys on disk at `signing.key_path` (default `data/keys`). Back this directory up. |
-| `postgres_key` | Multi-instance Postgres | Keys live in Postgres, AES-encrypted with a master key from `signing.postgres_key.encryption_key_env`. Requires `data_encryption.driver: aes_master`. |
+| `postgres_key` | Multi-instance Postgres | Keys live in Postgres, encrypted by the configured `data_encryption` driver (`aes_master` or `vault_transit_encrypt`). Requires `storage.driver: postgres`. `signing.postgres_key.encryption_key_env` is read but not used. |
 | `vault_transit` | Compliance / HSM | Keys never leave Vault. See [HashiCorp Vault Transit](hashicorp-vault-transit.md). |
 
 Full schema: [`signing` reference](../../reference/configuration.md#config-signing).
@@ -97,6 +97,7 @@ Validation lives in `internal/config/validate.go`; boot fails fast if any requir
 server:
   issuer: https://auth.example.com    # Must be HTTPS, no trailing slash
   shutdown_wait: 20s                  # See systemd.md → SIGTERM
+  allowed_origins: ["https://app.example.com"]  # Set non-empty or browser MCP clients fail CORS
 
 storage:
   driver: postgres                    # AUTHPLANE_STORAGE_DRIVER
@@ -106,9 +107,7 @@ storage:
 
 signing:
   algorithm: ES256
-  key_store: postgres_key             # Multi-replica safe; requires data_encryption
-  postgres_key:
-    encryption_key_env: AUTHPLANE_SIGNING_KEY_ENC   # *name* of the env var that holds the key (your choice)
+  key_store: postgres_key             # Multi-replica safe; keys encrypted by data_encryption
 
 data_encryption:
   driver: aes_master
@@ -131,9 +130,6 @@ client_credentials:
 observability:
   logging: { level: info, format: json }
   metrics: { provider: prometheus, path: /metrics }
-
-server:
-  allowed_origins: ["https://app.example.com"]  # Set non-empty or browser MCP clients fail CORS
 ```
 
 Then run with:
@@ -143,22 +139,21 @@ Then run with:
 export AUTHPLANE_STORAGE_POSTGRES_DSN="postgres://authserver@db/authserver?sslmode=require"
 export AUTHPLANE_SESSION_SECRET=$(openssl rand -hex 32)
 export AUTHPLANE_ADMIN_API_KEY=$(openssl rand -hex 32)
-# The next two names are the ones config.yaml points at through
-# encryption_key_env / key_env — the server reads whatever variable you name there.
-export AUTHPLANE_SIGNING_KEY_ENC=$(openssl rand -hex 32)
+# The next name is the one config.yaml points at through
+# key_env — the server reads whatever variable you name there.
 export AUTHPLANE_DATA_ENC_KEY=$(openssl rand -hex 32)
 authserver serve --config /etc/authserver/config.yaml
 ```
 
-Two of the keys above are **indirections**: `signing.postgres_key.encryption_key_env`
-and `data_encryption.aes_master.key_env` hold the *name* of an environment
-variable, and the server reads the key from the variable with that name. The
-names in the example (`AUTHPLANE_SIGNING_KEY_ENC`, `AUTHPLANE_DATA_ENC_KEY`)
-are only conventions — pick any name, as long as the YAML and the `export`
-agree. Setting the config keys themselves from the environment uses the
-generated names `AUTHPLANE_SIGNING_PG_ENCRYPTION_KEY_ENV` and
-`AUTHPLANE_DATA_ENCRYPTION_KEY_ENV`, which again carry a variable *name*, not
-the key. See [`env-vars.md`](../../reference/env-vars.md).
+One of the keys above is an **indirection**: `data_encryption.aes_master.key_env`
+holds the *name* of an environment variable, and the server reads the key from
+the variable with that name. The name in the example (`AUTHPLANE_DATA_ENC_KEY`)
+is only a convention — pick any name, as long as the YAML and the `export`
+agree. Setting the config key itself from the environment uses the generated
+name `AUTHPLANE_DATA_ENCRYPTION_KEY_ENV`, which again carries a variable *name*,
+not the key. See [`env-vars.md`](../../reference/env-vars.md).
+(`signing.postgres_key.encryption_key_env` is read but not used: `postgres_key`
+encrypts signing keys with the `data_encryption` driver.)
 
 ## Verify
 

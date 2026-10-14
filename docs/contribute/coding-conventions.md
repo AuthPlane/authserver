@@ -80,7 +80,8 @@ it as Factory+Registry instead.**
 `make ci-local` runs build + lint + import-boundary + OSS-leak + unit
 tests + govulncheck. **If it's red, you do not push.** Adapter or
 service changes additionally need `make test-integration` (and
-`test-integration-postgres` for postgres-adapter touches). See
+`test-integration-postgres` for postgres-adapter touches,
+`test-integration-vault` for Vault-adapter touches). See
 [running-tests.md](running-tests.md).
 
 ## Commits and PRs

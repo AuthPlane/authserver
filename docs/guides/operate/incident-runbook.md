@@ -15,6 +15,7 @@ This page lists five named incidents, each with the same Symptoms / Detect / Con
 ## Prereqs
 
 - `AUTHPLANE_ADMIN_API_KEY` exported.
+- The `authserver admin …` commands on this page must run with the server's configuration (`--config`, or the server's `AUTHPLANE_*` environment) — the per-deployment forms are in [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare, the CLI acts on a default SQLite database in the working directory, not the server's.
 - Prometheus / OTel scrape pointed at the AS (see [Deploy → Observability](../deploy/observability-prometheus-otel.md)).
 - An alerting rule pack subscribed to the metric thresholds called out below — [`deploy/observability/alerts.yaml`](../../../deploy/observability/alerts.yaml) ships one in Prometheus rule-file format, and each rule's `runbook` annotation points at a section of this page.
 
@@ -31,20 +32,48 @@ A signing key (or HSM session) was exposed.
 
 ### Detect
 ```bash
-# Recent key.rotated rows (none expected unless you rotated)
+# Recent key.rotated rows (none expected unless you rotated). Only rotations through
+# the admin API write this row; a CLI or Vault-side rotation leaves no trace here.
 curl -fsS "http://localhost:9001/admin/audit?action=key.rotated&limit=10" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.'
 ```
 
 Prometheus: `rate(authserver_tokens_issued_total[5m])` (canonical: `TokensIssued` in `internal/observability/metrics.go`) spikes anomalously, or `authserver_key_rotation_total` (canonical: `KeyRotationTotal` in `internal/observability/metrics.go`) increments without an operator action.
 
 ### Contain
-1. Rotate immediately. Every new JWT signs under a fresh `kid`:
+
+**First, close the leak itself.** Rotating does nothing while the attacker can still reach the signing key:
+- On `vault_transit`, the "key" an attacker holds is a Vault credential that can call `transit/sign`. Revoke it, and every token issued from it. For a static token: `vault token revoke <token>`. For AppRole, destroying the secret-id is not enough — tokens already issued from it keep working — so do both: `vault write auth/approle/role/<role>/secret-id-accessor/destroy secret_id_accessor=<accessor>` **and** `vault lease revoke -prefix auth/approle/login` (this also revokes authserver's own token). Then issue a new secret-id to authserver and restart it; signing fails with a server error between the revoke and the restart. Until the revoke, the attacker can sign with any version Vault still signs with — every version at or above the key's `min_decryption_version` (and `min_encryption_version`, if set), the newest included — however often you rotate.
+- On `postgres_key`, signing keys are stored encrypted with the `data_encryption` key. If the database and that key both leaked, every new signing key leaks too: close the database access and rotate the `data_encryption` key first (`aes_master`: new `key_env`, old one in `old_key_env`) and **restart every instance on it** — until they restart, the running servers still encrypt with the leaked key — then rotate the signing key. With `vault_transit_encrypt`, treat it as a Vault credential leak (above).
+- On `keyfile`, close whatever exposed the key directory.
+
+One rotation does **not** contain a leaked key. The AS keeps the key before the current one as the "previous" key: it stays in the JWKS and is accepted — by resource servers and by this server's own introspection — until the *next* rotation removes it. A forged token carries whatever `jti` and expiry the attacker chose, so revoking issued tokens does not stop it. The leaked key stops being trusted only when it is no longer in the JWKS.
+
+1. **Rotate twice**, preferably through the admin API, which records each rotation as a `key.rotated` audit row (on `vault_transit` it needs `update` on `transit/keys/<key_name>/rotate`, or the call fails):
    ```bash
-   authserver admin key rotate
+   curl -fsS -X POST http://localhost:9001/admin/keys/rotate -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY"
+   curl -fsS -X POST http://localhost:9001/admin/keys/rotate -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY"
    ```
-2. If the compromised key was on `keyfile`, drop `data/keys/rotated-<old>.pem` after step 4. If on Vault Transit, disable the old key version in Vault.
-3. Force resource servers to re-fetch JWKS — restart them or wait one JWKS TTL.
+   The CLI works as well (run it twice; it writes no audit row):
+   ```bash
+   # Host install (systemd): as the service user, with the server's config and secrets
+   sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver admin key rotate --config /etc/authserver/config.yaml'
+   # Docker quickstart container
+   docker exec authserver /authserver admin key rotate --config /config.yaml
+   # Docker Compose: from the repo root, in the shell that ran `up`; substitute your stack's file
+   docker compose -f deploy/docker-compose.sqlite.yml exec authserver /authserver admin key rotate
+   # Helm chart
+   kubectl -n authplane exec deploy/authplane -- /authserver admin key rotate --config /etc/authplane/config.yaml
+   ```
+   Check the first line of output (`key store: …`) names the store the server uses.
+
+   The second rotation also invalidates every access token legitimately issued before the incident. That is the cost: user-token clients get new access tokens by refreshing (refresh tokens are opaque and are not affected) or by signing in again; client-credentials clients simply request new ones; token-exchange clients need a new subject token first if theirs was signed by a dropped key, and XAA clients a new ID-JAG.
+
+   On `vault_transit` the second rotation can be replaced: after **one** rotation, run `vault write transit/keys/<key_name>/config min_decryption_version=<the new latest version>`. Vault then reports only that version, so every earlier version leaves the JWKS. Raising `min_decryption_version` **without** a rotation first keeps the newest version trusted — the one a holder of the leaked credential signs with.
+2. **Make every instance serve the new JWKS.** Each instance re-reads it from the key store within 60 seconds; send `SIGHUP` to each (host installs) to make it immediate.
+3. **Confirm** that `/.well-known/jwks.json` no longer lists the leaked `kid` — on every instance, if they sit behind one URL (on `vault_transit` the `kid` is `<key_name>-v<version>`).
+4. **Make resource servers re-fetch the JWKS**: restart them. The JWKS is served with `Cache-Control: public, max-age=3600`, so a verifier that honours the header keeps the leaked key for up to an hour otherwise.
+5. On `keyfile`, the leaked key is gone from disk after the second rotation; delete any copies (backups) that contain it.
 
 See [Key rotation](key-rotation.md) for the full procedure.
 
@@ -61,7 +90,7 @@ See [Key rotation](key-rotation.md) for the full procedure.
 
 ### Recover
 - Confirm `/.well-known/jwks.json` carries the new `kid` and resource servers accept new tokens.
-- Re-enable user logins; old refresh tokens are unaffected (opaque, not JWTs), but revoked families will require re-auth.
+- Re-enable user logins; refresh tokens are unaffected (opaque, not JWTs), but revoked families will require re-auth.
 
 ### Post-incident
 - Document: rotation timestamp, old/new `kid`, scope of revoked issuances.
@@ -83,11 +112,11 @@ See [Key rotation](key-rotation.md) for the full procedure.
 ```bash
 # Suspicious admin actions in the last hour
 curl -fsS "http://localhost:9001/admin/audit?action=client.created_admin&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, actor_id, ip, detail}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, actor_id, ip, detail}'
 
 # Any DCR mode flip
 curl -fsS "http://localhost:9001/admin/audit?action=dcr.mode_updated&since=$(date -u -v-1d '+%Y-%m-%dT%H:%M:%SZ')" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.'
 ```
 
 ### Contain
@@ -131,13 +160,13 @@ A wave of refresh-token reuse detections — possible token-theft campaign or bu
 ```bash
 # All family revocations in the last hour
 curl -fsS "http://localhost:9001/admin/audit?action=family.revoked&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, detail}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, detail}'
 # Detections whose revocation failed — these families are still live
 curl -fsS "http://localhost:9001/admin/audit?action=family.revocation_failed&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, detail}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, detail}'
 # Families whose access tokens were not denylisted — they introspect as active until exp
 curl -fsS "http://localhost:9001/admin/audit?action=family.denylist_failed&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, detail}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, detail}'
 ```
 
 Prometheus:
@@ -195,7 +224,7 @@ sum(rate(authserver_refresh_token_reuse_total[5m])) > 0.1
 ```bash
 # Upstream issuances in the last 24h
 curl -fsS "http://localhost:9001/admin/audit?action=upstream.token.issued&since=$(date -u -v-1d '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, actor_id, client_id, detail}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, actor_id, client_id, detail}'
 ```
 
 Prometheus: `rate(authserver_upstream_token_issued_total[5m])` (canonical: `UpstreamTokenIssuedTotal` in `internal/observability/metrics.go`) — spike for one provider.
@@ -238,7 +267,7 @@ A bearer-of-DPoP-token attack — replaying a stolen DPoP proof with a stolen to
 ```bash
 # AS-side token issuance for the affected user; correlate with their reported window
 curl -fsS "http://localhost:9001/admin/audit?actor_id=$USER_ID&action=token.issued&since=$(date -u -v-1d '+%Y-%m-%dT%H:%M:%SZ')" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.'
 ```
 
 Prometheus:
@@ -275,7 +304,7 @@ The MCP server itself is the primary enforcement point for DPoP — the AS only 
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `admin key rotate` succeeds but resource servers still reject new tokens | Verifier cache TTL not yet elapsed | Wait one TTL (default 5 min) or restart verifiers. |
+| A key rotation succeeds but resource servers still reject new tokens | The verifier's JWKS cache is stale; or, with several instances, the verifier fetched the JWKS from one that has not published the new key yet | Check `/.well-known/jwks.json` lists the new `kid` (every instance re-reads it within 60 seconds; `SIGHUP` makes it immediate). Then refresh or restart verifiers — the JWKS is served with `max-age=3600`. |
 | `force-logout` reports 0 families revoked but user is still logged in | User holds a stale access token (still in JWT TTL) | Revoke per-issuance, or wait for token TTL (`dcr.default_token_expiry`, default 15m). |
 | `revoke-broker` does not stop the agent from using the upstream | Already-vended upstream tokens are not AS-revocable | Coordinate with the upstream provider's revocation API. |
 | Suspended client's tokens still work | Suspend blocks new issuance; existing tokens valid until `exp` | Revoke at issuance level with `admin issuance revoke` for each `JTI`. |

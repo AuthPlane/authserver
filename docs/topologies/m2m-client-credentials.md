@@ -95,6 +95,8 @@ Two operations: (1) register the MCP as a Mint Resource;
 
 ### Via CLI
 
+Run these with the server's configuration — `--config` with the file the server runs with, or where the server's `AUTHPLANE_*` environment is set; the per-deployment forms (systemd, Docker, Compose, Helm, Kubernetes) are in [Admin CLI → Run the CLI against the server's data](../guides/operate/admin-cli.md#run-the-cli-against-the-servers-data). The CLI opens the server's database itself; run bare, it acts on a default SQLite database in the working directory, and the server never sees the result.
+
 ```bash
 # 1. Register the Resource
 authserver admin resource create \

@@ -63,6 +63,11 @@ type introspectEnv struct {
 	addUser         func(t *testing.T, id string, status user.Status)
 	addMachineToken func(t *testing.T, jti, clientID string)
 	withResolver    func(r services.ResourceRuntimeResolver)
+	// revokeMachineToken marks a machine_tokens row revoked;
+	// withBrokenMachineTokens rebuilds the service over a machine-token
+	// store whose lookups fail.
+	revokeMachineToken      func(t *testing.T, jti string)
+	withBrokenMachineTokens func()
 }
 
 func newIntrospectEnv(t *testing.T) *introspectEnv {
@@ -119,7 +124,7 @@ func newIntrospectEnv(t *testing.T) *introspectEnv {
 	registry := services.NewResourceRegistry(stores.Resource, stores.BrokerProvider, obs)
 	svc.WithResourceRegistry(registry)
 
-	return &introspectEnv{
+	env := &introspectEnv{
 		svc:      svc,
 		kp:       kp,
 		clientID: c.ID,
@@ -164,7 +169,22 @@ func newIntrospectEnv(t *testing.T) *introspectEnv {
 			}
 		},
 		withResolver: func(r services.ResourceRuntimeResolver) { svc.WithResourceRegistry(r) },
+		revokeMachineToken: func(t *testing.T, jti string) {
+			t.Helper()
+			if err := stores.MachineToken.Revoke(context.Background(), jti); err != nil {
+				t.Fatalf("revoke machine token %s: %v", jti, err)
+			}
+		},
 	}
+	env.withBrokenMachineTokens = func() {
+		broken := testdata.BrokenMachineTokenStore{MachineTokenStore: stores.MachineToken, Err: errors.New("machine tokens unavailable")}
+		env.svc = services.NewIntrospectionService(
+			jwksMock, stores.Revocation, broken, stores.Client, stores.User,
+			staticIssuerForTest(testIssuer), obs, auditor,
+		)
+		env.svc.WithResourceRegistry(registry)
+	}
+	return env
 }
 
 // wantInvalidClient asserts the service refused the caller outright. Gate 0
@@ -364,7 +384,7 @@ func TestIntrospect_RevokedJTI_Inactive(t *testing.T) {
 	if err := stores.Revocation.TrackJTI(ctx, claims.JTI, "family-1", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("TrackJTI: %v", err)
 	}
-	if err := stores.Revocation.RevokeJTI(ctx, claims.JTI); err != nil {
+	if err := stores.Revocation.RevokeJTI(ctx, claims.JTI, time.Unix(claims.Expiry, 0)); err != nil {
 		t.Fatalf("RevokeJTI: %v", err)
 	}
 
@@ -1397,6 +1417,30 @@ func TestIntrospect_NoIssuanceRow_LegacyChecksDecide(t *testing.T) {
 	}
 	if !resp.Active {
 		t.Fatal("no row: expected active=true")
+	}
+}
+
+// A machine-token store that cannot be read answers inactive as a server
+// fault. A token revoked only there, whose sub names an active user, must not
+// fall through to the denylist and subject checks and come back active.
+func TestIntrospect_MachineTokenLookupFails_InactiveServerFault(t *testing.T) {
+	env := newIntrospectEnv(t)
+	claims := validClaims()
+	env.addMachineToken(t, claims.JTI, claims.ClientID)
+	env.revokeMachineToken(t, claims.JTI)
+	env.withBrokenMachineTokens()
+
+	resp, err := env.svc.IntrospectToken(context.Background(), input.IntrospectRequest{
+		Token: signTestToken(t, env.kp, claims), ClientID: env.clientID, ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("IntrospectToken: %v", err)
+	}
+	if resp.Active {
+		t.Fatal("an unreadable machine-token store must not answer active")
+	}
+	if got := env.deniedEvents(); len(got) != 0 {
+		t.Errorf("a server fault is not a refusal of the caller; audited %+v", got)
 	}
 }
 

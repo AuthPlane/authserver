@@ -16,6 +16,7 @@ For a deeper architectural picture, see [Concepts → Delegation & agent chains]
 ## Prereqs
 
 - Authplane running on `http://localhost:9000` (public) / `http://localhost:9001` (admin), with `AUTHPLANE_ADMIN_API_KEY` exported.
+- The `authserver admin …` commands below must run with the server's configuration. With the [Docker quickstart](../../start/02-quickstart-docker.md) that is `docker exec authserver /authserver admin … --config /config.yaml`; other deployments: [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare on your host, the CLI acts on a default SQLite database in the working directory, not the server's.
 - An MCP server registered as a [Mint Resource](../../concepts/glossary.md#glossary-mint-backend) (see [Connect an MCP Server](connect-mcp-server.md)).
 - Concept context: [Client credentials grant](../../concepts/glossary.md#glossary-client-credentials-grant), [Access token](../../concepts/glossary.md#glossary-access-token), [Resource indicator](../../concepts/glossary.md#glossary-resource-indicator), [Scope](../../concepts/glossary.md#glossary-scope).
 

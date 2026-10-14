@@ -82,7 +82,7 @@ Dark / light theme, collapsible sidebar, three font sizes. Stored in browser `lo
 | Scripted setup — seed clients / resources / providers from CI | CLI ([admin-cli.md](admin-cli.md)) |
 | Bulk operation — rotate every client secret in an environment | CLI in a shell loop |
 | Forensic export — pull every matching audit row into JSON | REST (`GET /admin/audit?…`) |
-| Signing key rotation | CLI ([Key rotation](key-rotation.md)) |
+| Signing key rotation | REST (`POST /admin/keys/rotate`) or CLI ([Key rotation](key-rotation.md)) |
 | User creation | CLI / REST |
 
 ## What can go wrong

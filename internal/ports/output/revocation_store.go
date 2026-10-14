@@ -14,8 +14,10 @@ type RevocationStore interface {
 	// RevokeByFamily adds all JTIs belonging to a family to the blacklist.
 	RevokeByFamily(ctx context.Context, familyID string) error
 
-	// RevokeJTI adds a single JTI to the blacklist.
-	RevokeJTI(ctx context.Context, jti string) error
+	// RevokeJTI adds a single JTI to the blacklist until expiresAt, the
+	// token's own exp. A JTI already listed keeps the later of its two
+	// expiries. A zero or pre-epoch expiresAt is refused.
+	RevokeJTI(ctx context.Context, jti string, expiresAt time.Time) error
 
 	// IsRevoked checks if a JTI is in the blacklist.
 	IsRevoked(ctx context.Context, jti string) (bool, error)

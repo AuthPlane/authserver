@@ -3,7 +3,7 @@
 # --platform=$BUILDPLATFORM runs the compiler natively and cross-compiles for
 # the image's target platform, which BuildKit supplies as TARGETARCH. Without
 # it the build stage itself runs emulated on a cross-arch host.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS builder
 ARG TARGETARCH
 
 RUN apk add --no-cache git ca-certificates tzdata

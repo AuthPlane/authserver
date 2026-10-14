@@ -1036,7 +1036,7 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 	"DELETE /admin/grants/broker/{id}":  "**Response 204** — no body.\n",
 
 	"GET /admin/keys":         "**Response 200** — {{dto:listKeysResponse}}.\n",
-	"POST /admin/keys/rotate": "**Response 200** — {{dto:rotateKeyResponse}}.\n",
+	"POST /admin/keys/rotate": "Makes a new key current; the key that was current becomes the previous key, and the key before it leaves the JWKS, so tokens it signed stop verifying. Writes a `key.rotated` audit row. **Response 200** — {{dto:rotateKeyResponse}}, with the `kid` the key store holds (on `vault_transit`, `<key_name>-v<version>`).\n",
 
 	"GET /admin/settings/dcr":   "**Response 200** — {{dto:dcrSettingsView}}.\n",
 	"PATCH /admin/settings/dcr": "**Request** — JSON {{dto:updateDCRSettingsRequest}}. **Response 200** — {{dto:dcrSettingsView}}.\n",
@@ -1048,11 +1048,11 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 	"GET /admin/system/config": "**Response 200** — {{dto:systemConfigResponse}}.\n",
 
 	"POST /oauth/register":   "**Request** — RFC 7591 client metadata JSON. **Response 201** — registered client metadata.\n",
-	"POST /oauth/revoke":     "**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009).\n",
+	"POST /oauth/revoke":     "**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009), also for an unknown, foreign or already revoked token. **Response 503** — `temporarily_unavailable` with `Retry-After`: a store could not record the revocation, so the token may still be valid and the client should retry (RFC 7009 §2.2.1).\n",
 	"POST /oauth/introspect": "**Request** — form-encoded `token`. **Response 200** — RFC 7662 introspection response.\n",
 	"GET /oauth/authorize":   "Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_challenge_method=S256`). Redirects to `/consent` after login.\n",
 
-	"GET /.well-known/jwks.json":                  "**Response 200** — JWKS document (public keys only). Cache-Control `max-age=300`.\n",
+	"GET /.well-known/jwks.json":                  "**Response 200** — JWKS document (public keys only): the current signing key and at most one previous key, or `{\"keys\":[]}` until the first key exists. Cache-Control `public, max-age=3600`. The server caches the document for up to 60 seconds, and reloads it before signing with a key it does not carry.\n",
 	"GET /.well-known/oauth-authorization-server": "**Response 200** — RFC 8414 metadata. Body shape: see `asMetadata` struct in `api/public/wellknown/dto.go`.\n",
 	"GET /.well-known/openid-configuration":       "**Response 200** — same shape as the RFC 8414 endpoint.\n",
 	"POST /login":                                 "**Response 303** — on success, redirects to the post-login target.\n\n**Response 404** — local password login is disabled (`oidc.show_local_login: false`). Answered before the body is read. `GET /login` still renders the page, without the password form.\n\n**Response 422** — the login page re-rendered with an error (bad form, bad CSRF nonce, rejected credential).\n\n**Response 429** — the submitted identity is locked out after `rate_limit.auth_fail_max` failures; carries `Retry-After` with the real remaining time. HTML, not an OAuth error body — the caller is a browser posting a form.\n",

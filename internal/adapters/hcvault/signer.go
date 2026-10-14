@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
@@ -22,6 +23,7 @@ type VaultSigner struct {
 	keyVersion int
 	publicKey  crypto.PublicKey
 	hashAlg    string // e.g. "sha2-256"
+	sigAlg     string // Vault signature_algorithm; "pkcs1v15" for RSA keys, empty for EC
 	isEC       bool   // true for ECDSA keys, false for RSA
 }
 
@@ -61,6 +63,7 @@ func (s *VaultSigner) SignContext(ctx context.Context, digest []byte, _ crypto.S
 		s.keyName,
 		b64Digest,
 		s.hashAlg,
+		s.sigAlg,
 		s.keyVersion,
 	)
 	if err != nil {
@@ -171,6 +174,17 @@ func vaultHashAlgorithm(_ string) string {
 	return "sha2-256"
 }
 
+// vaultSignatureAlgorithm returns the Vault signature_algorithm for a key.
+// RS256 is RSASSA-PKCS1-v1_5 (RFC 7518 §3.3), but Vault signs RSA keys with
+// PSS unless asked for "pkcs1v15", so RSA keys always ask. EC keys need no
+// value; Vault ignores the field for them.
+func vaultSignatureAlgorithm(pub crypto.PublicKey) string {
+	if _, ok := pub.(*rsa.PublicKey); ok {
+		return "pkcs1v15"
+	}
+	return ""
+}
+
 // NewVaultSigner creates a VaultSigner from parsed public key material.
 func NewVaultSigner(client *Client, keyName string, keyVersion int, pub crypto.PublicKey, algorithm string) *VaultSigner {
 	return &VaultSigner{
@@ -179,6 +193,7 @@ func NewVaultSigner(client *Client, keyName string, keyVersion int, pub crypto.P
 		keyVersion: keyVersion,
 		publicKey:  pub,
 		hashAlg:    vaultHashAlgorithm(algorithm),
+		sigAlg:     vaultSignatureAlgorithm(pub),
 		isEC:       isECKey(pub),
 	}
 }

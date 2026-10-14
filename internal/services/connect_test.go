@@ -1318,6 +1318,117 @@ func TestConnectService_StartConnect_ExplicitResourceSlug_UsesResourceScopes(t *
 	}
 }
 
+// A ?resource= naming another provider's Broker resource must be refused:
+// otherwise the upstream authorize request goes out under this provider's
+// client with the other resource's scopes, the user's grant for this
+// provider is overwritten with them, and the redirect lands on a return URL
+// allowlisted only for the other resource.
+func TestConnectService_StartConnect_ResourceOfAnotherProvider_Rejected(t *testing.T) {
+	provStore := &mockBrokerProviderStore{
+		getBySlug: func(string) (*resource.BrokerProvider, error) { return githubProvider(), nil },
+	}
+	const otherReturnURL = "https://mail.example.com/back"
+	resStore := &mockResourceStore{
+		resolveFn: func(string) ([]*resource.Resource, error) {
+			res := githubBrokerResource()
+			res.ID = "res-mail-1"
+			res.Slug = "mail-mcp"
+			res.BrokerProviderID = "bp-mail-1"
+			res.Scopes = []resource.Scope{{Name: "mail.read", Upstream: "mail.read"}}
+			res.Policy.Connect.AllowedReturnURLs = []string{otherReturnURL}
+			return []*resource.Resource{res}, nil
+		},
+	}
+	adapter := &configurableConnectAdapter{}
+	svc, pending, _ := newConnectFixture(t, provStore, resStore, &mockBrokerGrantStore{}, adapter, nil)
+
+	_, err := svc.StartConnect(context.Background(), testUserID, testProvSlug, "mail-mcp", otherReturnURL)
+	if !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("StartConnect with another provider's resource: err = %v, want ErrInvalidTarget", err)
+	}
+	if adapter.lastBuildScope != nil {
+		t.Errorf("upstream authorize URL built with scopes %v; want no upstream request", adapter.lastBuildScope)
+	}
+	if len(pending.rows) != 0 {
+		t.Errorf("pending states stored = %d, want 0", len(pending.rows))
+	}
+}
+
+// A pending state whose resource no longer belongs to the provider (created
+// before StartConnect checked it, or the resource was moved to another
+// provider while the user was upstream) must not complete: no code
+// exchange, no grant.
+func TestConnectService_CompleteConnect_ResourceOfAnotherProvider_Rejected(t *testing.T) {
+	provider := githubProvider()
+	provStore := &mockBrokerProviderStore{
+		getByIDFn: func(string) (*resource.BrokerProvider, error) { return provider, nil },
+		getBySlug: func(string) (*resource.BrokerProvider, error) { return provider, nil },
+	}
+	resStore := &mockResourceStore{
+		resolveFn: func(string) ([]*resource.Resource, error) {
+			return []*resource.Resource{githubBrokerResource()}, nil
+		},
+	}
+	grants := &mockBrokerGrantStore{}
+	adapter := &configurableConnectAdapter{}
+	svc, _, _ := newConnectFixture(t, provStore, resStore, grants, adapter, nil)
+
+	upstream, err := svc.StartConnect(context.Background(), testUserID, testProvSlug, testResSlug, testReturnURL)
+	if err != nil {
+		t.Fatalf("StartConnect: %v", err)
+	}
+	state := extractStateFromURL(t, upstream)
+
+	resStore.getByIDFn = func(string) (*resource.Resource, error) {
+		res := githubBrokerResource()
+		res.BrokerProviderID = "bp-mail-1"
+		return res, nil
+	}
+	_, err = svc.CompleteConnect(context.Background(), testUserID, state, "code")
+	if !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("CompleteConnect with another provider's resource: err = %v, want ErrInvalidTarget", err)
+	}
+	if adapter.lastHandleCallbackURL != "" {
+		t.Error("upstream code exchanged; want the callback refused before HandleCallback")
+	}
+	if grants.upsertSeen != nil {
+		t.Errorf("grant upserted despite the provider mismatch: %+v", grants.upsertSeen)
+	}
+}
+
+// A pending state that names no resource cannot be checked against the
+// provider, so it is refused the same way.
+func TestConnectService_CompleteConnect_PendingWithoutResource_Rejected(t *testing.T) {
+	provider := githubProvider()
+	provStore := &mockBrokerProviderStore{
+		getByIDFn: func(string) (*resource.BrokerProvider, error) { return provider, nil },
+		getBySlug: func(string) (*resource.BrokerProvider, error) { return provider, nil },
+	}
+	grants := &mockBrokerGrantStore{}
+	adapter := &configurableConnectAdapter{}
+	svc, pending, _ := newConnectFixture(t, provStore, &mockResourceStore{}, grants, adapter, []string{testReturnURL})
+
+	upstream, err := svc.StartConnect(context.Background(), testUserID, testProvSlug, "", testReturnURL)
+	if err != nil {
+		t.Fatalf("StartConnect: %v", err)
+	}
+	state := extractStateFromURL(t, upstream)
+	pending.mu.Lock()
+	pending.rows[state].ResourceID = ""
+	pending.mu.Unlock()
+
+	_, err = svc.CompleteConnect(context.Background(), testUserID, state, "code")
+	if !errors.Is(err, domain.ErrInvalidTarget) {
+		t.Fatalf("CompleteConnect with no pending resource: err = %v, want ErrInvalidTarget", err)
+	}
+	if adapter.lastHandleCallbackURL != "" {
+		t.Error("upstream code exchanged; want the callback refused before HandleCallback")
+	}
+	if grants.upsertSeen != nil {
+		t.Errorf("grant upserted with no pending resource: %+v", grants.upsertSeen)
+	}
+}
+
 // --- helpers ---
 
 func extractStateFromURL(t *testing.T, urlStr string) string {

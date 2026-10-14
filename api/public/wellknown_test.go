@@ -46,7 +46,13 @@ func newTestJWKSService(t *testing.T) *services.JWKSService {
 	if err != nil {
 		t.Fatalf("create keyfile store: %v", err)
 	}
-	return services.NewJWKSService(store, nil, "ES256", obs)
+	svc := services.NewJWKSService(store, nil, "ES256", obs)
+	// The server creates its signing key at startup; the JWKS endpoint does
+	// not create one.
+	if _, err := svc.GetSigningKey(context.Background()); err != nil {
+		t.Fatalf("create signing key: %v", err)
+	}
+	return svc
 }
 
 func newTestServer(t *testing.T) *httptest.Server {

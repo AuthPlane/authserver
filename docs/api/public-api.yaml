@@ -270,6 +270,8 @@ paths:
       responses:
         "200":
           description: OK
+        "503":
+          description: Status 503
   /oauth/token:
     post:
       operationId: http-public-oauth-token

@@ -35,7 +35,7 @@ From OCI:
 
 ```bash
 helm install authplane oci://ghcr.io/authplane/charts/authplane \
-  --version 0.4.1 -f values-production.yaml
+  --version 0.4.3 -f values-production.yaml
 ```
 
 ### 2. Pre-create the secrets (production)
@@ -216,14 +216,14 @@ Required-when rules: `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`, and 
 
 ## Scaling and shutdown
 
-- **Stateless on Postgres** — scale horizontally with HPA. Tune `config.storage.postgres.max_conns × replicas` against your Postgres connection limit (RDS / Cloud SQL caps are easy to hit).
+- **Stateless on Postgres** — scale horizontally with HPA, once signing keys are shared: `config.signing.key_store: postgres_key` or Vault Transit. The default keyfile store is single-instance: the chart refuses to render it in an emptyDir with `replicaCount > 1` or `autoscaling.enabled`, and warns when it is on a persistent volume with more than one replica. `persistence.enabled` only keeps a single instance's key across restarts. Tune `config.storage.postgres.max_conns × replicas` against your Postgres connection limit (RDS / Cloud SQL caps are easy to hit).
 - **Sessions are signed cookies** — no affinity needed.
 - **`terminationGracePeriodSeconds`** — Helm inherits the cluster default (30 s). If you raise `config.server.shutdown_wait` above that, patch the Deployment via a post-render kustomize overlay; otherwise kubelet SIGKILLs the pod mid-drain. See [systemd → SIGTERM](systemd.md#graceful-shutdown).
 
 ## Runbook
 
-- **Upgrade**: `helm upgrade authplane charts/authplane -f values-production.yaml --atomic --timeout 5m`. Migrations apply on pod boot. `--atomic` rolls back on failure.
-- **Rotate signing key**: `kubectl exec deploy/authplane -- authserver admin key rotate` (verified against [`cli.md#cli-admin-key-rotate`](../../reference/cli.md#cli-admin-key-rotate)). With `signing.key_store: postgres_key`, NOTIFY propagates to all replicas in milliseconds.
+- **Upgrade**: `helm upgrade authplane charts/authplane -f values-production.yaml --atomic --timeout 5m`. Migrations apply on pod boot. `--atomic` rolls back on failure. Since chart 0.4.3, rendering fails — for `helm upgrade` too, before anything changes — when the chart can see that the server uses the keyfile store with its key in the pod's `/data` volume, `persistence.enabled` is `false`, and `replicaCount > 1` or `autoscaling.enabled`: every pod would have its own key. "Can see" means: `vault.signing.enabled` is false, no `existingConfigSecret` is set, `config.signing.key_store` (or a literal `AUTHPLANE_SIGNING_KEY_STORE` in `extraEnv`) is `keyfile` or unset, and `config.signing.key_path` (or a literal `AUTHPLANE_SIGNING_KEY_PATH` in `extraEnv`) is relative, `/data` or under `/data/`. With an `existingConfigSecret`, a `valueFrom` entry for either variable, or a key path outside `/data`, the chart does not check, and does not stop you. To upgrade such a release, switch to a shared key store (`config.signing.key_store: postgres_key`, or Vault Transit with `vault.signing.enabled: true`), or run one replica (`replicaCount: 1`, `autoscaling.enabled: false`) with `persistence.enabled: true` so its key survives restarts. Switching key stores starts with a new key, so tokens issued before the switch stop verifying.
+- **Rotate signing key**: `kubectl -n authplane exec deploy/authplane -- /authserver admin key rotate --config /etc/authplane/config.yaml` (verified against [`cli.md#cli-admin-key-rotate`](../../reference/cli.md#cli-admin-key-rotate)). The image ships the binary at `/authserver`, and the chart starts it with `--config /etc/authplane/config.yaml`; the CLI needs the same flag to reach the server's key store, and without it (or a key-store environment variable) refuses to run. The first line of output names the key store it rotated. The admin API (`POST /admin/keys/rotate`) does the same and also writes a `key.rotated` audit row. Each pod publishes the new key before it signs a token with it, and within 60 seconds in any case; with `signing.key_store: postgres_key`, NOTIFY tells every replica as soon as the rotation commits. No restart is needed — and with the keyfile store and no persistence a restart would replace the key.
 - **Purge schedule**: deploy the CronJob from [Backup & purge → Kubernetes CronJob](backup-and-purge.md#kubernetes-cronjob).
 - **Uninstall**: `helm uninstall authplane -n authplane`. PVCs are not deleted automatically — `kubectl delete pvc -l app.kubernetes.io/instance=authplane` if you want a clean slate.
 

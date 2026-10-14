@@ -120,6 +120,49 @@ func RunMachineTokenStoreTests(t *testing.T, newStores func(*testing.T) (output.
 		}
 	})
 
+	// A revoked machine token is recorded only in this store: purge must keep
+	// the row while the token still verifies (until the end of second
+	// exp + the clock skew), or the revoked token is accepted again.
+	t.Run("PurgeExpired_KeepsRowsWhileTheTokenVerifies", func(t *testing.T) {
+		store, clients := newStores(t)
+		ctx := context.Background()
+		seedClient(t, clients, "client-1")
+		exp := LastVerifiableExp(t)
+
+		kept := newTestMachineToken("jti-boundary", "client-1")
+		kept.IssuedAt = exp.Add(-time.Hour)
+		// Stored expiries carry the issuance instant's fraction; a
+		// whole-second one sorts after every same-second cutoff in SQLite's
+		// text comparison and would hide a cutoff one second too late.
+		kept.ExpiresAt = exp.Add(time.Millisecond)
+		gone := newTestMachineToken("jti-gone", "client-1")
+		gone.IssuedAt = exp.Add(-time.Hour)
+		gone.ExpiresAt = exp.Add(-3 * time.Second)
+		for _, mt := range []token.MachineToken{kept, gone} {
+			if err := store.Save(ctx, mt); err != nil {
+				t.Fatalf("save %s: %v", mt.JTI, err)
+			}
+		}
+		if err := store.Revoke(ctx, "jti-boundary"); err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		if err := store.PurgeExpired(ctx); err != nil {
+			t.Fatalf("purge: %v", err)
+		}
+		StillVerifies(t, exp)
+
+		got, err := store.GetByJTI(ctx, "jti-boundary")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got == nil || !got.Revoked {
+			t.Errorf("revoked machine token row = %+v; want it kept, revoked, while the token verifies", got)
+		}
+		if got, err = store.GetByJTI(ctx, "jti-gone"); err != nil || got != nil {
+			t.Errorf("GetByJTI(jti-gone) = %+v, %v; want purged: that token can no longer verify", got, err)
+		}
+	})
+
 	t.Run("PurgeExpired", func(t *testing.T) {
 		store, clients := newStores(t)
 		ctx := context.Background()

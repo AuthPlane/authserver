@@ -34,12 +34,15 @@ Use [`deploy/docker-compose.sqlite.yml`](../../../deploy/docker-compose.sqlite.y
 ### 1. Mint required secrets
 
 ```bash
-# Verified against docs/reference/env-vars.md (AUTHPLANE_SESSION_SECRET, AUTHPLANE_ADMIN_API_KEY)
+# Verified against docs/reference/env-vars.md and deploy/docker-compose.sqlite.yml
 export AUTHPLANE_SESSION_SECRET="$(openssl rand -hex 32)"
 export AUTHPLANE_ADMIN_API_KEY="$(openssl rand -hex 32)"
+export AUTHPLANE_CONNECT_STATE_SECRET="$(openssl rand -hex 32)"
+# AES master key (32-byte hex); the stack sets AUTHPLANE_DATA_ENCRYPTION_KEY_ENV: AUTHPLANE_DATA_ENCRYPTION_KEY
+export AUTHPLANE_DATA_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 ```
 
-Both are validated at boot when the issuer is non-localhost. The compose file uses `${VAR:?...}` syntax so missing values fail fast with a readable error.
+The session secret and admin key are validated at boot when the issuer is non-localhost; this stack also requires the other two. The compose file uses `${VAR:?...}` syntax so missing values fail fast with a readable error.
 
 ### 2. Bring the stack up
 
@@ -210,16 +213,16 @@ healthcheck for this reason.
 | `set AUTHPLANE_SESSION_SECRET to a strong random value` on `compose up` | Required env var unset (compose uses `${VAR:?...}`) | Export both `AUTHPLANE_SESSION_SECRET` and `AUTHPLANE_ADMIN_API_KEY` before `compose up`. |
 | Dependent container won't start; healthcheck on `authserver` reports unhealthy | Healthcheck uses `wget` / `curl` against a distroless image (binaries don't exist) | Remove the healthcheck, or replace with a TCP probe from the dependent service. See "Healthcheck note" above. |
 | `pg_isready` retries forever / authserver never boots | Postgres password mismatch between `POSTGRES_PASSWORD` and `AUTHPLANE_STORAGE_POSTGRES_DSN` | Edit the compose file so both match, or move the DSN into the env. |
-| Tokens issued but JWKS is empty | Vault recipe with `vault-init` not yet completed | `docker compose logs vault-init` — wait for the success line; restart `authserver` if needed. |
+| Token requests fail and the JWKS is empty (Vault recipe) | `vault-init` did not complete, so the Transit engine or key is missing | `docker compose -f deploy/docker-compose.vault.yml logs vault-init` — wait for the success line. If `vault-init` created the key, the next token request uses it. If it failed before enabling the Transit engine, the server cannot create the key either: re-run `vault-init`. |
 | Browser-based MCP client returns 403 on `/oauth/token` | `AUTHPLANE_SERVER_ALLOWED_ORIGINS` empty → CORS preflight rejected (startup `WARN` is emitted) | Set it to your app origin (or `*` for local dev) in the compose env block. |
 | `docker stop` clips in-flight requests | `stop_grace_period` < `server.shutdown_wait` | Set `stop_grace_period: 30s` on the `authserver` service. |
 | Tables grow forever in production | No purge scheduler wired | Add the sidecar from [Backup & purge → Docker Compose sidecar](backup-and-purge.md#docker-compose-sidecar). |
 
 ## Runbook
 
-- **Upgrade**: `docker compose pull authserver && docker compose up -d`. Migrations are forward-only and idempotent (see [systemd → Boot-time behavior](systemd.md#migrations-on-upgrade)).
+- **Upgrade**: the stacks build `authserver` from `build/Dockerfile` in this repository, so update the checkout, then run `docker compose -f deploy/docker-compose.<variant>.yml up --build -d` from the repo root, with the same variables exported as for the first `up`. Migrations are forward-only and idempotent (see [systemd → Boot-time behavior](systemd.md#migrations-on-upgrade)).
 - **Backup**: Recipe A — stop authserver, tar the `authserver-data` volume. Recipes B/C — see [Backup & purge → PostgreSQL](backup-and-purge.md#postgresql-backup).
-- **Rotate signing keys**: `docker compose exec authserver authserver admin key rotate` (verified against [`cli.md#cli-admin-key-rotate`](../../reference/cli.md#cli-admin-key-rotate)). Zero-downtime; previous key remains in JWKS until expiry.
+- **Rotate signing keys**: through the admin API (`POST /admin/keys/rotate`), or `docker compose -f deploy/docker-compose.<variant>.yml exec authserver /authserver admin key rotate` from the repo root, in the shell that ran `up` (verified against [`cli.md#cli-admin-key-rotate`](../../reference/cli.md#cli-admin-key-rotate)). The running server publishes the new key before it signs a token with it, and within 60 seconds in any case; the previous key stays in the JWKS until the next rotation. See [Key rotation](../operate/key-rotation.md).
 
 ## See also
 

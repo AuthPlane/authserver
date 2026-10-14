@@ -138,12 +138,6 @@ func (c *Client) Close() {
 	}
 }
 
-// Address returns the Vault server address.
-func (c *Client) Address() string { return c.addr }
-
-// Mount returns the Transit mount path.
-func (c *Client) Mount() string { return c.mount }
-
 // appRoleLogin performs an AppRole login and stores the resulting token.
 // Returns the lease duration in seconds.
 func (c *Client) appRoleLogin(ctx context.Context) (int, error) {
@@ -238,7 +232,9 @@ func (c *Client) getToken() string {
 
 // Sign calls the Vault Transit sign endpoint.
 // digest is base64-encoded, prehashed indicates the input is already hashed.
-func (c *Client) Sign(ctx context.Context, keyName, digest, hashAlg string, keyVersion int) (string, error) {
+// signatureAlgorithm is sent as Vault's signature_algorithm when non-empty;
+// Vault applies it to RSA keys only and signs RSA with PSS when it is absent.
+func (c *Client) Sign(ctx context.Context, keyName, digest, hashAlg, signatureAlgorithm string, keyVersion int) (string, error) {
 	ctx, span := c.tracer.Start(ctx, "VaultClient.Sign")
 	defer span.End()
 	span.SetAttributes(
@@ -251,6 +247,9 @@ func (c *Client) Sign(ctx context.Context, keyName, digest, hashAlg string, keyV
 		"input":          digest,
 		"prehashed":      true,
 		"hash_algorithm": hashAlg,
+	}
+	if signatureAlgorithm != "" {
+		body["signature_algorithm"] = signatureAlgorithm
 	}
 	if keyVersion > 0 {
 		body["key_version"] = keyVersion

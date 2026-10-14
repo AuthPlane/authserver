@@ -645,9 +645,15 @@ func (h *revokeHandler) handleRevoke(w http.ResponseWriter, r *http.Request) {
 			shared.WriteOAuthError(w, http.StatusUnauthorized, "invalid_client", err.Error())
 			return
 		}
+		// A store could not record the revocation, so the token may still
+		// be valid. RFC 7009 §2.2.1: 503 tells the client to assume the
+		// token still exists and retry, where a 200 would say it is gone.
 		h.obs.Logger.ErrorContext(r.Context(), "revocation error", "error", err)
+		w.Header().Set("Retry-After", "5")
+		shared.WriteOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "the token could not be revoked; retry")
+		return
 	}
 
-	// Per RFC 7009: always return 200 for valid token revocations.
+	// RFC 7009 §2.2: 200 for a revoked, unknown, foreign or already revoked token.
 	w.WriteHeader(http.StatusOK)
 }

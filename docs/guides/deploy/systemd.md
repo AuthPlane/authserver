@@ -52,6 +52,7 @@ server:
   issuer: https://auth.example.com      # AUTHPLANE_SERVER_ISSUER
   address: ":9000"
   shutdown_wait: 20s                    # match TimeoutStopSec below
+  allowed_origins: ["https://app.example.com"]   # required for browser MCP clients
 
 storage:
   driver: sqlite                        # or "postgres" — see configuration.md
@@ -77,9 +78,6 @@ admin:
 observability:
   logging:  { level: info, format: json }
   metrics:  { provider: prometheus, path: /metrics }
-
-server:
-  allowed_origins: ["https://app.example.com"]   # required for browser MCP clients
 ```
 
 Lock the file down (it does not contain secrets, but it does contain the resource layout):
@@ -226,26 +224,34 @@ systemctl is-active authserver && echo OK
 
 ```bash
 systemctl kill -s HUP authserver
-journalctl -u authserver --since '1 minute ago' | grep 'signing keys reloaded'
+journalctl -u authserver --since '1 minute ago' | grep -E 'SIGHUP received|JWKS cache reloaded'
 ```
 
-Useful after rotating on-disk keys out of band (e.g. Vault Transit token roll, manual key file replacement). No connections are dropped.
+`SIGHUP` rebuilds the JWKS document the server publishes from the key store and, on `postgres_key`, drops the cached signing key so the next token is signed with the stored current key. It is never required: the server reloads its JWKS before it signs with a key the document does not carry, and re-reads it at least every 60 seconds. Send it to make a change the server did not perform itself — `authserver admin key rotate` from the CLI, a rotation in Vault, a replaced key file — visible at once. It does not reload a Vault token or AppRole secret-id. No connections are dropped.
 
 ### Signing-key rotation
 
+Prefer the admin API, which writes a `key.rotated` audit row:
+
 ```bash
-# Verified against docs/reference/cli.md#cli-admin-key-rotate
-sudo -u authserver authserver admin key rotate --config /etc/authserver/config.yaml
+curl -fsS -X POST http://127.0.0.1:9001/admin/keys/rotate -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY"
 ```
 
-Zero-downtime. The previous key stays in the JWKS until its tokens expire; the new key becomes `current` and is signed-with immediately. See [Operate → Key rotation](../operate/key-rotation.md) for policy guidance.
+From the CLI, give it the server's configuration **and** its secrets (they live only in the `EnvironmentFile`, and without `AUTHPLANE_SESSION_SECRET` and `AUTHPLANE_ADMIN_API_KEY` the CLI refuses to load this configuration):
+
+```bash
+# Verified against docs/reference/cli.md#cli-admin-key-rotate
+sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver admin key rotate --config /etc/authserver/config.yaml'
+```
+
+The new key becomes `current` and signs immediately; the running server publishes it before it signs a token with it, and within 60 seconds in any case (`SIGHUP` above makes it immediate). The previous key stays in the JWKS until the **next** rotation — not until its tokens expire — so do not rotate twice within the longest token lifetime. See [Operate → Key rotation](../operate/key-rotation.md).
 
 ### Migrations on upgrade
 
 `serve` runs `Migrate(ctx)` on boot before binding listeners — no manual step is required for a normal upgrade. If you want a pre-flight gate:
 
 ```bash
-sudo -u authserver authserver migrate --config /etc/authserver/config.yaml
+sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver migrate --config /etc/authserver/config.yaml'
 # Verified against docs/reference/cli.md#cli-migrate
 ```
 

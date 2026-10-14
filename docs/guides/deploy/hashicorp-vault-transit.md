@@ -43,20 +43,49 @@ ES256 (default in authserver):
 vault write -f transit/keys/authserver-signing type=ecdsa-p256
 ```
 
-RS256 (if you must):
+RS256 (only when `signing.algorithm: RS256` is set):
 
 ```bash
 vault write -f transit/keys/authserver-signing type=rsa-2048
 ```
+
+The key type must match `signing.algorithm`: ES256 needs `ecdsa-p256`, RS256
+any `rsa-*` type. Vault keeps a key's type across rotations, and writing an
+existing key with a different `type` changes nothing. A mismatched key is
+refused: the server does not start if it can read the key at boot, and
+otherwise no token is issued with it.
+
+**Create the key before the first start.** If it does not exist, the server
+tries to create it at startup and again on the first token request, but only a
+credential with `update` on `transit/keys/authserver-signing` can, and the
+policy in step 3 does not grant that. Until the key exists, every token request
+fails with a server error and the JWKS is empty (`{"keys":[]}`).
 
 ### 3. Write the policy
 
 ```hcl
 # authserver-signing-policy.hcl
 path "transit/sign/authserver-signing"   { capabilities = ["update"] }
-path "transit/verify/authserver-signing" { capabilities = ["update"] }
 path "transit/keys/authserver-signing"   { capabilities = ["read"]   }
 ```
+
+This lets authserver sign and read the public keys. It cannot create the key
+(create it as in step 2) or rotate it: `POST /admin/keys/rotate` and
+`authserver admin key rotate` also need
+`path "transit/keys/authserver-signing/rotate" { capabilities = ["update"] }`.
+authserver never calls `transit/verify`.
+
+Signing always authenticates with the `signing.vault_transit` token or AppRole
+below, on its own Vault client — also when `data_encryption.driver:
+vault_transit_encrypt` (step 5) points at the same Vault and mount, so the two
+can have separate least-privilege credentials.
+
+**Upgrading from 0.2.2 or earlier with signing and data encryption on the same
+Vault:** earlier versions signed through the data-encryption client and ignored
+`signing.vault_transit.token` and `signing.vault_transit.approle`. They are now
+used, so before upgrading check that this credential can read and sign with the
+signing key (the policy above). A wrong AppRole fails the boot; a token without
+access starts the server, and every token request then fails.
 
 ```bash
 vault policy write authserver-signing authserver-signing-policy.hcl
@@ -127,6 +156,10 @@ Encrypts `broker_grants` rows (and `postgres_key` blobs if used) without an AES 
 vault write -f transit/keys/authserver-data type=aes256-gcm96
 ```
 
+authserver sends an encryption context with every value (for example `signing-key:<kid>`) so that a ciphertext belongs to one row. Vault enforces a context only on a key created with `derived=true`; on the key above it is accepted and ignored, so a ciphertext copied from one row to another of the same kind still decrypts. `aes_master` binds the context in every case.
+
+`vault_transit_encrypt` currently starts only with token authentication: an `auth_method: approle` configuration passes validation, but the server then fails to start with `vault token or approle config is required`.
+
 Reuse the same policy pattern (`encrypt/authserver-data`, `decrypt/authserver-data`). YAML (verified against [`configuration.md#config-data-encryption`](../../reference/configuration.md#config-data-encryption)):
 
 ```yaml
@@ -136,10 +169,8 @@ data_encryption:
     address: https://vault.svc:8200
     mount_path: transit
     key_name: authserver-data
-    auth_method: approle
-    approle:
-      role_id_env:   AUTHPLANE_DATA_ENCRYPTION_VAULT_ROLE_ID_ENV
-      secret_id_env: AUTHPLANE_DATA_ENCRYPTION_VAULT_SECRET_ID_ENV
+    auth_method: token
+    token_env: AUTHPLANE_DATA_VAULT_TOKEN   # *name* of the env var that holds the Vault token (your choice)
 ```
 
 Env var names verified against [`env-vars.md`](../../reference/env-vars.md).
@@ -159,23 +190,26 @@ vault read sys/internal/counters/activity | grep -A2 'transit'   # admin-side; a
 
 # Process the renewal log line in journal / pod logs
 journalctl -u authserver -n 50 | grep -iE 'vault|approle'
-# Expected: "vault approle re-authenticated" or similar; no "WARN" near boot.
+# Expected with AppRole: "vault approle login successful" at boot; no "WARN" near boot.
 ```
 
 ## What can go wrong
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `vault transit: permission denied` on first sign | Token/AppRole missing the `authserver-signing` policy | `vault token lookup` to confirm policies; `vault policy read authserver-signing` to confirm capabilities. |
-| `vault transit: key not found` | Wrong `key_name`, or key never created | `vault list transit/keys`; recreate via Step 2. |
+| Token requests fail; the log shows `vault /v1/transit/sign/authserver-signing: status 403` | Token/AppRole missing the `authserver-signing` policy | `vault token lookup` to confirm policies; `vault policy read authserver-signing` to confirm capabilities. |
+| `/.well-known/jwks.json` and every token request return 500; the log shows `read transit key: vault /v1/transit/keys/<key_name>: status 403` | `signing.vault_transit.key_name` names a key the policy does not cover (a wrong name) | Set `key_name` to the key the policy grants (`authserver-signing` here); `vault list transit/keys`. |
+| `/.well-known/jwks.json` returns `{"keys":[]}` and every token request returns 500; the log shows `create first key: create transit key: vault create key: vault /v1/transit/keys/authserver-signing: status 403` | The key was never created, and the policy (correctly) does not let authserver create it | Create it as in Step 2; the next token request uses it. |
+| `POST /admin/keys/rotate` returns 500; the log shows a Vault 403 on `/v1/transit/keys/authserver-signing/rotate` | The policy does not grant rotation | Add `update` on `transit/keys/authserver-signing/rotate` (step 3), or rotate in Vault directly (Runbook). |
+| Boot fails with `transit key type does not match signing.algorithm` | The Transit key's type cannot sign for `signing.algorithm` (e.g. an `ecdsa-p256` key with `RS256`) | Follow the remedy the error names: set `signing.algorithm` to the algorithm the key can sign (ES256 for `ecdsa-p256`, RS256 for `rsa-*`), or set `signing.vault_transit.key_name` to a **new** name and create that key as in Step 2 under the new name. Re-running Step 2 with the existing name changes nothing. |
 | `connection refused` at boot | `signing.vault_transit.address` wrong or Vault unreachable from the AS network | Curl `$VAULT_ADDR/v1/sys/health` from the AS host; check NetworkPolicy / security groups. |
 | `Vault is sealed` after Vault restart | Production Vault is sealed by default after restart | Unseal Vault; AppRole renewal will resume automatically. |
 | Background `WARN vault token renewal failed` log | AppRole lease expired faster than renewal interval, or Vault is unreachable | Bump `token_ttl` on the role; alert on this log line — once the in-flight token expires, signing fails. |
-| `data_encryption: missing key_env` | Mixed `vault_transit_encrypt` + AppRole, but role-id env var not set in the running process | Verify the env named in `approle.role_id_env` is exported in the pod / unit. |
+| Boot fails with `vault transit encrypt client: vault token or approle config is required` | `data_encryption.vault_transit_encrypt` with `auth_method: approle` (not supported yet), or `token_env` names an unset variable | Use `auth_method: token` and export the variable `token_env` names in the pod / unit. |
 
 ## Runbook
 
-- **Rotate the Transit signing key**: `vault write -f transit/keys/authserver-signing/rotate`. authserver picks up the new key version on the next sign (Vault tracks `kid → version` for you). The old version stays available for verification until you `vault write transit/keys/authserver-signing/config min_decryption_version=N`.
+- **Rotate the Transit signing key**: prefer `POST /admin/keys/rotate` on the running server (it needs `update` on `transit/keys/authserver-signing/rotate` — see step 3); it returns, and writes to the `key.rotated` audit row, the new `kid`, `authserver-signing-v<version>`. A rotation done in Vault directly (`vault write -f transit/keys/authserver-signing/rotate`) works too: every instance signs with the new version at once, publishes it in its JWKS before the first token it signs with it, and within 60 seconds otherwise (`SIGHUP` makes it immediate). authserver publishes the latest version and the one before it, so a second rotation drops the version two back — and every token it signed. Raising `min_decryption_version` to the latest version removes the previous one from what Vault reports, and so from the JWKS within 60 seconds; tokens it signed then stop verifying.
 - **Rotate AppRole secret**: `vault write -f auth/approle/role/authserver/secret-id` → push the new secret-id to the AS env (Kubernetes Secret rotation + pod restart, or systemd `EnvironmentFile` update + `systemctl restart`). authserver does not hot-reload the secret-id.
 - **Disaster recovery**: if Vault is permanently lost, every JWT signed by `vault_transit` is unverifiable. Treat the Vault snapshot as the authority for signing keys; back it up at least daily. Pair with `data_encryption.driver: vault_transit_encrypt` if you want the same posture for refresh-grants.
 

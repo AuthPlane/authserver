@@ -167,7 +167,8 @@ func (s *HAKeyStore) ListActive(ctx context.Context) ([]*output.SigningKey, erro
 // In a single transaction:
 //  1. Demote the current key (is_current = FALSE)
 //  2. Encrypt and INSERT the new key with is_current = TRUE
-//  3. Delete old non-current keys (keep at most 1 previous)
+//  3. Delete every non-current key except the one just demoted, which
+//     stays as previous (nothing is deleted when no key was current)
 //
 // The unique partial index prevents two concurrent rotations. On unique
 // violation, retries up to 3 times with exponential backoff.
@@ -179,23 +180,11 @@ func (s *HAKeyStore) Save(ctx context.Context, key *output.SigningKey) error {
 		attribute.String("algorithm", key.Algorithm),
 	)
 
-	// Marshal private key to PEM.
-	der, err := x509.MarshalPKCS8PrivateKey(key.PrivateKey)
+	encPrivate, err := s.seal(ctx, key)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("marshal private key: %w", err)
-	}
-	pemBlock := &pem.Block{Type: "PRIVATE KEY", Bytes: der}
-	pemData := pem.EncodeToMemory(pemBlock)
-
-	// Encrypt PEM with ownerContext = "signing-key:<kid>".
-	ownerCtx := "signing-key:" + key.KeyID
-	encPrivate, err := s.encryptor.Encrypt(ctx, pemData, ownerCtx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("encrypt private key: %w", err)
+		return err
 	}
 
 	id := crypto.GenerateRandomString(16)
@@ -239,7 +228,69 @@ func (s *HAKeyStore) Save(ctx context.Context, key *output.SigningKey) error {
 	return domain.ErrRotationConflict
 }
 
+// CreateIfAbsent inserts key as the current key only when no current key
+// exists. The partial unique index on is_current arbitrates between
+// replicas: a losing insert does nothing, and the loser reads the winner's
+// key back instead of demoting and replacing it.
+func (s *HAKeyStore) CreateIfAbsent(ctx context.Context, key *output.SigningKey) error {
+	ctx, span := s.tracer.Start(ctx, "HAKeyStore.CreateIfAbsent")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("kid", key.KeyID),
+		attribute.String("algorithm", key.Algorithm),
+	)
+
+	encPrivate, err := s.seal(ctx, key)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO signing_keys (id, kid, algorithm, enc_private, is_current, created_at)
+		 VALUES ($1, $2, $3, $4, TRUE, $5)
+		 ON CONFLICT (is_current) WHERE is_current = TRUE DO NOTHING`,
+		crypto.GenerateRandomString(16), key.KeyID, key.Algorithm, encPrivate, time.Now().UTC(),
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("create first signing key: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		s.logger.InfoContext(ctx, "created first signing key", "kid", key.KeyID, "alg", key.Algorithm)
+	}
+	return nil
+}
+
+// seal encodes the private key as PKCS#8 PEM and encrypts it with the owner
+// context "signing-key:<kid>".
+func (s *HAKeyStore) seal(ctx context.Context, key *output.SigningKey) ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(key.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("marshal private key: %w", err)
+	}
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	encPrivate, err := s.encryptor.Encrypt(ctx, pemData, "signing-key:"+key.KeyID)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt private key: %w", err)
+	}
+	return encPrivate, nil
+}
+
 // doSaveTx executes the rotation transaction.
+//
+// The prune keeps exactly the row this transaction demoted, identified by the
+// id the demote returned. That row is the key that was signing until now, so
+// every outstanding token verifies against it. created_at cannot identify it:
+// each replica writes created_at from its own clock, and under skew the key
+// that was current can look older than a key retired before it.
+//
+// When no key was current, nothing is demoted and nothing is pruned. This
+// rotation retired no key, so it has no basis for choosing which non-current
+// row to keep, and every rotation that did demote a key has already reduced
+// the non-current rows to that one key. Any extra non-current rows left in
+// that state are removed by the next rotation that demotes a key.
 func (s *HAKeyStore) doSaveTx(ctx context.Context, id, kid, algorithm string, encPrivate []byte, now time.Time) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -247,10 +298,16 @@ func (s *HAKeyStore) doSaveTx(ctx context.Context, id, kid, algorithm string, en
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // best-effort rollback on deferred cleanup
 
-	// 1. Demote current key.
-	if _, err := tx.Exec(ctx,
-		`UPDATE signing_keys SET is_current = FALSE WHERE is_current = TRUE`,
-	); err != nil {
+	// 1. Demote the current key, capturing its id. The unique partial index
+	// on is_current allows at most one such row.
+	var demotedID string
+	demoted := true
+	err = tx.QueryRow(ctx,
+		`UPDATE signing_keys SET is_current = FALSE WHERE is_current = TRUE RETURNING id`,
+	).Scan(&demotedID)
+	if isNoRows(err) {
+		demoted = false
+	} else if err != nil {
 		return fmt.Errorf("demote current key: %w", err)
 	}
 
@@ -263,17 +320,14 @@ func (s *HAKeyStore) doSaveTx(ctx context.Context, id, kid, algorithm string, en
 		return fmt.Errorf("insert new key: %w", err)
 	}
 
-	// 3. Delete old non-current keys beyond the most recent one.
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM signing_keys
-		 WHERE is_current = FALSE
-		   AND id NOT IN (
-		     SELECT id FROM signing_keys
-		     WHERE is_current = FALSE
-		     ORDER BY created_at DESC LIMIT 1
-		   )`,
-	); err != nil {
-		return fmt.Errorf("prune old keys: %w", err)
+	// 3. Delete every non-current key except the one just demoted.
+	if demoted {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM signing_keys WHERE is_current = FALSE AND id <> $1`,
+			demotedID,
+		); err != nil {
+			return fmt.Errorf("prune old keys: %w", err)
+		}
 	}
 
 	return tx.Commit(ctx)

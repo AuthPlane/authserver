@@ -18,6 +18,7 @@
 - Authplane running, with `client_credentials` enabled (see [Client Credentials grant](client-credentials-grant.md)).
 - A confidential OAuth client registered. If you don't have one, follow steps 1-2 of [Client Credentials grant](client-credentials-grant.md) first.
 - An MCP server reachable at a known Resource URI (see [Connect an MCP Server](connect-mcp-server.md)).
+- The `authserver admin …` commands on this page must run with the server's configuration (`--config`, or the server's `AUTHPLANE_*` environment) — the per-deployment forms are in [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare, the CLI acts on a default SQLite database in the working directory, not the server's.
 - Concept context: [Client credentials grant](../../concepts/glossary.md#glossary-client-credentials-grant), [Resource indicator](../../concepts/glossary.md#glossary-resource-indicator), [DPoP](../../concepts/glossary.md#glossary-dpop), [Token exchange](../../concepts/glossary.md#glossary-token-exchange).
 
 ## When to use which method

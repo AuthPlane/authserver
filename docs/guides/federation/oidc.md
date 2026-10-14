@@ -15,6 +15,7 @@
 - Authplane authserver running on an HTTPS issuer URL. See [Deploy guides](../deploy/).
 - An OAuth/OIDC application registered with your IdP, with **`https://<your-authserver-domain>/oidc/callback`** in its redirect URIs allowlist.
 - The IdP's issuer URL, client ID, and client secret in hand.
+- The `authserver admin …` commands below must run with the server's configuration (`--config`, or the server's `AUTHPLANE_*` environment) — the per-deployment forms are in [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare, the CLI acts on a default SQLite database in the working directory, not the server's.
 - Concept context: [Identity and federation](../../concepts/identity-and-federation.md), [glossary — JWT](../../concepts/glossary.md#glossary-jwt).
 
 ## How it works (one paragraph)

@@ -4,6 +4,8 @@
 
 **Audience:** Builders and operators triaging an authenticated MCP request that's being rejected with 401. A 401 from an Authplane-protected MCP server almost always reduces to one of three causes: (1) `aud` mismatch, (2) signature/`kid` verification failure, or (3) insufficient scope. The `WWW-Authenticate` header on the 401 response and the SDK's structured log are your first stops.
 
+The `authserver admin …` commands on this page must run with the server's configuration (`--config`, or the server's `AUTHPLANE_*` environment) — the per-deployment forms are in [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare, the CLI acts on a default SQLite database in the working directory, not the server's.
+
 ## The minimum diagnostic
 
 ```bash

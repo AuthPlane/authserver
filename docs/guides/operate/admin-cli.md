@@ -13,11 +13,26 @@ The `authserver admin …` CLI is the scripted operator surface. It shares its s
 
 - An authserver instance reachable at `http://localhost:9001` (substitute your `admin.address`).
 - `admin.api_key` set in YAML or via env. See [`AUTHPLANE_ADMIN_API_KEY`](../../reference/env-vars.md).
-- `authserver` binary on `$PATH` (or `docker compose exec authserver /authserver …`).
+- The `authserver` binary, run with the server's configuration — see [Run the CLI against the server's data](#run-the-cli-against-the-servers-data) below. The commands on this page are written bare; run each in your deployment's form from that table, which wraps the command and adds `--config` where the deployment needs it.
 
 ```bash
 export AUTHPLANE_ADMIN_API_KEY="$(your-secret-tool get authplane/admin)"
 ```
+
+## Run the CLI against the server's data
+
+The CLI does not call the server: it opens the server's database and key store itself. **Give every command the server's configuration** — `--config` with the file the server runs with, or run it where the server's `AUTHPLANE_*` environment is set. Without either, the CLI uses its built-in defaults — a SQLite database at `data/authserver.db`, relative to the working directory — and acts on that instead: a create succeeds and the server never sees it. (Only `admin key rotate` and `admin key list` refuse to run that way.) The CLI also validates the configuration as the server does: when `server.issuer` is not localhost it refuses to load one without a session secret, and — when `admin.enabled` is true — without an admin API key. If the YAML leaves `session.secret` or `admin.api_key` empty and the server gets them from `AUTHPLANE_SESSION_SECRET` / `AUTHPLANE_ADMIN_API_KEY` (as the systemd layout does), give the CLI the same variables.
+
+| Deployment | Form (substitute the subcommand for `admin client list`) |
+| --- | --- |
+| Host install ([systemd](../deploy/systemd.md)) | `sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver admin client list --config /etc/authserver/config.yaml'` |
+| Docker quickstart ([`docker run`](../../start/02-quickstart-docker.md), container `authserver`) | `docker exec authserver /authserver admin client list --config /config.yaml` |
+| Container started with no config file (the README's `docker run … serve`) | `docker exec <container> /authserver admin client list` — the server and the CLI both use the built-in defaults under `/data`; the key commands also need `-e AUTHPLANE_SIGNING_KEY_STORE=keyfile` |
+| [Docker Compose](../deploy/docker-compose.md) (`deploy/docker-compose*.yml`, configured through the environment) | `docker compose -f deploy/docker-compose.<variant>.yml exec authserver /authserver admin client list` — from the repo root, in the shell that ran `up` (Compose re-checks the file's required `${VAR:?}` variables on `exec`) |
+| Helm chart | `kubectl -n authplane exec deploy/authplane -- /authserver admin client list --config /etc/authplane/config.yaml` |
+| [Raw Kubernetes manifests](../deploy/kubernetes-raw.md) | `kubectl -n authplane exec deploy/authplane -- /authserver admin client list --config /config/config.yaml` |
+
+Run it as the user the server runs as (the forms above do): a command that creates files, such as `admin key rotate` on the `keyfile` store, otherwise leaves them unreadable to the server.
 
 ---
 
@@ -187,12 +202,16 @@ authserver admin issuance revoke --id $ISSUANCE_ID
 CLI catalog: [`authserver admin key`](../../reference/cli.md#cli-admin-key).
 
 ```bash
-authserver admin key list           # current + retained
-authserver admin key rotate         # new kid, old kid stays for verify
+# current + previous
+sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver admin key list --config /etc/authserver/config.yaml'
+# new kid; the previous one stays until the next rotation
+sudo -u authserver sh -c 'set -a; . /etc/authserver/secrets.env; exec /usr/local/bin/authserver admin key rotate --config /etc/authserver/config.yaml'
 # → docs/reference/cli.md#cli-admin-key-rotate
 ```
 
-`rotate` emits `key.rotated` and increments `authserver_key_rotation_total`. The full multi-instance procedure lives in [Key rotation](key-rotation.md).
+Unlike the other admin commands, the key commands refuse to run without the server's config file (or `AUTHPLANE_SIGNING_KEY_STORE` / `AUTHPLANE_SIGNING_KEY_PATH` in the environment): unless the server itself runs on the built-in defaults, they would point the commands at a key store the server never reads. For a server that does — started with no config file and no signing variables — set `AUTHPLANE_SIGNING_KEY_STORE=keyfile` (in a container, `docker exec -e AUTHPLANE_SIGNING_KEY_STORE=keyfile <container> /authserver admin key rotate`). Each prints the key store it acted on first. The examples use the [systemd guide](../deploy/systemd.md#signing-key-rotation) layout: run them as the service user and with the secrets from its `EnvironmentFile`, which a non-localhost configuration needs to load (run as root, a rotation on `keyfile` would write key files the `authserver` user cannot read). The `docker compose exec` and `kubectl exec` forms are in [Key rotation → Rotate](key-rotation.md#2-rotate).
+
+The CLI writes no `key.rotated` audit row and moves no metric — only `POST /admin/keys/rotate` does — so prefer the admin API. The running server publishes a CLI rotation before it signs a token with the new key, and within 60 seconds in any case. The full multi-instance procedure lives in [Key rotation](key-rotation.md).
 
 ---
 
@@ -203,7 +222,7 @@ There is **no `authserver admin audit` CLI subcommand**. Query the REST endpoint
 ```bash
 # Token issuances in the last hour
 curl -fsS "http://localhost:9001/admin/audit?action=token.issued&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, actor_id, client_id, detail}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, actor_id, client_id, detail}'
 ```
 
 Full forensic query catalog lives in [Audit & forensics](audit-and-forensics.md).
@@ -254,7 +273,7 @@ After any mutation:
 | Rotate one client secret | `admin client rotate-secret` | On suspected client-credential leak |
 | Suspend then revoke a misbehaving client | `admin client …` + suspend → revoke | Incident response |
 | Force-logout a compromised user | `admin user force-logout` | Within 5 min of detection |
-| Rotate signing keys | `admin key rotate` | Scheduled (≤ 90 days) or on key-compromise |
+| Rotate signing keys | `POST /admin/keys/rotate` (or `admin key rotate --config …`) | Scheduled (≤ 90 days); on compromise follow the [incident runbook](incident-runbook.md#incident-signing-key-compromise) |
 | Audit a specific user's grants | `admin grant list-user-grants` | Per support ticket / GDPR request |
 | Revoke a single token | `admin issuance revoke` | Forensic |
 

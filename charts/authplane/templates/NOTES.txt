@@ -32,6 +32,29 @@ WARNING: SQLite storage does not support multiple replicas.
 
 {{- end }}
 
+{{- if eq (include "authplane.signingKeysInEmptyDir" .) "true" }}
+
+WARNING: Signing keys are stored in an emptyDir!
+  config.signing.key_store=keyfile with persistence.enabled=false keeps the
+  signing key in the pod's ephemeral storage. Every pod restart generates a
+  new key, and every token issued before the restart stops verifying.
+  Set persistence.enabled=true to keep a single instance's key across
+  restarts, or use config.signing.key_store=postgres_key, or vault_transit
+  (vault.signing.enabled=true).
+
+{{- end }}
+
+{{- if and (eq (include "authplane.keyfileInDataVolume" .) "true") .Values.persistence.enabled (or (gt (int .Values.replicaCount) 1) .Values.autoscaling.enabled) }}
+
+WARNING: The keyfile signing store is single-instance!
+  config.signing.key_store=keyfile is running with {{ if .Values.autoscaling.enabled }}autoscaling.enabled=true{{ else }}replicaCount={{ .Values.replicaCount }}{{ end }}.
+  Every pod must mount the same volume, which with ReadWriteOnce means every
+  pod on one node, and the store does not coordinate writers across hosts.
+  For replicas on more than one node use config.signing.key_store=postgres_key
+  or vault_transit (vault.signing.enabled=true).
+
+{{- end }}
+
 {{- if and (eq (toString .Values.config.storage.driver) "sqlite") (not .Values.persistence.enabled) }}
 
 WARNING: SQLite storage without persistence enabled!

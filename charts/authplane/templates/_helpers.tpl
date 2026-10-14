@@ -164,3 +164,53 @@ AES master-key data-encryption Secret name.
 {{- printf "%s-data-enc" (include "authplane.fullname" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+Renders "true" when the server will use the keyfile signing store with its
+key_path inside the /data volume (relative paths resolve against the image's
+/data working directory). AUTHPLANE_SIGNING_KEY_STORE / _KEY_PATH entries in
+extraEnv override the config block, as they do in the server. Anything the
+chart cannot see through renders "" so it is never flagged: an
+existingConfigSecret (the config block is ignored), Vault signing (the chart
+sets the key store by env var), or an extraEnv entry taken from valueFrom.
+An entry with no value, or a null one, sets the variable to "", which the
+server treats as the keyfile store (or a key path relative to /data).
+*/}}
+{{- define "authplane.keyfileInDataVolume" -}}
+{{- $unknown := or .Values.existingConfigSecret .Values.vault.signing.enabled -}}
+{{- $store := toString (.Values.config.signing.key_store | default "keyfile") -}}
+{{- $path := toString (.Values.config.signing.key_path | default "data/keys") -}}
+{{- range .Values.extraEnv }}
+{{- if has (toString .name) (list "AUTHPLANE_SIGNING_KEY_STORE" "AUTHPLANE_SIGNING_KEY_PATH") }}
+{{- if hasKey . "valueFrom" }}
+{{- $unknown = true }}
+{{- else }}
+{{- /* A missing or null value sets the variable to "", as Kubernetes does. */}}
+{{- $v := "" }}
+{{- if not (kindIs "invalid" .value) }}
+{{- $v = toString .value }}
+{{- end }}
+{{- if eq (toString .name) "AUTHPLANE_SIGNING_KEY_STORE" }}
+{{- $store = $v | default "keyfile" }}
+{{- else }}
+{{- $path = $v }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $inData := or (not (hasPrefix "/" $path)) (eq $path "/data") (hasPrefix "/data/" $path) -}}
+{{- if and (not $unknown) (eq $store "keyfile") $inData -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Renders "true" when keyfile signing keys live in the pod's emptyDir
+(keyfileInDataVolume with persistence off): every pod generates its own key,
+and generates a new one on restart.
+*/}}
+{{- define "authplane.signingKeysInEmptyDir" -}}
+{{- if and (eq (include "authplane.keyfileInDataVolume" .) "true") (not .Values.persistence.enabled) -}}
+true
+{{- end -}}
+{{- end }}

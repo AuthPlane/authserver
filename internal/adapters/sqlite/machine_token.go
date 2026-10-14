@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain/scope"
 	"github.com/authplane/authserver/internal/domain/token"
 	"github.com/authplane/authserver/internal/observability"
@@ -262,9 +263,12 @@ func (s *MachineTokenStore) PurgeExpired(ctx context.Context) error {
 	defer span.End()
 	start := time.Now()
 
+	// A revoked machine token is recorded only here, so its row is kept
+	// until the token can no longer verify (the verifier's clock skew past
+	// exp); dropping it earlier re-enables the revoked token.
 	result, err := dbOrTx(ctx, s.db).ExecContext(ctx,
 		`DELETE FROM machine_tokens WHERE expires_at < ?`,
-		formatTime(time.Now().UTC()),
+		formatTime(crypto.VerifiableAfterCutoff(time.Now()).UTC()),
 	)
 	if err != nil {
 		span.RecordError(err)

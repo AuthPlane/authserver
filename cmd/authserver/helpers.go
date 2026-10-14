@@ -159,10 +159,15 @@ func openAdminCLI() (*cliEnv, func(), error) {
 
 // openKeyRotationCLI sets up config, storage, key store, and JWKS service
 // for key rotation commands (which need the signing key store, not just admin).
-func openKeyRotationCLI() (*services.JWKSService, func(), error) {
+// It refuses to fall back to the default key store (requireKeyStoreSource),
+// and returns the loaded config so the caller can say which store it used.
+func openKeyRotationCLI() (*services.JWKSService, *config.Config, func(), error) {
+	if err := requireKeyStoreSource(cfgFile); err != nil {
+		return nil, nil, nil, err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
-		return nil, nil, fmt.Errorf("load config: %w", err)
+		return nil, nil, nil, fmt.Errorf("load config: %w", err)
 	}
 
 	obs := observability.NewNoop()
@@ -172,7 +177,7 @@ func openKeyRotationCLI() (*services.JWKSService, func(), error) {
 	if cfg.DataEncryption.Driver != "" {
 		dataEncryptor, err = encryption.Open(context.Background(), cfg.DataEncryption, obs)
 		if err != nil {
-			return nil, nil, fmt.Errorf("setup data encryptor: %w", err)
+			return nil, nil, nil, fmt.Errorf("setup data encryptor: %w", err)
 		}
 	}
 
@@ -181,7 +186,7 @@ func openKeyRotationCLI() (*services.JWKSService, func(), error) {
 		if c, ok := dataEncryptor.(io.Closer); ok {
 			_ = c.Close()
 		}
-		return nil, nil, fmt.Errorf("open database: %w", err)
+		return nil, nil, nil, fmt.Errorf("open database: %w", err)
 	}
 
 	keyResult, err := adaptersigning.Open(context.Background(), cfg, ds, dataEncryptor, obs)
@@ -190,7 +195,7 @@ func openKeyRotationCLI() (*services.JWKSService, func(), error) {
 		if c, ok := dataEncryptor.(io.Closer); ok {
 			_ = c.Close()
 		}
-		return nil, nil, fmt.Errorf("create key store: %w", err)
+		return nil, nil, nil, fmt.Errorf("create key store: %w", err)
 	}
 
 	jwksSvc := services.NewJWKSService(keyResult.Store, cache.NewMemory[*jose.JSONWebKeySet](), cfg.Signing.Algorithm, obs.WithComponent("jwks"))
@@ -204,7 +209,7 @@ func openKeyRotationCLI() (*services.JWKSService, func(), error) {
 			_ = c.Close()
 		}
 	}
-	return jwksSvc, cleanup, nil
+	return jwksSvc, cfg, cleanup, nil
 }
 
 // bindEnv checks os.Getenv for a flag value if the flag was not explicitly set.

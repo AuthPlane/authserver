@@ -17,6 +17,7 @@
 
 - Authplane running on `http://localhost:9000` (public) / `http://localhost:9001` (admin). The fastest path is the published image — see [Get Started → Quickstart with Docker](../../start/02-quickstart-docker.md) for the one-line `docker run` against `authplane/authserver:latest`. Build from source only if you're contributing to the AS itself.
 - `AUTHPLANE_ADMIN_API_KEY` exported in your shell.
+- The `authserver admin …` commands below must run with the server's configuration. With the [Docker quickstart](../../start/02-quickstart-docker.md) that is `docker exec authserver /authserver admin … --config /config.yaml`; other deployments: [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare on your host, the CLI acts on a default SQLite database in the working directory, not the server's.
 - Concept context: [Resource](../../concepts/glossary.md#glossary-resource), [Mint backend](../../concepts/glossary.md#glossary-mint-backend), [JWKS](../../concepts/glossary.md#glossary-jwks), [Audience](../../concepts/glossary.md#glossary-audience).
 
 ## Steps
@@ -89,7 +90,7 @@ The `resource` field must match the `--uri` you registered in step 1 exactly —
 For every request to your MCP endpoint, your server must:
 
 1. Pull the `Authorization: Bearer <token>` header. If missing, return `401` with `WWW-Authenticate: Bearer resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource/mcp"` (suffix matches your MCP endpoint path — see step 2).
-2. Fetch Authplane's JWKS from `<issuer>/.well-known/jwks.json` (cache for 5 minutes, refresh on unknown `kid`).
+2. Fetch Authplane's JWKS from `<issuer>/.well-known/jwks.json` (cache it — the endpoint sends `Cache-Control: public, max-age=3600` — and re-fetch on an unknown `kid`).
 3. Verify the JWT signature against the JWKS.
 4. Validate claims: `iss == <your issuer URL>`, `aud` contains your Resource URI, `exp > now`.
 5. For per-tool authorization, check the `scope` claim — return `403 {"error":"insufficient_scope"}` if the required scope is missing.

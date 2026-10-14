@@ -229,9 +229,23 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 		return nil, domain.ErrInvalidGrant
 	}
 
-	// 5. Check subject token is not revoked.
+	// 4c. A derived token is capped at the subject token's exp, so a subject
+	// with no lifetime left (accepted only within the verifier's clock skew)
+	// can only yield an expired token. Refused here, on every path, before
+	// anything is recorded or consumed.
+	if !hasLifetimeLeft(time.Now(), subjectClaims.Expiry) {
+		span.RecordError(domain.ErrInvalidGrant)
+		span.SetStatus(codes.Error, "subject token has expired")
+		s.recordDenied(ctx, req.ClientID, "subject_token_expired")
+		return nil, domain.ErrInvalidGrant
+	}
+
+	// 5. Check subject token is not revoked. A failed lookup is a server
+	// fault, not a revocation, and is not audited as one.
 	if revokeErr := s.checkRevocation(ctx, span, subjectClaims); revokeErr != nil {
-		s.recordDenied(ctx, req.ClientID, "subject_token_revoked")
+		if errors.Is(revokeErr, domain.ErrInvalidGrant) {
+			s.recordDenied(ctx, req.ClientID, "subject_token_revoked")
+		}
 		return nil, revokeErr
 	}
 
@@ -285,6 +299,12 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 		if actorErr != nil {
 			s.recordDenied(ctx, req.ClientID, "invalid_actor_token")
 			return nil, actorErr
+		}
+		if revokeErr := s.checkRevocation(ctx, span, ac); revokeErr != nil {
+			if errors.Is(revokeErr, domain.ErrInvalidGrant) {
+				s.recordDenied(ctx, req.ClientID, "actor_token_revoked")
+			}
+			return nil, revokeErr
 		}
 		if reason, liveErr := s.checkLiveness(ctx, span, ac); liveErr != nil {
 			if reason != "" {
@@ -386,7 +406,7 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 
 	// 11. Build the issued token claims.
 	now := time.Now().UTC()
-	expiry := now.Add(teCfg.TokenExpiry)
+	expiry := derivedExpiry(now, teCfg.TokenExpiry, subjectClaims.Expiry)
 	jti := crypto.GenerateRandomString(16)
 
 	sk, err := s.jwksSign.GetSigningKey(ctx)
@@ -529,9 +549,33 @@ func (s *TokenExchangeService) Exchange(ctx context.Context, req input.TokenExch
 		AccessToken:     accessToken,
 		IssuedTokenType: token.TokenTypeAccessToken,
 		TokenType:       tokenType,
-		ExpiresIn:       int(teCfg.TokenExpiry.Seconds()),
+		ExpiresIn:       int(expiry.Sub(now).Seconds()),
 		Scope:           effectiveScopes.String(),
 	}, nil
+}
+
+// minDerivedLifetime is the least lifetime a subject token must have left
+// when the exchange starts; with less, the derived token, capped at the
+// subject's exp, would be expired or nearly so. The checks that run after
+// this gate take time, so a subject just over the limit can still yield
+// expires_in 0; exp stays capped either way.
+const minDerivedLifetime = time.Second
+
+// hasLifetimeLeft reports whether a subject token with this exp has at least
+// minDerivedLifetime left at now.
+func hasLifetimeLeft(now time.Time, subjectExp int64) bool {
+	return time.Unix(subjectExp, 0).Sub(now) >= minDerivedLifetime
+}
+
+// derivedExpiry caps a derived token's exp at its subject token's, so
+// exchanging the newest token in a chain cannot carry access past the first
+// one's expiry.
+func derivedExpiry(now time.Time, lifetime time.Duration, subjectExp int64) time.Time {
+	expiry := now.Add(lifetime)
+	if limit := time.Unix(subjectExp, 0); limit.Before(expiry) {
+		expiry = limit
+	}
+	return expiry
 }
 
 // authenticateClient looks up a client, verifies it's active, and validates the secret.
@@ -671,7 +715,6 @@ func (s *TokenExchangeService) revokeOwnIssuance(ctx context.Context, issuanceID
 	return s.issuances.Revoke(ctx, issuanceID)
 }
 
-// checkRevocation checks if a token has been revoked.
 // checkLiveness refuses a token whose subject user is disabled, or whose
 // subject or issuing client is suspended or revoked — the same conditions
 // introspection reports as subject_inactive / issuing_client_inactive.
@@ -746,50 +789,60 @@ func (s *TokenExchangeService) checkLiveness(ctx context.Context, span trace.Spa
 	return "", nil
 }
 
+// checkRevocation refuses a subject or actor token that has been revoked:
+// its issuance row revoked (consent revocation), its machine-token row
+// revoked, or its JTI on the denylist. Every store is checked for every token.
+// The sub claim does not say which store records a revocation: tokens minted
+// by token exchange and by jwt-bearer live in the machine-token store with a
+// user's sub, and /oauth/revoke revokes them there. A lookup that fails is
+// refused as a server fault, never read as "not revoked". Returns
+// domain.ErrInvalidGrant for a revoked token.
 func (s *TokenExchangeService) checkRevocation(ctx context.Context, span trace.Span, claims *crypto.AccessTokenClaims) error {
 	if claims.JTI == "" {
 		return nil
 	}
+	revoked := func(msg string) error {
+		span.RecordError(domain.ErrInvalidGrant)
+		span.SetStatus(codes.Error, msg)
+		return domain.ErrInvalidGrant
+	}
+	fault := func(msg string, err error) error {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, msg)
+		return fmt.Errorf("%s: %w", msg, err)
+	}
 
-	// The issuance log first: it is where consent revocation lands, and a
-	// subject token whose row is revoked must not seed another hop — the
-	// chain below a revoked consent would otherwise keep growing from any
-	// token minted before the revoke. A lookup failure is refused as a
-	// server fault rather than passed over: the two checks below tolerate
-	// their own store errors, but this one is the only check that sees a
-	// consent revocation at all.
+	// The issuance log: it is where consent revocation lands, and a token
+	// whose row is revoked must not seed another hop — the chain below a
+	// revoked consent would otherwise keep growing from any token minted
+	// before the revoke.
 	if s.issuances != nil {
 		iss, err := s.issuances.GetByJTI(ctx, claims.JTI)
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "issuance lookup failed")
-			return fmt.Errorf("look up subject token issuance: %w", err)
+			return fault("look up token issuance", err)
 		}
 		if iss != nil && iss.IsRevoked() {
-			span.RecordError(domain.ErrInvalidGrant)
-			span.SetStatus(codes.Error, "subject token issuance revoked")
-			return domain.ErrInvalidGrant
+			return revoked("token issuance revoked")
 		}
 	}
 
-	// Check machine token store for machine tokens (sub == client_id).
-	isMachineToken := claims.Subject == claims.ClientID
-	if isMachineToken && s.machineTokens != nil {
+	if s.machineTokens != nil {
 		mt, err := s.machineTokens.GetByJTI(ctx, claims.JTI)
-		if err == nil && mt != nil && mt.Revoked {
-			span.RecordError(domain.ErrInvalidGrant)
-			span.SetStatus(codes.Error, "subject token revoked")
-			return domain.ErrInvalidGrant
+		if err != nil {
+			return fault("look up machine token", err)
+		}
+		if mt != nil && mt.Revoked {
+			return revoked("machine token revoked")
 		}
 	}
 
-	// Check revocation store for user tokens.
-	if !isMachineToken && s.revocation != nil {
-		revoked, err := s.revocation.IsRevoked(ctx, claims.JTI)
-		if err == nil && revoked {
-			span.RecordError(domain.ErrInvalidGrant)
-			span.SetStatus(codes.Error, "subject token revoked")
-			return domain.ErrInvalidGrant
+	if s.revocation != nil {
+		denylisted, err := s.revocation.IsRevoked(ctx, claims.JTI)
+		if err != nil {
+			return fault("look up token denylist", err)
+		}
+		if denylisted {
+			return revoked("token denylisted")
 		}
 	}
 
@@ -1409,6 +1462,12 @@ func (s *TokenExchangeService) dispatchMint(
 			s.recordDenied(ctx, req.ClientID, "invalid_actor_token")
 			return nil, actorErr
 		}
+		if revokeErr := s.checkRevocation(ctx, span, ac); revokeErr != nil {
+			if errors.Is(revokeErr, domain.ErrInvalidGrant) {
+				s.recordDenied(ctx, req.ClientID, "actor_token_revoked")
+			}
+			return nil, revokeErr
+		}
 		if reason, liveErr := s.checkLiveness(ctx, span, ac); liveErr != nil {
 			if reason != "" {
 				s.recordDenied(ctx, req.ClientID, "actor_"+reason)
@@ -1525,7 +1584,7 @@ func (s *TokenExchangeService) dispatchMint(
 	}
 
 	now := time.Now().UTC()
-	expiry := now.Add(teCfg.TokenExpiry)
+	expiry := derivedExpiry(now, teCfg.TokenExpiry, subjectClaims.Expiry)
 	// Lineage for consent revocation. The consenting client is the
 	// subject token's client on every non-fronted path — the delegation
 	// gate above looked the grant up under it, and a self-exchange mints

@@ -16,7 +16,7 @@ test-unit:
 # Coverage floor, applied by coverage-check to the merged unit + integration
 # profile (what ci-local runs). The number is a ratchet: raise it when
 # coverage rises, never lower it to make a red run green.
-COVERAGE_FLOOR ?= 59
+COVERAGE_FLOOR ?= 61
 
 test-integration:
 	@packages=$$(go list ./internal/adapters/... ./internal/services/... ./api/... 2>/dev/null); \
@@ -89,7 +89,7 @@ vulncheck:
 		echo "$$OUTPUT"; \
 		if [ $$EXIT -eq 0 ]; then echo "No vulnerabilities found in $$mod."; continue; fi; \
 		if [ $$EXIT -ne 3 ]; then echo "✗ govulncheck failed to run in $$mod (exit $$EXIT)."; FAILED=1; continue; fi; \
-		THIRD_PARTY=$$(echo "$$OUTPUT" | grep -A1 "^Vulnerability" | grep "Module:" || true); \
+		THIRD_PARTY=$$(echo "$$OUTPUT" | grep -E '^[[:space:]]*Module:[[:space:]]' || true); \
 		if [ -z "$$THIRD_PARTY" ]; then \
 			echo ""; echo "⚠ Only Go stdlib vulnerabilities found in $$mod — upgrade Go to fix."; continue; \
 		fi; \

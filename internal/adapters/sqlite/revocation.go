@@ -3,12 +3,14 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
 )
@@ -66,24 +68,28 @@ func (s *RevocationStore) RevokeByFamily(ctx context.Context, familyID string) e
 	return nil
 }
 
-// RevokeJTI adds a single JTI to the blacklist.
-func (s *RevocationStore) RevokeJTI(ctx context.Context, jti string) error {
+// RevokeJTI adds a single JTI to the blacklist until expiresAt.
+func (s *RevocationStore) RevokeJTI(ctx context.Context, jti string, expiresAt time.Time) error {
 	ctx, span := s.tracer.Start(ctx, "SQLite.RevokeJTI")
 	defer span.End()
 	start := time.Now()
 
-	// Look up expiry from tracking table; fall back to 1 hour from now.
-	var expiresAt string
-	err := dbOrTx(ctx, s.db).QueryRowContext(ctx,
-		`SELECT expires_at FROM access_token_jtis WHERE jti = ?`, jti,
-	).Scan(&expiresAt)
-	if err != nil {
-		expiresAt = formatTime(time.Now().Add(time.Hour))
+	// time.Unix(0, 0) is the likely mistake (an exp claim read as 0), and
+	// it is not IsZero.
+	if expiresAt.IsZero() || expiresAt.Unix() <= 0 {
+		err := fmt.Errorf("revoke jti %q: expiry is required", jti)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 
-	_, err = dbOrTx(ctx, s.db).ExecContext(ctx,
-		`INSERT OR IGNORE INTO revoked_jtis (jti, expires_at) VALUES (?, ?)`,
-		jti, expiresAt,
+	// julianday compares instants; the stored RFC3339Nano strings do not sort
+	// as times when their fractional parts differ in length.
+	_, err := dbOrTx(ctx, s.db).ExecContext(ctx,
+		`INSERT INTO revoked_jtis (jti, expires_at) VALUES (?, ?)
+		 ON CONFLICT (jti) DO UPDATE SET expires_at = excluded.expires_at
+		 WHERE julianday(excluded.expires_at) > julianday(revoked_jtis.expires_at)`,
+		jti, formatTime(expiresAt),
 	)
 
 	s.metrics.DBOperationDuration.Record(ctx, time.Since(start).Seconds(), dbAttrs("revoke_jti"))
@@ -126,7 +132,10 @@ func (s *RevocationStore) PurgeExpired(ctx context.Context) (int64, error) {
 	defer span.End()
 	start := time.Now()
 
-	now := formatTime(time.Now())
+	// A row is kept until its token can no longer verify (the verifier's
+	// clock skew past exp); a denylist row dropped while the token still
+	// verifies re-enables a revoked token. The cutoff is this host's clock.
+	now := formatTime(crypto.VerifiableAfterCutoff(time.Now()))
 
 	res1, err := dbOrTx(ctx, s.db).ExecContext(ctx,
 		`DELETE FROM access_token_jtis WHERE expires_at < ?`, now,

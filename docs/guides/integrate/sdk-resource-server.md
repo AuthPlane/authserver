@@ -17,6 +17,7 @@
 
 - Your MCP server is reachable on a known URL and registered as a [Mint Resource](../../concepts/glossary.md#glossary-mint-backend) in Authplane (see [Connect an MCP Server](connect-mcp-server.md)).
 - Python users: Python **3.12+** (the SDK and its FastMCP adapter both pin `>=3.12`).
+- The `authserver admin …` commands below must run with the server's configuration (`--config`, or the server's `AUTHPLANE_*` environment) — the per-deployment forms are in [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare, the CLI acts on a default SQLite database in the working directory, not the server's.
 - Concept context: [Access token](../../concepts/glossary.md#glossary-access-token), [Audience](../../concepts/glossary.md#glossary-audience), [JWKS](../../concepts/glossary.md#glossary-jwks), [DPoP](../../concepts/glossary.md#glossary-dpop), [Scope](../../concepts/glossary.md#glossary-scope).
 
 ## Pick your package

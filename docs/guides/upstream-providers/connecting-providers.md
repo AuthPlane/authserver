@@ -15,6 +15,7 @@
 - Authplane running with `data_encryption.driver` set — `aes_master` or `vault_transit_encrypt`. See [Deploy → Configuration](../deploy/configuration.md) and [Deploy → HashiCorp Vault Transit](../deploy/hashicorp-vault-transit.md).
 - `token_exchange.enabled: true` (or `AUTHPLANE_TOKEN_EXCHANGE_ENABLED=true`).
 - An admin API key (`AUTHPLANE_ADMIN_API_KEY`) — see [Operate → Admin CLI & API](../operate/admin-cli.md).
+- The `authserver admin …` commands below must run with the server's configuration (`--config`, or the server's `AUTHPLANE_*` environment) — the per-deployment forms are in [Admin CLI → Run the CLI against the server's data](../operate/admin-cli.md#run-the-cli-against-the-servers-data). Run bare, the CLI acts on a default SQLite database in the working directory, not the server's.
 - A user account at the upstream provider with permission to create an OAuth app.
 - Concept context: [Broker backend](../../concepts/glossary.md#glossary-broker-backend), [Consent](../../concepts/glossary.md#glossary-consent), [Three-bound check](../../concepts/threat-model.md).
 

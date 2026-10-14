@@ -159,10 +159,11 @@ opt-in trusted-proxy configuration, which authserver does not currently offer.
 **Why it's contained**:
 - **Restrictive file permissions**: Key files are written with minimal permissions.
 - **Vault Transit option**: With Vault Transit, the private key **never leaves Vault** — authserver sends data to Vault for signing, and only gets back the signature.
-- **Key rotation**: `authserver admin key rotate` generates a new key immediately. The old key stays in JWKS only for verification of existing tokens.
-- **Short token expiry**: Even with a compromised key, forged tokens are only useful until you rotate and MCP servers refresh their JWKS cache.
+- **Key rotation**: a rotation makes a new key the signer at once. The key before it stays in the JWKS as the previous key, and stays trusted, until the next rotation.
 
-**Incident response**: Run `authserver admin key rotate` immediately. Wait for MCP servers to refresh JWKS (default 5 minutes). All tokens signed with the old key expire within 15 minutes.
+**Residual risk**: a leaked key is trusted until it leaves the JWKS, which takes **two** rotations (on `vault_transit`, alternatively one rotation followed by raising `min_decryption_version` to the new version). Each authserver instance re-reads its JWKS from the key store within 60 seconds, and resource servers may cache it for up to an hour (`Cache-Control: public, max-age=3600`). A forged token chooses its own `jti` and expiry, so revoking issued tokens does not stop it, and this server's introspection answers active for a validly signed token whose issuer, client and user check out even if it never issued that `jti`. There is no authserver operation that removes one specific key; the second rotation also invalidates every legitimately issued access token. On `vault_transit` the leaked credential is a Vault token or AppRole secret-id, not key material, and rotating does not help until it is revoked.
+
+**Incident response**: see [Incident runbook → Signing-key compromise](../guides/operate/incident-runbook.md#incident-signing-key-compromise): close the leak (revoke the Vault credential, or the database access and data-encryption key), rotate twice ([per-deployment commands](../guides/operate/key-rotation.md#2-rotate)), confirm the leaked `kid` is gone from the JWKS of every instance, and restart resource servers so they re-fetch it.
 
 ### T10: CIMD document tampering
 
@@ -330,11 +331,14 @@ These are the signals that tell you something might be wrong:
 
 ### Signing key compromise
 
-1. **Rotate immediately**: `authserver admin key rotate`
-2. **Wait for JWKS propagation**: MCP servers refresh JWKS every 5 minutes by default.
-3. **All existing access tokens** expire within 15 minutes (default expiry).
-4. **Refresh tokens** continue to work (they're not JWTs — they're verified by database lookup).
-5. **Review**: Check if the attacker forged any tokens by correlating `jti` values with the token store.
+Follow [Incident runbook → Signing-key compromise](../guides/operate/incident-runbook.md#incident-signing-key-compromise). In short:
+
+1. **Close the leak**: revoke the Vault credential (`vault_transit`), or the database access and the data-encryption key (`postgres_key`).
+2. **Rotate twice** (`POST /admin/keys/rotate`, or the [per-deployment CLI commands](../guides/operate/key-rotation.md#2-rotate)); one rotation leaves the leaked key trusted as the previous key.
+3. **Confirm** the leaked `kid` is gone from `/.well-known/jwks.json` on every instance (each re-reads it within 60 seconds; `SIGHUP` makes it immediate).
+4. **Restart resource servers** so they re-fetch the JWKS (it is served with `max-age=3600`).
+5. **Refresh tokens** continue to work (they're not JWTs — they're verified by database lookup).
+6. **Review**: a forged token carries any `jti` the attacker chose, so no token store can list forged tokens, and revoking `jti`s does not stop them; only removing the key from the JWKS does.
 
 ### Admin API key leak
 
@@ -347,7 +351,7 @@ These are the signals that tell you something might be wrong:
 
 1. **Vault tokens are encrypted**: The attacker gets ciphertext, not raw tokens. But still:
 2. **Rotate master key**: point `data_encryption.aes_master.key_env` at a new env var holding the new key, and `data_encryption.aes_master.old_key_env` at the env var holding the previous key (decrypt-only fallback). Re-encrypt `broker_grants.credential_data` with a one-off SQL script — the in-place re-encrypt admin endpoint is on the roadmap.
-3. **Rotate signing key**: `authserver admin key rotate` — assume the old key is compromised.
+3. **Rotate signing key** — assume it is compromised. On `postgres_key` do this **after** rotating the master key and restarting every instance on it, or the new signing key is stored under the leaked one. Follow [Signing key compromise](#signing-key-compromise) (two rotations).
 4. **Reset all user passwords**: Via admin API.
 5. **Revoke all client secrets**: Register new clients with fresh secrets.
 

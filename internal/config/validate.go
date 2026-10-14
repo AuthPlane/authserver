@@ -608,26 +608,17 @@ func isWeakSecret(value string) bool {
 	return false
 }
 
-// isLocalhostIssuer returns true if the issuer URL points to localhost.
-// Checks that the host portion is exactly localhost, 127.0.0.1, or [::1]
-// (not e.g. localhost.evil.com).
+// isLocalhostIssuer reports whether the issuer URL's host is localhost,
+// 127.0.0.1 or [::1]. It parses the URL rather than matching a prefix: in
+// "https://localhost:@auth.example.com" the text before '@' is userinfo and the
+// host is auth.example.com. An issuer with userinfo is never localhost.
 func isLocalhostIssuer(issuer string) bool {
-	for _, prefix := range []string{
-		"http://localhost",
-		"https://localhost",
-		"http://127.0.0.1",
-		"https://127.0.0.1",
-		"http://[::1]",
-		"https://[::1]",
-	} {
-		if !strings.HasPrefix(issuer, prefix) {
-			continue
-		}
-		// After the prefix, only allow end-of-string, ':', or '/'.
-		rest := issuer[len(prefix):]
-		if rest == "" || rest[0] == ':' || rest[0] == '/' {
-			return true
-		}
+	u, err := url.Parse(issuer)
+	if err != nil || u.User != nil {
+		return false
 	}
-	return false
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	return isLocalhostHost(u.Hostname())
 }

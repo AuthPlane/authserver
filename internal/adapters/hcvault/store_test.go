@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -66,10 +67,12 @@ func mockTransitServer(t *testing.T) (*httptest.Server, *ecdsa.PrivateKey) {
 				},
 			})
 
-		// POST /v1/transit/keys/<name> — create key
+		// POST /v1/transit/keys/<name> — create key. As in Vault, creating
+		// a key that already exists changes nothing.
 		case r.Method == "POST" && r.URL.Path == "/v1/transit/keys/test-key":
-			keyCreated.Store(true)
-			keyVersion.Store(1)
+			if keyCreated.CompareAndSwap(false, true) {
+				keyVersion.Store(1)
+			}
 			w.WriteHeader(204)
 
 		// POST /v1/transit/keys/<name>/rotate — rotate key
@@ -362,5 +365,52 @@ func TestIsNotFound(t *testing.T) {
 	other := context.DeadlineExceeded
 	if isNotFound(other) {
 		t.Error("expected non-VaultError to NOT be isNotFound")
+	}
+}
+
+// First use creates the Transit key and never rotates it, however many
+// callers race, and on a key that already exists it changes nothing.
+func TestStore_CreateIfAbsent_NeverRotates(t *testing.T) {
+	srv, _ := mockTransitServer(t)
+	defer srv.Close()
+	obs := observability.NewNoop()
+	c, err := NewClient(context.Background(), ClientConfig{Address: srv.URL, Token: "test-token"}, obs)
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	defer c.Close()
+	store := NewStore(c, "test-key", "ES256", obs)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- store.CreateIfAbsent(ctx, nil)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("CreateIfAbsent: %v", err)
+		}
+	}
+	key, err := store.LoadCurrent(ctx)
+	if err != nil || key == nil || key.KeyID != "test-key-v1" {
+		t.Fatalf("LoadCurrent after concurrent first use = %v, %v; want test-key-v1", key, err)
+	}
+
+	if saveErr := store.Save(ctx, nil); saveErr != nil {
+		t.Fatalf("Save (rotate): %v", saveErr)
+	}
+	if createErr := store.CreateIfAbsent(ctx, nil); createErr != nil {
+		t.Fatalf("CreateIfAbsent on an existing key: %v", createErr)
+	}
+	key, err = store.LoadCurrent(ctx)
+	if err != nil || key == nil || key.KeyID != "test-key-v2" {
+		t.Fatalf("LoadCurrent = %v, %v; want test-key-v2 unchanged by CreateIfAbsent", key, err)
 	}
 }

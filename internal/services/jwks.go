@@ -4,8 +4,11 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
@@ -42,6 +45,20 @@ type JWKSService struct {
 	tracer    trace.Tracer
 	metrics   *observability.Metrics
 	cache     output.Cache[*jose.JSONWebKeySet]
+
+	// writeMu serializes first-key creation and rotation in this process, so
+	// the two never interleave. Reads stay lock-free.
+	writeMu sync.Mutex
+
+	// reloadMu orders writes to the cached JWKS document: reloads run one at
+	// a time, so a later reload always stores a later read of the store.
+	// reloadStarts counts reloads as they begin reading the store, so a
+	// caller can tell that a reload read the store after the caller saw its
+	// key; jwksGen counts writes to the cached document, so a slow read
+	// stores its result only if nothing was stored meanwhile.
+	reloadMu     sync.Mutex
+	reloadStarts atomic.Uint64
+	jwksGen      atomic.Uint64
 
 	// Agent listing — optional. When set, includes agents array in JWKS document.
 	clientStore     output.ClientStore
@@ -92,12 +109,34 @@ func (s *JWKSService) GetSigningKey(ctx context.Context) (*output.SigningKey, er
 		return nil, fmt.Errorf("load current key: %w", err)
 	}
 	if key != nil {
+		s.publishIfUnknown(ctx, key)
 		return key, nil
 	}
 
-	// First run: generate and save a new key.
+	// First run: create a key only if no other caller has, and use whatever
+	// the store then holds. Another caller in this process may have created
+	// it while this one waited for the lock.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if key, err = s.keyStore.LoadCurrent(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("load current key: %w", err)
+	}
+	if key != nil {
+		return key, nil
+	}
 	s.logger.InfoContext(ctx, "no signing key found, generating", "algorithm", s.algorithm)
-	return s.generateAndSave(ctx)
+	sk, err := s.generate()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.keyStore.CreateIfAbsent(ctx, sk); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("create first key: %w", err)
+	}
+	return s.storedAfterWrite(ctx, "created first signing key")
 }
 
 // BuildJWKS returns the JWKS document containing current and (optionally) previous keys.
@@ -115,29 +154,115 @@ func (s *JWKSService) BuildJWKS(ctx context.Context) (*jose.JSONWebKeySet, error
 		}
 	}
 
-	// Slow path: direct store reads (backward compat for keyfile/vault_transit).
-	current, err := s.GetSigningKey(ctx)
+	// Slow path: read the active keys. This never creates a key: the JWKS
+	// endpoint is unauthenticated, and before the first key exists it serves
+	// an empty set.
+	gen := s.jwksGen.Load()
+	active, err := s.keyStore.ListActive(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("get signing key: %w", err)
+		return nil, fmt.Errorf("list active keys: %w", err)
 	}
+	jwks := &jose.JSONWebKeySet{Keys: activeKeysToJWKs(active)}
+	// Cache what was read only if no reload stored a document meanwhile: a
+	// read that began before a rotation must not replace the newer set.
+	s.reloadMu.Lock()
+	if s.jwksGen.Load() == gen {
+		s.storeJWKS(ctx, jwks)
+	}
+	s.reloadMu.Unlock()
+	return jwks, nil
+}
 
-	keys := []jose.JSONWebKey{
-		portKeyToJWK(current),
-	}
+// CurrentKey returns the key store's current signing key without creating
+// one: nil when the store holds none, an error when it cannot be read or the
+// key cannot be used. BuildJWKS skips an unusable key, so a caller that needs
+// to know which published key is current asks here.
+func (s *JWKSService) CurrentKey(ctx context.Context) (*output.SigningKey, error) {
+	return s.keyStore.LoadCurrent(ctx)
+}
 
-	previous, err := s.keyStore.LoadPrevious(ctx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("load previous key: %w", err)
-	}
-	if previous != nil {
-		keys = append(keys, portKeyToJWK(previous))
-	}
+// PreviousKey returns the key store's previous signing key: nil when there
+// is none, an error when it cannot be read or used.
+func (s *JWKSService) PreviousKey(ctx context.Context) (*output.SigningKey, error) {
+	return s.keyStore.LoadPrevious(ctx)
+}
 
-	return &jose.JSONWebKeySet{Keys: keys}, nil
+// storeJWKS caches a JWKS document, unless it is empty: an empty set cached
+// before the first key exists would hide that key until the entry expires.
+func (s *JWKSService) storeJWKS(ctx context.Context, jwks *jose.JSONWebKeySet) {
+	if s.cache == nil || len(jwks.Keys) == 0 {
+		return
+	}
+	s.jwksGen.Add(1)
+	if err := s.cache.Store(ctx, jwksCacheKey, jwks); err != nil {
+		s.logger.WarnContext(ctx, "caching the JWKS document failed", "error", err)
+	}
+}
+
+// dropJWKS discards the cached JWKS document so the next read goes to the
+// store.
+func (s *JWKSService) dropJWKS(ctx context.Context) {
+	if s.cache == nil {
+		return
+	}
+	s.jwksGen.Add(1)
+	if err := s.cache.Invalidate(ctx, jwksCacheKey); err != nil {
+		s.logger.WarnContext(ctx, "dropping the cached JWKS document failed", "error", err)
+	}
+}
+
+// publishIfUnknown reloads the cached JWKS document when the key about to
+// sign is not in it. A rotation this process did not perform (the CLI, a
+// Vault rotation, another replica whose notification was missed) is then
+// published before the first token signed with it, instead of when the
+// cache entry expires. A failed reload drops the cached document so the
+// next JWKS read goes to the store.
+func (s *JWKSService) publishIfUnknown(ctx context.Context, key *output.SigningKey) {
+	if s.cache == nil {
+		return
+	}
+	seen := s.reloadStarts.Load()
+	cached, _ := s.cache.Load(ctx, jwksCacheKey)
+	if cached == nil || len(cached.Key(key.KeyID)) > 0 {
+		return
+	}
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	// Many signers can find the kid missing at once; one reload serves them
+	// all. Skip when the kid is cached by now, or when a reload began after
+	// this caller loaded its key: that reload read a store already holding
+	// the key, so its result is as fresh as a new one. A reload that began
+	// earlier may have read the store before the key existed, so it does not
+	// count.
+	if cached, _ := s.cache.Load(ctx, jwksCacheKey); cached == nil || len(cached.Key(key.KeyID)) > 0 {
+		return
+	}
+	if s.reloadStarts.Load() != seen {
+		return
+	}
+	s.logger.InfoContext(ctx, "signing key not in the cached JWKS; reloading", "kid", key.KeyID)
+	if err := s.reloadLocked(ctx); err != nil {
+		s.logger.WarnContext(ctx, "JWKS reload for an unknown signing key failed", "kid", key.KeyID, "error", err)
+		s.dropJWKS(ctx)
+	}
+}
+
+// activeKeysToJWKs converts active keys to JWKs, dropping a repeated kid: a
+// key store interrupted mid-rotation can hold the same key as current and
+// previous.
+func activeKeysToJWKs(active []*output.SigningKey) []jose.JSONWebKey {
+	keys := make([]jose.JSONWebKey, 0, len(active))
+	seen := make(map[string]bool, len(active))
+	for _, sk := range active {
+		if seen[sk.KeyID] {
+			continue
+		}
+		seen[sk.KeyID] = true
+		keys = append(keys, portKeyToJWK(sk))
+	}
+	return keys
 }
 
 // BuildJWKSDocument returns the JWKS document as serialized JSON bytes.
@@ -225,9 +350,21 @@ func (s *JWKSService) RotateKey(ctx context.Context) (*output.SigningKey, error)
 	ctx, span := s.tracer.Start(ctx, "JWKSService.RotateKey")
 	defer span.End()
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.logger.InfoContext(ctx, "rotating signing key", "algorithm", s.algorithm)
 
-	key, err := s.generateAndSave(ctx)
+	sk, err := s.generate()
+	if err != nil {
+		return nil, err
+	}
+	if err = s.keyStore.Save(ctx, sk); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("save key: %w", err)
+	}
+	key, err := s.storedAfterWrite(ctx, "saved new signing key")
 	if err != nil {
 		return nil, err
 	}
@@ -243,8 +380,16 @@ func (s *JWKSService) RotateKey(ctx context.Context) (*output.SigningKey, error)
 // Reload reads all active keys from the store and rebuilds the JWKS cache.
 // Called by the KeyStoreListener on NOTIFY and by SIGHUP handler.
 func (s *JWKSService) Reload(ctx context.Context) error {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	return s.reloadLocked(ctx)
+}
+
+// reloadLocked rebuilds the cached JWKS document; the caller holds reloadMu.
+func (s *JWKSService) reloadLocked(ctx context.Context) error {
 	ctx, span := s.tracer.Start(ctx, "JWKSService.Reload")
 	defer span.End()
+	s.reloadStarts.Add(1)
 
 	start := time.Now()
 
@@ -252,17 +397,23 @@ func (s *JWKSService) Reload(ctx context.Context) error {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
+		// Whatever made this reload necessary may not be in the cached
+		// document: drop it so the next read goes to the store. A signer
+		// waiting on this reload then sees no cached set and does not skip
+		// its key past the JWKS.
+		s.dropJWKS(ctx)
 		return fmt.Errorf("list active keys: %w", err)
 	}
 
-	jwkKeys := make([]jose.JSONWebKey, 0, len(active))
-	for _, sk := range active {
-		jwkKeys = append(jwkKeys, portKeyToJWK(sk))
-	}
+	jwkKeys := activeKeysToJWKs(active)
 
 	jwks := &jose.JSONWebKeySet{Keys: jwkKeys}
-	if s.cache != nil {
-		_ = s.cache.Store(ctx, jwksCacheKey, jwks)
+	if len(jwkKeys) == 0 {
+		// Never cache an empty set; drop any cached one so reads go to the
+		// store until a key exists.
+		s.dropJWKS(ctx)
+	} else {
+		s.storeJWKS(ctx, jwks)
 	}
 
 	duration := time.Since(start)
@@ -276,31 +427,48 @@ func (s *JWKSService) Reload(ctx context.Context) error {
 	return nil
 }
 
-func (s *JWKSService) generateAndSave(ctx context.Context) (*output.SigningKey, error) {
+// generate makes a new key pair for the configured algorithm.
+func (s *JWKSService) generate() (*output.SigningKey, error) {
 	kid := crypto.GenerateRandomString(16)
 	kp, err := crypto.GenerateKeyPair(s.algorithm, kid)
 	if err != nil {
 		return nil, fmt.Errorf("generate key pair: %w", err)
 	}
-
-	sk := &output.SigningKey{
+	return &output.SigningKey{
 		PrivateKey: kp.PrivateKey,
 		PublicKey:  kp.PublicKey,
 		Algorithm:  s.algorithm,
 		KeyID:      kid,
+	}, nil
+}
+
+// storedAfterWrite reads back the key the store holds after a write and
+// refreshes the JWKS cache. The stored key, not the one generated locally,
+// is what callers sign with and what the JWKS publishes: Vault Transit keeps
+// its own key material, and under concurrent writes another caller's key may
+// be current. Under a concurrent rotation it can be a newer key than this
+// caller's, which is still a key the store holds.
+func (s *JWKSService) storedAfterWrite(ctx context.Context, msg string) (*output.SigningKey, error) {
+	key, err := s.keyStore.LoadCurrent(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read back stored key: %w", err)
+	}
+	if key == nil {
+		return nil, errors.New("read back stored key: the store reports no current key after the write")
 	}
 
-	if err := s.keyStore.Save(ctx, sk); err != nil {
-		return nil, fmt.Errorf("save key: %w", err)
-	}
-
-	// Refresh cache after local save (don't wait for NOTIFY round-trip).
-	if err := s.Reload(ctx); err != nil {
+	// Refresh cache after local save (don't wait for NOTIFY round-trip). If
+	// that fails, drop the cached document rather than keep one without the
+	// new key.
+	s.reloadMu.Lock()
+	if err := s.reloadLocked(ctx); err != nil {
 		s.logger.WarnContext(ctx, "post-save JWKS reload failed", "error", err)
+		s.dropJWKS(ctx)
 	}
+	s.reloadMu.Unlock()
 
-	s.logger.InfoContext(ctx, "saved new signing key", "kid", kid, "alg", s.algorithm)
-	return sk, nil
+	s.logger.InfoContext(ctx, msg, "kid", key.KeyID, "alg", key.Algorithm)
+	return key, nil
 }
 
 // portKeyToJWK converts a port-level SigningKey to a jose.JSONWebKey (public only).

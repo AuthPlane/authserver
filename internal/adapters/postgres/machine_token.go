@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain/scope"
 	"github.com/authplane/authserver/internal/domain/token"
 	"github.com/authplane/authserver/internal/observability"
@@ -254,8 +255,12 @@ func (s *MachineTokenStore) PurgeExpired(ctx context.Context) error {
 	defer span.End()
 	start := time.Now()
 
+	// A revoked machine token is recorded only here, so its row is kept
+	// until the token can no longer verify (the verifier's clock skew past
+	// exp); dropping it earlier re-enables the revoked token.
 	result, err := dbOrTx(ctx, s.pool).Exec(ctx,
-		`DELETE FROM machine_tokens WHERE expires_at < NOW()`,
+		`DELETE FROM machine_tokens WHERE expires_at < $1`,
+		crypto.VerifiableAfterCutoff(time.Now()).UTC(),
 	)
 	if err != nil {
 		span.RecordError(err)

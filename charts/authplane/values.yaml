@@ -48,7 +48,8 @@ config:
   signing:
     # -- Signing algorithm: ES256 (recommended) or RS256
     algorithm: ES256
-    # -- Key store: "keyfile" | "vault_transit" | "postgres_key"
+    # -- Key store: "keyfile" | "vault_transit" | "postgres_key". keyfile is
+    # per pod: use postgres_key or vault_transit for more than one replica.
     key_store: keyfile
     # -- Path for local key files (used when key_store=keyfile)
     key_path: /data/keys
@@ -377,7 +378,13 @@ vault:
 # Persistence (SQLite mode / signing key files)
 # ---------------------------------------------------------------------------
 persistence:
-  # -- Enable persistent storage. Required for SQLite; optional for keyfile signing.
+  # -- Enable persistent storage. Required for SQLite, and for a single
+  # instance's keyfile signing key to survive a pod restart (without it the key
+  # lives in an emptyDir and is regenerated on every restart). keyfile is a
+  # single-instance store: for more than one replica use
+  # config.signing.key_store=postgres_key or vault_transit. Rendering fails for
+  # keyfile with more than one pod (replicaCount > 1 or autoscaling) and
+  # persistence off.
   enabled: false
   # -- Storage size
   size: 1Gi

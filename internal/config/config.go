@@ -146,9 +146,9 @@ type SigningConfig struct {
 // PostgresKeyConfig controls the HA PostgreSQL signing key store.
 // Keys are encrypted at rest via the configured DataEncryptor.
 type PostgresKeyConfig struct {
-	// EncryptionKeyEnv is the env var name for the key encryption key.
-	// Only relevant when data_encryption.driver is aes_master.
-	// The actual encryption uses the DataEncryptor port configured at the top level.
+	// EncryptionKeyEnv is read but not used: postgres_key encrypts signing
+	// keys with the data_encryption driver (aes_master or
+	// vault_transit_encrypt), configured under data_encryption.
 	EncryptionKeyEnv string `yaml:"encryption_key_env"`
 }
 

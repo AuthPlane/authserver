@@ -55,7 +55,7 @@ Full list lives in the `Action` constants in `internal/domain/audit/entity.go` (
 | `broker_grant.created` / `broker_grant.revoked` | User self-service | `/connect/{provider}` flow. |
 | `broker_grant.revoked_admin` | Admin path | Operator-forced upstream revoke. |
 | `upstream.token.issued` | `Issue` in `internal/services/broker_issuer.go` | AS vended an upstream-format access token to an MCP. |
-| `key.rotated` | `admin key rotate` | Signing key rotated. |
+| `key.rotated` | `POST /admin/keys/rotate` | Signing key rotated through the admin API; `kid=` names the new key. CLI and Vault-side rotations write no row. |
 | `issuance.revoked_admin` | Admin path | Per-token revocation. |
 | `user.force_logout` | Admin path | Every family for a user burnt. |
 | `dcr.mode_updated` | Admin path | DCR runtime setting changed. |
@@ -72,7 +72,7 @@ HTTP route: [`GET /admin/audit`](../../reference/http-api.md#http-admin-audit-li
 # All exchanges denied in the last hour
 curl -fsS "http://localhost:9001/admin/audit?action=token.exchange_denied&since=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')&limit=200" \
   -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" \
-  | jq '.events[] | {at: .created_at, client: .client_id, detail}'
+  | jq '.[] | {at: .created_at, client: .client_id, detail}'
 ```
 
 ### 2. Drill into one user
@@ -81,7 +81,7 @@ curl -fsS "http://localhost:9001/admin/audit?action=token.exchange_denied&since=
 # Everything a single user touched in the last 24h
 curl -fsS "http://localhost:9001/admin/audit?actor_id=$USER_ID&since=$(date -u -v-1d '+%Y-%m-%dT%H:%M:%SZ')&limit=500" \
   -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" \
-  | jq '.events[] | {at: .created_at, action, client_id, detail}'
+  | jq '.[] | {at: .created_at, action, client_id, detail}'
 ```
 
 ### 3. Drill into one client
@@ -90,7 +90,7 @@ curl -fsS "http://localhost:9001/admin/audit?actor_id=$USER_ID&since=$(date -u -
 # Every action where this client was the OAuth client
 curl -fsS "http://localhost:9001/admin/audit?client_id=$CLIENT_ID&limit=500" \
   -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" \
-  | jq '.events | group_by(.action) | map({action: .[0].action, count: length})'
+  | jq 'group_by(.action) | map({action: .[0].action, count: length})'
 ```
 
 ### 4. Decode the detail string
@@ -106,7 +106,7 @@ Each emit site stores key=value pairs in `detail`. Examples from source:
 - **`token.exchanged` (mint dispatch)** (`dispatchMint` in `internal/services/token_exchange.go`) → `jti=… sub=… subject_client=… actor_client=… type=mint_dispatch resource=… scopes=… chain_kind=… via_link=…`
 - **`token.exchanged` (broker dispatch)** (`dispatchBroker`, same file) → `issuance_id=… sub=… subject_client=… type=broker_dispatch resource=… provider=… scopes=…`
 - **`token.exchanged` (fronted broker)** (`dispatchFrontedBroker`, same file) → `… type=broker_dispatch resource=… scopes=… chain_kind=fronted via_link=… target_kind=broker issuance_id=…`
-- **`token.revoked` (machine)** (`tryRevokeMachineToken` in `internal/services/revocation.go`) → `machine_token jti=<jti>`
+- **`token.revoked` (access token)** (`revokeAccessToken` in `internal/services/revocation.go`) → `access_token jti=<jti> revoked_in=<stores>`, where `<stores>` lists what the call changed among `machine_token`, `issuance` and `denylist`. No row is written when the token was already revoked everywhere.
 - **`token.revoked` (family)** (`RevokeToken` in `internal/services/revocation.go`) → `family=<family_id>`
 
 The detail string is plain text — grep / `jq -r` / `awk -F= …` all work.
@@ -123,9 +123,10 @@ OFFSET=0
 while : ; do
   page=$(curl -fsS "http://localhost:9001/admin/audit?since=$SINCE&until=$UNTIL&limit=500&offset=$OFFSET" \
     -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY")
-  n=$(echo "$page" | jq '.events | length')
+  n=$(echo "$page" | jq 'length')
+  [ -n "$n" ] || { echo "audit request failed" >&2; exit 1; }
   [ "$n" = 0 ] && break
-  echo "$page" | jq -c '.events[]' >> incident.ndjson
+  echo "$page" | jq -c '.[]' >> incident.ndjson
   OFFSET=$((OFFSET + n))
 done
 wc -l incident.ndjson
@@ -163,14 +164,14 @@ WHERE action = 'family.revoked'
 
 ```bash
 curl -fsS "http://localhost:9001/admin/audit?action=token.issued&actor_id=$USER_ID&since=$(date -u -v-1d '+%Y-%m-%dT%H:%M:%SZ')" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, client_id, family: (.detail|capture("family=(?<f>[^ ]+)").f)}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, client_id, family: (.detail|capture("family=(?<f>[^ ]+)").f)}'
 ```
 
 ### "All upstream-broker dispatches in the last 24h"
 
 ```bash
 curl -fsS "http://localhost:9001/admin/audit?action=upstream.token.issued&since=$(date -u -v-1d '+%Y-%m-%dT%H:%M:%SZ')" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | {created_at, actor_id, client_id, detail}'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | {created_at, actor_id, client_id, detail}'
 ```
 
 ### "Was this token family ever reused?"
@@ -178,7 +179,7 @@ curl -fsS "http://localhost:9001/admin/audit?action=upstream.token.issued&since=
 ```bash
 for action in family.revoked family.revocation_failed family.denylist_failed; do
   curl -fsS "http://localhost:9001/admin/audit?action=$action&limit=500" \
-    -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq --arg f "$FAMILY_ID" --arg a "$action" '.events[] | select(.detail | contains($f)) | {action: $a, created_at, detail}'
+    -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq --arg f "$FAMILY_ID" --arg a "$action" '.[] | select(.detail | contains($f)) | {action: $a, created_at, detail}'
 done
 ```
 
@@ -194,7 +195,7 @@ Broker grants soft-delete and reuse the same row on reconnect. The audit trail i
 
 ```bash
 curl -fsS "http://localhost:9001/admin/audit?actor_id=$USER_ID&limit=500" \
-  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.events[] | select(.action | startswith("broker_grant."))'
+  -H "Authorization: Bearer $AUTHPLANE_ADMIN_API_KEY" | jq '.[] | select(.action | startswith("broker_grant."))'
 ```
 
 ### "Trace an exchange chain"

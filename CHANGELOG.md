@@ -4,6 +4,194 @@ All notable, user-facing changes to authserver are documented here —
 operator-impact and wire-shape changes only. The format follows
 [Keep a Changelog](https://keepachangelog.com/); dates are ISO 8601.
 
+## [0.2.3] — 2026-10-14
+
+Security and signing-key patch release. No new config keys, schema
+migrations, metrics or audit actions; two metrics and one audit action gain
+new reason values, and the `token.revoked` detail changes format. Several
+signing-key behaviours change: read the upgrade notes first if you run the
+Helm chart with more than one replica, run `authserver admin key`, use the
+keyfile store, or share one Vault between signing and data encryption.
+
+### Upgrade notes
+
+- **Helm chart 0.4.3** refuses to render, `helm upgrade` included, when the
+  keyfile signing store would sit in a per-pod `emptyDir`
+  (`persistence.enabled: false`) with `replicaCount > 1` or
+  `autoscaling.enabled`: every pod had its own key, and tokens from one pod
+  failed verification against another. Switch to `config.signing.key_store:
+  postgres_key` (which also needs PostgreSQL storage, the chart default, and
+  `config.data_encryption` configured) or Vault Transit
+  (`vault.signing.enabled: true`), or run one replica with
+  `persistence.enabled: true`. Each of these starts with a new signing key,
+  so tokens issued before the change stop verifying.
+- **`authserver admin key rotate` and `admin key list`** refuse to run
+  unless they load a config file (`--config`) or
+  `AUTHPLANE_SIGNING_KEY_STORE` / `AUTHPLANE_SIGNING_KEY_PATH` is set.
+  Without one they used built-in defaults, which on the Helm chart, and for
+  any server whose config file names another key store or path, is a key
+  store the server never reads. On the Helm chart, pass `--config
+  /etc/authplane/config.yaml`. A container started with no config file and
+  no signing variables, like the README's `docker run … serve`, does use the
+  defaults: there, run `docker exec -e AUTHPLANE_SIGNING_KEY_STORE=keyfile
+  <container> /authserver admin key rotate`. Their first output line is now
+  `key store: …`.
+- **Vault Transit signing on the same Vault address and Transit mount as
+  `vault_transit_encrypt` data encryption** now authenticates with its own
+  `signing.vault_transit` token or AppRole, which it used to ignore. Check
+  that this credential can read and sign with the signing key before
+  upgrading: a wrong AppRole, or a Vault the AppRole login cannot reach,
+  fails the boot; a token without access starts the server, and token
+  requests and the JWKS endpoint then fail.
+- **A Vault Transit signing key of a type that cannot sign
+  `signing.algorithm`** (for example `ecdsa-p256` with `RS256`, or an RSA
+  key with `ES256`) now stops the server at startup. If the key cannot be
+  read within two seconds at boot, the server starts, and such a key then
+  fails every token request and JWKS fetch. A symmetric Transit key is not
+  caught at startup; signing with it fails, as before. A mismatched key
+  never produced a token that verified.
+- **The keyfile store adds a lock file,** `<key dir>/.lock`, taken on every
+  read and write on Unix systems; it coordinates processes on one host. Keys
+  in a directory the server cannot write, such as a read-only mount, are
+  still served; rotating there fails with an error. A current key that
+  cannot be used (wrong type for its algorithm, a missing companion file, a
+  PEM that does not parse) still fails every token request, but is no longer
+  published in the JWKS (a type mismatch was) or takes the JWKS down (a
+  missing file or bad PEM did): the previous key stays published.
+  `authserver admin key list` reports such a key: it labels the remaining
+  key `previous` and exits with an error naming the fix, `authserver admin
+  key rotate`, which replaces the key and keeps the previous one; it warns
+  about an unusable previous key.
+- **The JWKS endpoint and `admin key list` no longer create a signing key.**
+  The server creates one at startup, waiting up to ten seconds for the key
+  store, or on the first token request if the key store is unreachable then.
+  Until a key exists, `/.well-known/jwks.json` returns an empty key set and
+  `admin key list` prints `no signing keys found`.
+- **`/oauth/revoke` answers `503 temporarily_unavailable`** with
+  `Retry-After` when the server cannot look up or record a revocation; it
+  used to answer `200`, in some cases for a token that stayed valid. Clients
+  should retry. Access tokens that 0.2.2 accepted at `/oauth/revoke` without
+  revoking (see Security) stay valid until they expire.
+- **Token exchange:** a token this server mints by exchange now expires no
+  later than its subject token, so `expires_in` can be shorter than the
+  configured lifetime (a Broker resource still returns the upstream
+  provider's own token). A subject token with less than a second left,
+  including one past its `exp` but still inside the verifier's 30-second
+  clock-skew allowance, is refused with `invalid_grant`.
+- **Metrics and audit** (update alerts and queries that match on these
+  values):
+  - `authserver_tokens_revoked_total` and the `token.revoked` audit event
+    count a token once, on the call that first revokes it; repeated revokes,
+    and revokes that change nothing, no longer count. The metric gains the
+    reason `explicit_access` for an access token that has no machine-token
+    row, and `explicit_machine` now means the call revoked that row.
+  - The `token.revoked` detail for an access token is now `access_token
+    jti=… revoked_in=…` (was `machine_token jti=…`).
+  - `token.exchange_denied` and `authplane_token_exchange_denied_total` gain
+    the reasons `actor_token_revoked` and `subject_token_expired`. A
+    revocation lookup that fails is no longer recorded as
+    `subject_token_revoked`; the exchange fails as a server error.
+- An issuer URL with userinfo, such as
+  `https://localhost:@auth.example.com`, is no longer treated as localhost,
+  so the production config checks apply and can fail the boot.
+- Building from source needs Go 1.26.9 or later.
+
+### Security
+
+- `/oauth/revoke` answered `200` for access tokens from the
+  authorization-code and refresh grants and from token exchange to a
+  registered resource, and wrote a `token.revoked` audit event for them, but
+  did not revoke them: they stayed active at introspection and as a
+  token-exchange `subject_token`. A `token.revoked` event for such a token
+  in a 0.2.2 audit log does not mean it was revoked. An access token revoked
+  by the client it was issued to is now revoked until it expires.
+- `/oauth/revoke` also answered `200` when it failed to revoke a
+  refresh-token family, to denylist that family's access tokens, or to mark
+  a machine token revoked, telling the client a token was revoked while it
+  stayed valid. It now answers `503` (see Upgrade notes).
+- Token exchange accepted a revoked `subject_token` issued by the jwt-bearer
+  grant or by a token exchange without `resource`, and never checked the
+  `actor_token` for revocation. Both are now refused, and a failed
+  machine-token or denylist lookup refuses the exchange instead of allowing
+  it.
+- A token from a token exchange was valid for the full configured lifetime,
+  so exchanging the newest token in a chain extended access indefinitely.
+  Its expiry is now capped at the subject token's (a Broker resource still
+  returns the upstream provider's own token).
+- `/connect/{provider}` accepted a `resource` belonging to another provider,
+  so a link could send a signed-in user to one provider with another
+  resource's scopes, overwrite their stored grant for that provider, and
+  redirect them to the other resource's return URL. The request now fails
+  with `invalid_target`, and the callback checks again before exchanging the
+  code.
+- `authserver purge` deleted revocation records as soon as a token's `exp`
+  passed, while the verifier still accepts the token for 30 seconds of clock
+  skew; in that window a revoked token introspected active and could be
+  exchanged. The records are now kept until the token can no longer verify.
+- Introspection ignored a failed read of the machine-token store, so a
+  revoked token could introspect active while the store was failing. It now
+  answers `active: false`.
+- Built with Go 1.26.9 and `golang.org/x/net` v0.60.0, closing eleven
+  advisories reachable from the server: GO-2026-6599 and GO-2026-6600
+  (`html/template`); GO-2026-6603, GO-2026-6605, GO-2026-6610, GO-2026-6611,
+  GO-2026-6612, GO-2026-6613 and GO-2026-6617 (`net/http` and
+  `golang.org/x/net`); GO-2026-6607 (`crypto/tls`); GO-2026-6608
+  (`net/textproto` and `mime/multipart`).
+
+### Fixed
+
+- **Signing keys are published when they change.** A key rotated outside the
+  running server (by `authserver admin key rotate`, in Vault, or on a
+  replica whose change notification was missed) could stay unpublished while
+  the server signed with it, so its tokens failed verification. On
+  `postgres_key` this lasted until a restart, a SIGHUP or the next
+  key-change notification; on keyfile and Vault Transit, once the server had
+  created the first key, rotated through the admin API or reloaded on
+  SIGHUP, until the next restart or SIGHUP. The server now reloads its JWKS
+  before signing with a key it has not published, and every other server
+  picks the change up within 60 seconds (with `postgres_key`, as soon as its
+  notification arrives, and again whenever its listener reconnects). SIGHUP
+  also refreshes the cached `postgres_key` signing key. The JWKS response is
+  still served with `Cache-Control: max-age=3600`, so a verifier that
+  honours it can keep an older key set for up to an hour.
+- **The server signs with the key the store holds.** On Vault Transit, when
+  the server created the Transit key itself, the request that created it was
+  signed with a locally generated key no JWKS carried, and a rotation
+  reported a key ID that did not exist. Several requests arriving before the
+  first key existed could each create one, which on Vault Transit rotated
+  the new key at once and on PostgreSQL demoted another replica's new key.
+  The server now reads the key back from the store after every write, and
+  creates a first key only when none exists.
+- **Keyfile writes are atomic and coordinated.** A rotation could be read
+  half-written by a concurrent token request or JWKS fetch, interleave with
+  `authserver admin key rotate` in the same container, or leave no current
+  key after a crash. Key files are now written atomically, in an order that
+  never leaves the current key missing, under a lock shared with the CLI on
+  the same host. A crash during a rotation that changes `signing.algorithm`
+  can still leave a current key that fails to load; the previous key stays
+  published, and the next rotation replaces it. An unusable current or
+  previous key file no longer makes every JWKS request fail: the usable key
+  is still published.
+- **RS256 tokens signed with Vault Transit verify.** Vault signed them with
+  RSA-PSS while the token and the JWKS said RS256. ES256, the default, was
+  not affected.
+- **A `postgres_key` rotation keeps the key that was signing.** With replica
+  clocks out of step, or two overlapping rotations, a rotation could delete
+  the key that signed every outstanding token.
+- **Helm chart:** the install notes warn when a single pod keeps its keyfile
+  signing key in an `emptyDir` (a new key, and invalid earlier tokens, on
+  every restart) and when keyfile runs on a persistent volume with more than
+  one replica.
+- **Signing-key documentation** describes what the server does: exactly one
+  previous key is kept until the next rotation, so a leaked key needs two
+  rotations (or, on Vault Transit, one rotation and
+  `min_decryption_version`); the JWKS cache header; that only `POST
+  /admin/keys/rotate` writes a `key.rotated` audit event; which Vault
+  capabilities creating and rotating the Transit key need; and that
+  `signing.postgres_key.encryption_key_env` is not used. The configuration
+  and systemd guide examples that defined `server:` twice, and the audit-log
+  `jq` examples, are fixed.
+
 ## [0.2.2] — 2026-10-03
 
 Security patch release. No new config keys, metrics or audit actions.

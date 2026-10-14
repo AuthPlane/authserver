@@ -183,7 +183,10 @@ func runServe() error {
 		defer func() { _ = keyResult.Closer.Close() }()
 	}
 
-	jwksSvc := services.NewJWKSService(keyResult.Store, cache.NewMemory[*jose.JSONWebKeySet](), cfg.Signing.Algorithm, obs.WithComponent("jwks"))
+	// The JWKS document cache expires after jwksCacheTTL, so a key change
+	// nothing announced (a rotation by the CLI or in Vault, a notification
+	// lost while the listener was down) is published within that time.
+	jwksSvc := services.NewJWKSService(keyResult.Store, newJWKSCache(jwksCacheTTL), cfg.Signing.Algorithm, obs.WithComponent("jwks"))
 
 	// 5. Setup audit service
 	auditSvc := services.NewAuditService(ds.Audit(), obs.WithComponent("audit"))
@@ -480,6 +483,7 @@ func runServe() error {
 
 	// 11. Setup revocation service
 	revokeSvc := services.NewRevocationService(ds.Token(), ds.Client(), ds.MachineToken(), jwksSvc, issuerProvider, obs.WithComponent("revoke"), auditSvc, ds.Revocation())
+	revokeSvc.WithIssuanceStore(ds.Issuance())
 
 	// 11b. Setup introspection service (RFC 7662)
 	introspectSvc := services.NewIntrospectionService(
@@ -1022,6 +1026,12 @@ func runServe() error {
 	// the live value, would then contradict it.
 	warnIfNoDefaultClientScope(context.Background(), obs.Logger, dcrModeProvider, cfg)
 
+	// Make sure a signing key exists before the first request, now that the
+	// JWKS endpoint no longer creates one. Best effort: a key store that is
+	// down or slow at boot must not stop the server, and the first token
+	// request creates the key instead.
+	ensureSigningKey(jwksSvc, obs.Logger)
+
 	// Start LISTEN/NOTIFY listener if the signing driver supports it.
 	if keyResult.RunNotify != nil {
 		keyResult.RunNotify(ctx, jwksSvc.Reload)
@@ -1045,9 +1055,7 @@ func runServe() error {
 				return
 			case <-sighupCh:
 				obs.Logger.Info("SIGHUP received, reloading signing keys")
-				if err := jwksSvc.Reload(context.Background()); err != nil {
-					obs.Logger.Error("SIGHUP key reload failed", "error", err)
-				}
+				reloadSigningKeys(context.Background(), keyResult.Store, jwksSvc, obs.Logger)
 			}
 		}
 	}()
@@ -1333,4 +1341,51 @@ func warnIfDCROpen(logger *slog.Logger, mode string) {
 		"alternatives", "approved_redirects, admin_only",
 		"note", "MCP 2026-07-28 deprecates Dynamic Client Registration in favor of Client ID Metadata Documents, which are enabled by default and require no registration endpoint",
 	)
+}
+
+// bootKeyTimeout bounds the boot-time signing-key check.
+const bootKeyTimeout = 10 * time.Second
+
+// ensureSigningKey loads the current signing key, creating the first one if
+// there is none, and logs instead of failing when the key store does not
+// answer in time.
+func ensureSigningKey(jwksSvc *services.JWKSService, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), bootKeyTimeout)
+	defer cancel()
+	key, err := jwksSvc.GetSigningKey(ctx)
+	if err != nil {
+		logger.Warn("signing key not ready at startup: if the key store was unreachable the first token request retries; if the key is unusable, run `authserver admin key rotate`", "error", err)
+		return
+	}
+	logger.Info("signing key ready", "kid", key.KeyID, "alg", key.Algorithm)
+}
+
+// jwksCacheTTL bounds how long a cached JWKS document is served without
+// re-reading the key store.
+const jwksCacheTTL = 60 * time.Second
+
+// signingKeyCacheInvalidator is implemented by key stores that cache the
+// current signing key (the postgres_key decorator).
+type signingKeyCacheInvalidator interface {
+	InvalidateCache(ctx context.Context) error
+}
+
+// reloadSigningKeys is the SIGHUP handler: it drops the cached signing key,
+// if the store caches one, so the next token is signed with the stored
+// current key, then rebuilds the JWKS document.
+func reloadSigningKeys(ctx context.Context, store output.KeyStore, jwksSvc *services.JWKSService, logger *slog.Logger) {
+	if c, ok := store.(signingKeyCacheInvalidator); ok {
+		if err := c.InvalidateCache(ctx); err != nil {
+			logger.Error("SIGHUP signing-key cache invalidation failed", "error", err)
+		}
+	}
+	if err := jwksSvc.Reload(ctx); err != nil {
+		logger.Error("SIGHUP key reload failed", "error", err)
+	}
+}
+
+// newJWKSCache returns the cache for the JWKS document, expiring entries
+// after ttl.
+func newJWKSCache(ttl time.Duration) output.Cache[*jose.JSONWebKeySet] {
+	return cache.NewMemoryTTLBounded[*jose.JSONWebKeySet](ttl, 4)
 }

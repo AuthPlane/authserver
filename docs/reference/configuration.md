@@ -72,7 +72,7 @@ SigningConfig controls JWT signing key generation and storage.
 | `signing.algorithm` | `string` | `ES256` | `AUTHPLANE_SIGNING_ALGORITHM` | "ES256" or "RS256" |
 | `signing.key_path` | `string` | `data/keys` | `AUTHPLANE_SIGNING_KEY_PATH` | path for keyfile store Required when key_store is keyfile. |
 | `signing.key_store` | `string` | `keyfile` | `AUTHPLANE_SIGNING_KEY_STORE` | "keyfile" (default), "vault_transit", or "postgres_key" |
-| `signing.postgres_key.encryption_key_env` | `string` | — | `AUTHPLANE_SIGNING_PG_ENCRYPTION_KEY_ENV` | EncryptionKeyEnv is the env var name for the key encryption key. Only relevant when data_encryption.driver is aes_master. The actual encryption uses the DataEncryptor port configured at the top level. |
+| `signing.postgres_key.encryption_key_env` | `string` | — | `AUTHPLANE_SIGNING_PG_ENCRYPTION_KEY_ENV` | EncryptionKeyEnv is read but not used: postgres_key encrypts signing keys with the data_encryption driver (aes_master or vault_transit_encrypt), configured under data_encryption. |
 | `signing.vault_transit.address` | `string` | — | `AUTHPLANE_VAULT_ADDR` | Vault server address, e.g. "https://vault:8200" Required when key_store is vault_transit. |
 | `signing.vault_transit.approle.mount` | `string` | — | `AUTHPLANE_VAULT_APPROLE_MOUNT` | auth mount, default "approle" |
 | `signing.vault_transit.approle.role_id` | `string` | — | `AUTHPLANE_VAULT_APPROLE_ROLE_ID` | — |

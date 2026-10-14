@@ -64,9 +64,14 @@ func (l *KeyStoreListener) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		err := l.listenLoop(ctx)
+		connected, err := l.listenLoop(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		// A session that got as far as LISTEN was healthy: the next outage
+		// starts over at the shortest backoff.
+		if connected {
+			backoff = listenReconnectMin
 		}
 
 		// Connection lost — log and start fallback polling + reconnect.
@@ -91,27 +96,33 @@ func (l *KeyStoreListener) Run(ctx context.Context) error {
 	}
 }
 
-// listenLoop connects, issues LISTEN, and processes notifications until error or ctx cancel.
-func (l *KeyStoreListener) listenLoop(ctx context.Context) error {
+// listenLoop connects, issues LISTEN, and processes notifications until error
+// or ctx cancel. connected reports whether LISTEN succeeded.
+//
+// Right after LISTEN it invalidates the cached key and reloads once: a
+// change committed while no listener was connected (an outage, or before
+// the first connection) sent a notification nobody heard.
+func (l *KeyStoreListener) listenLoop(ctx context.Context) (connected bool, err error) {
 	conn, err := pgx.Connect(ctx, l.dsn)
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return false, fmt.Errorf("connect: %w", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
 	if _, err := conn.Exec(ctx, "LISTEN "+signingKeyChannel); err != nil {
-		return fmt.Errorf("LISTEN: %w", err)
+		return false, fmt.Errorf("LISTEN: %w", err)
 	}
 
 	l.logger.InfoContext(ctx, "listening for signing key changes")
+	l.resync(ctx)
 
 	for {
 		notification, err := conn.WaitForNotification(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return true, ctx.Err()
 			}
-			return fmt.Errorf("wait for notification: %w", err)
+			return true, fmt.Errorf("wait for notification: %w", err)
 		}
 
 		l.handleNotification(ctx, notification.Payload)
@@ -142,6 +153,16 @@ func (l *KeyStoreListener) handleNotification(ctx context.Context, kid string) {
 	l.logger.InfoContext(ctx, "JWKS reloaded after notification",
 		"kid", kid, "reload_duration", duration,
 	)
+}
+
+// resync invalidates the cached key and reloads the JWKS after (re)connecting.
+func (l *KeyStoreListener) resync(ctx context.Context) {
+	if err := l.store.InvalidateCache(ctx); err != nil {
+		l.logger.WarnContext(ctx, "cache invalidation after LISTEN failed", "error", err)
+	}
+	if err := l.reloadFn(ctx); err != nil {
+		l.logger.WarnContext(ctx, "JWKS reload after LISTEN failed", "error", err)
+	}
 }
 
 // fallbackPoll does a single cache-invalidate + reload as a fallback
