@@ -40,7 +40,7 @@ see Troubleshooting below.
 | | |
 |---|---|
 | **Time to run** | About a minute first-run (`npm install` + AS pull); ~5 s warm |
-| **SDK** | `@authplane/sdk` + `@authplane/mcp` 0.4.0 (npm) |
+| **SDK** | `@authplane/sdk` + `@authplane/mcp` 0.5.0 (npm) |
 | **MCP framework** | Express + the official MCP TS SDK (`@modelcontextprotocol/sdk`) |
 
 ## Run it

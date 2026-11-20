@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/authplane/authserver/api/shared"
 	"github.com/authplane/authserver/internal/config"
 	"github.com/authplane/authserver/internal/observability"
 )
@@ -49,17 +50,22 @@ func NewServer(ctx context.Context, cfg config.AdminConfig, admin Provider, obs 
 			Addr:              cfg.Address,
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
+			// Backstop for headers too large to read; RequestHeaderLimit
+			// enforces the real cap. See the constants.
+			MaxHeaderBytes: shared.ServerMaxHeaderBytes,
 		},
 		obs: obs,
 	}
 
 	// Optional rate limiting.
-	var inner http.Handler = mux
+	var inner = observability.RecordRoute(mux)
 	if cfg.RequestsPerSecond > 0 && cfg.Burst > 0 {
-		inner = newAdminRateLimiter(ctx, cfg.RequestsPerSecond, cfg.Burst).Wrap(mux)
+		inner = newAdminRateLimiter(ctx, cfg.RequestsPerSecond, cfg.Burst).Wrap(inner)
 	}
+	// Header size cap, inside the chain so a 431 is logged and counted.
+	inner = shared.RequestHeaderLimit(obs.Logger)(inner)
 
-	// Observability middleware chain: Recover → RequestID → Tracing → Metrics → Logging → rate limiter → mux
+	// Observability middleware chain: Recover → RequestID → Tracing → Metrics → Logging → header limit → rate limiter → mux
 	obsMW := observability.NewHTTPMiddleware(obs)
 	s.srv.Handler = obsMW.Recover()(
 		obsMW.RequestID()(

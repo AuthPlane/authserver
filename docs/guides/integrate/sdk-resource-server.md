@@ -78,7 +78,7 @@ adapter, err := authplanemcp.NewAdapter(ctx, authplanemcp.Options{
     DevMode:  true,                          // localhost + http: dev-only
 })
 
-http.Handle(adapter.WellKnownPRMPath(), adapter.ProtectedResourceMetadataHandler())
+http.Handle(adapter.WellKnownPRMPath(), adapter.PRMHandler())
 http.Handle("/mcp", adapter.AuthMiddleware(handler))   // handler = the MCP streamable-http handler
 ```
 

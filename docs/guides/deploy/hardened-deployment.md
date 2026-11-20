@@ -111,10 +111,37 @@ The API-protected routes (`/admin/clients`, `/admin/users`, `/admin/keys`, etc.)
 
 ---
 
+## Request size limits
+
+Both listeners refuse request headers over 32 KiB, request line included,
+with `431 Request Header Fields Too Large` (a CORS preflight from an allowed
+origin is answered before this check). A DPoP proof over 8 KiB is refused with
+`400 invalid_dpop_proof` before it is parsed. Form bodies on the token,
+revocation and introspection endpoints are limited to 64 KB. These limits are
+fixed and bound how much an unauthenticated caller can make the server buffer
+or parse; they have no config keys.
+
+Set your reverse proxy's header limit at or below 32 KiB for the AuthPlane
+hosts (nginx's default `large_client_header_buffers 4 8k` already is).
+A proxy with a larger limit (Envoy and Istio default to 60 KiB, cloud load
+balancers to about 64 KB, Traefik and Caddy to 1 MB) passes such requests
+on, and AuthPlane answers `431` with a plain-text body. Up to about 68 KiB
+of headers AuthPlane logs a `request headers too large` warning naming the
+largest headers and counts the response in `authserver_http_requests_total`
+with `http_status_code="431"`; the bundled `RequestHeadersTooLarge` alert
+fires when more than five arrive within 15 minutes. Larger header blocks are refused by
+Go's HTTP server before AuthPlane runs and show only at the proxy, so on a
+proxy that allows more than 64 KB, also alert there on `431` responses (and
+`502`s, if the proxy turns an upstream `431` into one) for the AuthPlane
+hosts. The usual cause is cookies from other applications on a shared
+parent domain; serving AuthPlane on its own host avoids it. See [Error codes](../../reference/error-codes.md#431-request-header-fields-too-large).
+
+---
+
 ## Container image: digest-pinned bases
 
 `build/Dockerfile` pins both stages by digest, not only by tag —
-`golang:1.26.9-alpine@sha256:…` for the builder and
+`golang:1.27.4-alpine@sha256:…` for the builder and
 `gcr.io/distroless/static-debian12:nonroot@sha256:…` for the runtime — so a
 tag that is re-pushed upstream cannot change what the image is built from.
 Dependabot bumps the digests. To confirm what a shipped image was built

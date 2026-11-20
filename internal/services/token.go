@@ -1065,29 +1065,28 @@ func (s *TokenService) validateDPoP(ctx context.Context, span trace.Span, proof,
 
 // recordDPoPMetric records DPoP proof validation result metrics.
 func (s *TokenService) recordDPoPMetric(ctx context.Context, err error) {
-	if s.metrics == nil {
+	recordDPoPProofMetric(ctx, s.metrics, err)
+}
+
+// recordDPoPProofMetric counts one DPoP proof check: valid in
+// authplane_dpop_proofs_validated_total, rejected in
+// authplane_dpop_proofs_rejected_total by reason. Every grant that accepts a
+// DPoP proof records through it, so the counts cover all of them.
+func recordDPoPProofMetric(ctx context.Context, m *observability.Metrics, err error) {
+	if m == nil {
 		return
 	}
-	if s.metrics.DPoPProofsValidated != nil && err == nil {
-		s.metrics.DPoPProofsValidated.Add(ctx, 1, otelmetric.WithAttributes(
-			attribute.String("result", "valid"),
-		))
-		return
-	}
-	if s.metrics.DPoPProofsRejected != nil && err != nil {
-		reason := "unknown"
-		switch {
-		case errors.Is(err, domain.ErrDPoPInvalidProof):
-			reason = "invalid_proof"
-		case errors.Is(err, domain.ErrDPoPReplay):
-			reason = "replay"
-		case errors.Is(err, domain.ErrDPoPNonceRequired):
-			reason = "nonce_required"
-		case errors.Is(err, domain.ErrDPoPNonceMismatch):
-			reason = "nonce_mismatch"
+	if err == nil {
+		if m.DPoPProofsValidated != nil {
+			m.DPoPProofsValidated.Add(ctx, 1, otelmetric.WithAttributes(
+				attribute.String("result", "valid"),
+			))
 		}
-		s.metrics.DPoPProofsRejected.Add(ctx, 1, otelmetric.WithAttributes(
-			attribute.String("reason", reason),
+		return
+	}
+	if m.DPoPProofsRejected != nil {
+		m.DPoPProofsRejected.Add(ctx, 1, otelmetric.WithAttributes(
+			attribute.String("reason", dpopRejectReason(err)),
 		))
 	}
 }
@@ -1385,4 +1384,25 @@ func (s *TokenService) handleCodeReuse(ctx context.Context, span trace.Span, ses
 	// Both halves report themselves. Their outcome does not reach the caller:
 	// the client sees ErrCodeConsumed either way.
 	s.runReuseHalves(ctx, span, tgt)
+}
+
+// dpopRejectReason maps a DPoP validation error to the reason label of
+// authplane_dpop_proofs_rejected_total. Every grant that records the metric
+// uses it, so one proof gets the same label whichever grant it came with.
+// ErrDPoPProofTooLarge wraps ErrDPoPInvalidProof, so it is checked first.
+func dpopRejectReason(err error) string {
+	switch {
+	case errors.Is(err, crypto.ErrDPoPProofTooLarge):
+		return "too_large"
+	case errors.Is(err, domain.ErrDPoPInvalidProof):
+		return "invalid_proof"
+	case errors.Is(err, domain.ErrDPoPReplay):
+		return "replay"
+	case errors.Is(err, domain.ErrDPoPNonceRequired):
+		return "nonce_required"
+	case errors.Is(err, domain.ErrDPoPNonceMismatch):
+		return "nonce_mismatch"
+	default:
+		return "unknown"
+	}
 }

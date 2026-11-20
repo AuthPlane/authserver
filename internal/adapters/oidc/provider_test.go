@@ -43,9 +43,10 @@ type testIDP struct {
 	rotateAfterFirstJWKS bool
 	oldKey               *ecdsa.PrivateKey
 	oldKid               string
-	failJWKSAfterFirst   bool         // when set, the JWKS endpoint 500s on its 2nd+ request
-	jwksRequests         atomic.Int32 // number of JWKS requests served
-	discoveryRequests    atomic.Int32 // number of discovery requests served
+	failJWKSAfterFirst   bool              // when set, the JWKS endpoint 500s on its 2nd+ request
+	jwksRequests         atomic.Int32      // number of JWKS requests served
+	extraJWKSKeys        []json.RawMessage // raw keys served after the signing key
+	discoveryRequests    atomic.Int32      // number of discovery requests served
 }
 
 func newTestIDP(t *testing.T) *testIDP {
@@ -122,8 +123,14 @@ func (idp *testIDP) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 		Algorithm: string(jose.ES256),
 		Use:       "sig",
 	}
-	jwks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}}
 	w.Header().Set("Content-Type", "application/json")
+	if len(idp.extraJWKSKeys) > 0 {
+		signing, _ := json.Marshal(jwk)
+		keys := append([]json.RawMessage{signing}, idp.extraJWKSKeys...)
+		json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+		return
+	}
+	jwks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}}
 	json.NewEncoder(w).Encode(jwks)
 }
 
@@ -349,6 +356,31 @@ func TestJWKS_KidMissRefetch(t *testing.T) {
 	// twice (initial old-key fetch + re-fetch serving the rotated key).
 	if got := idp.jwksRequests.Load(); got < 2 {
 		t.Errorf("JWKS endpoint hit %d time(s), want >= 2 (kid-miss re-fetch not taken)", got)
+	}
+}
+
+// An OIDC provider whose JWKS also carries an RSA key over 4096 bits must
+// still verify ID tokens signed with its other keys: go-jose (v4.1.6+)
+// refuses the oversized key, and parsing the set in one piece would refuse
+// every key.
+func TestJWKS_OversizedRSAKeyIsSkipped(t *testing.T) {
+	idp := newTestIDP(t)
+	defer idp.close()
+	n := make([]byte, 8192/8)
+	if _, err := rand.Read(n); err != nil {
+		t.Fatal(err)
+	}
+	n[0] |= 0x80
+	idp.extraJWKSKeys = []json.RawMessage{json.RawMessage(
+		`{"kty":"RSA","kid":"rsa-8192","use":"sig","n":"` + base64.RawURLEncoding.EncodeToString(n) + `","e":"AQAB"}`)}
+
+	p := oidc.New(staticConfig(idp.issuer, "test-client", "test-secret", "http://localhost/callback", nil, false, ""), testResolver(), obs(), testClient())
+	result, err := p.ExchangeCode(context.Background(), "auth-code", "test-nonce", "")
+	if err != nil {
+		t.Fatalf("ExchangeCode with an oversized key in the JWKS: %v", err)
+	}
+	if result.Subject != "upstream-user-123" {
+		t.Errorf("Subject = %q", result.Subject)
 	}
 }
 

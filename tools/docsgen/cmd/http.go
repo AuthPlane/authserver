@@ -1048,7 +1048,7 @@ var routeBodyHints = map[string]string{ //nolint:gosec // G101: literal example 
 	"GET /admin/system/config": "**Response 200** — {{dto:systemConfigResponse}}.\n",
 
 	"POST /oauth/register":   "**Request** — RFC 7591 client metadata JSON. **Response 201** — registered client metadata.\n",
-	"POST /oauth/revoke":     "**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009), also for an unknown, foreign or already revoked token. **Response 503** — `temporarily_unavailable` with `Retry-After`: a store could not record the revocation, so the token may still be valid and the client should retry (RFC 7009 §2.2.1).\n",
+	"POST /oauth/revoke":     "**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009), also for an unknown, foreign or already revoked token. **Response 400** — `invalid_request` when the form body is unreadable or larger than 64 KB, or `token` is missing. **Response 401** — `invalid_client` with `WWW-Authenticate: Basic` when client authentication fails. **Response 503** — `temporarily_unavailable` with `Retry-After`: a store could not record the revocation, so the token may still be valid and the client should retry (RFC 7009 §2.2.1).\n",
 	"POST /oauth/introspect": "**Request** — form-encoded `token`. **Response 200** — RFC 7662 introspection response.\n",
 	"GET /oauth/authorize":   "Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_challenge_method=S256`). Redirects to `/consent` after login.\n",
 

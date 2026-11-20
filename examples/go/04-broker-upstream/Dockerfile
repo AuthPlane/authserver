@@ -8,7 +8,7 @@
 # packaging for when you ship the same agent as a long-running MCP server
 # component.
 
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 

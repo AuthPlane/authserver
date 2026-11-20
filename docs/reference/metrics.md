@@ -44,7 +44,7 @@ The `Labels` column lists the OTel attributes that emit sites attach via `metric
 | `authplane_xaa_subject_resolutions_total` | counter | outcome | Total XAA subject mapping resolutions | `XAASubjectResolutions` in `internal/observability/metrics.go` |
 | `authplane_resource_server_ops_total` | counter | op | Total resource server admin operations | `ResourceServerOps` in `internal/observability/metrics.go` |
 | `authplane_allowlist_ops_total` | counter | op | Total cross-client allowlist admin operations | `AllowlistOps` in `internal/observability/metrics.go` |
-| `authserver_http_requests_total` | counter | http_method, http_route, http_status_code (OTel `http.method` / `http.route` / `http.status_code`, exported with underscores) | Total HTTP requests | `HTTPRequestsTotal` in `internal/observability/metrics.go` |
+| `authserver_http_requests_total` | counter | http_method, http_route, http_status_code (OTel `http.method` / `http.route` / `http.status_code`, exported with underscores). `http_route` is the matched route pattern, or `unmatched` for a request no route matched (404, 405, 429, 431); `http_method` is `_OTHER` for a non-standard method | Total HTTP requests | `HTTPRequestsTotal` in `internal/observability/metrics.go` |
 
 ## Histograms (seconds)
 

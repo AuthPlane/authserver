@@ -146,6 +146,7 @@ Denial reasons from `internal/services/jwt_bearer.go` (logged as audit events `j
 | `invalid_resource` | The `resource` claim/parameter is not registered in Authplane, or assertion and request resources disagree | Register the resource (`POST /admin/resources`) or align the assertion to the registered URI. An unregistered resource is detected after the `jti` is consumed, so mint a fresh assertion for the retry. |
 | `resource_required` | `xaa.require_resource: true` and the exchange named no resource — neither a `resource` claim on the assertion nor a `resource` parameter on the request. Returned as `400 invalid_target`. | Send `resource=<registered URI>` on the token request, or have the IdP mint the assertion with a `resource` claim — either satisfies the setting. The refused assertion is not spent — resending it with the resource added works. |
 | `jwks_fetch_failed` | Authplane can't reach the IdP's JWKS URI | Confirm network reachability; force refresh via `POST /admin/idps/{id}/refresh-keys`. |
+| Assertions signed with one IdP key fail while others from the same IdP work | AuthPlane skipped that key of the IdP's JWKS: an RSA key over 4096 bits, or a key type it does not support. The log shows `WARN IdP JWKS key skipped` with the key's `kid` | Have the IdP sign with an RSA key of 2048 to 4096 bits or an EC key. |
 | `assertion expired` / `clock skew` | `exp` past, or `iat` older than `max_assertion_age` | Reduce assertion lifetime to a few minutes; sync clocks. |
 
 ## See also

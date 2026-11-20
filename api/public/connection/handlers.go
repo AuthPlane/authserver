@@ -50,7 +50,10 @@ func (h *handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, redirectURL, http.StatusFound)
+	// G710: redirectURL is the upstream authorize URL StartConnect builds from
+	// the configured provider; return_url is checked against the allowlist
+	// there and never becomes this redirect.
+	http.Redirect(w, r, redirectURL, http.StatusFound) //nolint:gosec // see above
 }
 
 func (h *handler) handleCallback(w http.ResponseWriter, r *http.Request) {

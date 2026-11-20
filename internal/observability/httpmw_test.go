@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRequestID_Generated(t *testing.T) {
@@ -198,10 +199,105 @@ func TestMiddlewareChain_FullStack(t *testing.T) {
 	}
 }
 
-func TestRoutePattern_FallsBackToPath(t *testing.T) {
+// An unmatched request must not put its path into the metric label: the
+// path is caller-chosen, so it would mint series without bound.
+func TestRouteHolder_UnmatchedIsConstant(t *testing.T) {
+	_, h := withRouteHolder(context.Background())
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/some/path", nil)
-	pattern := routePattern(req)
-	if pattern != "/some/path" {
-		t.Fatalf("expected /some/path, got %s", pattern)
+	if got := h.route(req); got != "unmatched" {
+		t.Fatalf("route = %q, want unmatched", got)
+	}
+	req.Pattern = "GET /some/{id}"
+	if got := h.route(req); got != "GET /some/{id}" {
+		t.Fatalf("route = %q, want the mux pattern", got)
+	}
+}
+
+type replacedKey struct{}
+
+// A middleware between the chain and the mux that replaces the request must
+// not hide the route: RecordRoute reports it through the shared holder.
+func TestRecordRoute_SurvivesReplacedRequest(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /x/{id}", func(w http.ResponseWriter, _ *http.Request) {})
+	replace := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), replacedKey{}, 1)))
+		})
+	}
+	ctx, h := withRouteHolder(context.Background())
+	req := httptest.NewRequestWithContext(ctx, "GET", "/x/123", nil)
+	replace(RecordRoute(mux)).ServeHTTP(httptest.NewRecorder(), req)
+	if got := h.route(req); got != "GET /x/{id}" {
+		t.Fatalf("route = %q, want the mux pattern", got)
+	}
+}
+
+func TestMethodLabel(t *testing.T) {
+	for in, want := range map[string]string{
+		"GET": "GET", "POST": "POST", "OPTIONS": "OPTIONS", "PATCH": "PATCH",
+		"get": "_OTHER", "RANDOM123": "_OTHER", strings.Repeat("M", 4096): "_OTHER",
+	} {
+		if got := MethodLabel(in); got != want {
+			t.Errorf("MethodLabel(%.20q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSpanName(t *testing.T) {
+	if got := spanName("GET", "GET /healthz"); got != "GET /healthz" {
+		t.Errorf("got %q", got)
+	}
+	if got := spanName("POST", "/token"); got != "POST /token" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestTruncateForLog_KeepsUTF8Valid(t *testing.T) {
+	s := strings.Repeat("a", 255) + "é" // the 2-byte rune straddles the 256-byte cut
+	got := TruncateForLog(s, 256)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation split a rune: %q", got[250:])
+	}
+	if got != strings.Repeat("a", 255)+"..." {
+		t.Fatalf("got %q", got[250:])
+	}
+	if TruncateForLog("short", 256) != "short" {
+		t.Fatal("short strings must be unchanged")
+	}
+}
+
+func TestValidRequestID(t *testing.T) {
+	for id, want := range map[string]bool{
+		"":                       false,
+		"abc-123_X.y":            true,
+		strings.Repeat("a", 128): true,
+		strings.Repeat("a", 129): false,
+		"has space":              false,
+		"kong-uuid#42":           true,
+		"b64+/x=":                true,
+		"semi;colon":             true,
+		"quo\"te":                false,
+		"back\\slash":            false,
+		"tab\there":              false,
+		"\u00e9":                 false,
+	} {
+		if got := validRequestID(id); got != want {
+			t.Errorf("validRequestID(%q) = %v, want %v", id, got, want)
+		}
+	}
+}
+
+func TestRequestID_ReplacesOversizedInboundID(t *testing.T) {
+	mw := NewHTTPMiddleware(NewNoop())
+	handler := mw.RequestID()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
+	req.Header.Set("X-Request-ID", strings.Repeat("a", 10_000))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Request-ID"); len(got) > 128 || got == "" {
+		t.Fatalf("echoed X-Request-ID has %d bytes, want a generated ID", len(got))
 	}
 }

@@ -909,24 +909,40 @@ func (s *TokenExchangeService) validateDPoP(ctx context.Context, span trace.Span
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "DPoP proof validation failed")
+		s.recordDPoPMetric(ctx, err)
 		return "", err
 	}
 
 	if dpopCfg.RequireNonce {
 		if result.Nonce == "" {
+			span.RecordError(domain.ErrDPoPNonceRequired)
+			span.SetStatus(codes.Error, "DPoP nonce required but missing")
+			s.recordDPoPMetric(ctx, domain.ErrDPoPNonceRequired)
 			return "", domain.ErrDPoPNonceRequired
 		}
 		if err := s.dpopStore.ValidateNonce(ctx, result.Nonce); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "DPoP nonce validation failed")
+			s.recordDPoPMetric(ctx, domain.ErrDPoPNonceMismatch)
 			return "", domain.ErrDPoPNonceMismatch
 		}
 	}
 
 	jtiExpiry := time.Now().Add(dpopCfg.ProofLifetime * 2)
 	if err := s.dpopStore.ConsumeJTI(ctx, result.JTI, jtiExpiry); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "DPoP JTI replay")
+		s.recordDPoPMetric(ctx, err)
 		return "", err
 	}
 
+	s.recordDPoPMetric(ctx, nil)
 	return result.JKT, nil
+}
+
+// recordDPoPMetric records DPoP proof validation result metrics.
+func (s *TokenExchangeService) recordDPoPMetric(ctx context.Context, err error) {
+	recordDPoPProofMetric(ctx, s.metrics, err)
 }
 
 // recordDenied increments the denied counter with a reason label.

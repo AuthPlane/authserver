@@ -43,7 +43,8 @@ func ValidateIDJAG(raw string, trustedKeys *jose.JSONWebKeySet, expectedAudience
 	}
 
 	// 1. Parse — only accept asymmetric algorithms.
-	parsed, err := jose.ParseSigned(raw, assertionAlgorithms)
+	// Assertions are JWTs, which are always compact-serialized (RFC 7519 §1).
+	parsed, err := jose.ParseSignedCompact(raw, assertionAlgorithms)
 	if err != nil {
 		// Check if the error is from an unsupported algorithm.
 		if isAlgorithmError(raw) {

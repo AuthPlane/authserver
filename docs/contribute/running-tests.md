@@ -148,7 +148,7 @@ the per-adapter test file.
 If `make ci-local` fails before it runs any test, you're probably
 missing one of:
 
-- Go 1.26.9+ (matches `go.mod`; `go version` should report ≥ 1.26.9)
+- Go 1.27.4+ (matches `go.mod`; `go version` should report ≥ 1.27.4)
 - `golangci-lint v2.11+` (`brew install golangci-lint` or
   `curl -sSfL ...`)
 - `govulncheck` (`make vulncheck` installs it if missing)

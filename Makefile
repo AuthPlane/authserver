@@ -67,7 +67,7 @@ test-race:
 # go1.25 vs this repo's 1.26). To avoid that, we build our own with the repo's
 # Go toolchain (GOTOOLCHAIN, derived from go.mod) into a local, version-stamped
 # path under bin/ (gitignored) and run that — never whatever is on PATH.
-GOLANGCI_LINT_VERSION ?= v2.11.4
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GO_TOOLCHAIN := go$(shell awk '/^go [0-9]/{print $$2; exit}' go.mod)
 GOLANGCI_LINT := $(CURDIR)/bin/golangci-lint-$(GOLANGCI_LINT_VERSION)
 

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
 )
 
@@ -115,7 +116,8 @@ func ResolvePath(ctx context.Context, urls output.URLBuilder, path string, logge
 	resolved, err := urls.Resolve(ctx, path)
 	if err != nil {
 		if logger != nil {
-			logger.WarnContext(ctx, "resolve AS path failed; using unresolved path", "path", path, "error", err)
+			logger.WarnContext(ctx, "resolve AS path failed; using unresolved path",
+				"path", observability.TruncateForLog(path, maxLoggedPathBytes), "error", err)
 		}
 		return path
 	}

@@ -345,7 +345,7 @@ Query-string parameters per RFC 6749 §4.1.1 + PKCE (`code_challenge`, `code_cha
 **Auth** — none (public; request-body parameters identify the caller)  
 **Source** — `api/public/oauth/routes.go:176`
 
-**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009), also for an unknown, foreign or already revoked token. **Response 503** — `temporarily_unavailable` with `Retry-After`: a store could not record the revocation, so the token may still be valid and the client should retry (RFC 7009 §2.2.1).
+**Request** — form-encoded `token` + `token_type_hint`. **Response 200** — empty body (RFC 7009), also for an unknown, foreign or already revoked token. **Response 400** — `invalid_request` when the form body is unreadable or larger than 64 KB, or `token` is missing. **Response 401** — `invalid_client` with `WWW-Authenticate: Basic` when client authentication fails. **Response 503** — `temporarily_unavailable` with `Retry-After`: a store could not record the revocation, so the token may still be valid and the client should retry (RFC 7009 §2.2.1).
 
 ---
 
@@ -1275,7 +1275,7 @@ Makes a new key current; the key that was current becomes the previous key, and 
 
 **Server** — admin (:9001)  
 **Auth** — Prometheus basic-auth (see `metrics.basic_auth_*` config)  
-**Source** — `api/admin/server.go:77`
+**Source** — `api/admin/server.go:83`
 
 **Response 200** — Prometheus text-format metrics. Basic-auth protected.
 

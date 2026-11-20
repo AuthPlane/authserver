@@ -28,6 +28,26 @@ var dpopSupportedAlgorithms = []jose.SignatureAlgorithm{
 	jose.PS256,
 }
 
+// MaxDPoPProofBytes is the largest DPoP proof ValidateProof will hand to the
+// JOSE parser. Anything larger is rejected as an invalid proof before any
+// parsing happens.
+//
+// A legitimate proof is small: about 0.5 KB for ES256 and about 2.3 KB for
+// RS256/PS256 with a 4096-bit key (the largest RSA key the parser accepts),
+// including nonce and ath. 8 KiB leaves room for that with a wide margin while
+// keeping the parser's input bounded no matter which JOSE library version is
+// linked. The proof arrives in a request header, before the client is
+// authenticated, so its size is attacker-chosen.
+//
+// A hard-coded constant on purpose: a configurable limit is a contract change.
+const MaxDPoPProofBytes = 8 << 10
+
+// ErrDPoPProofTooLarge is returned for a proof over MaxDPoPProofBytes. It
+// wraps domain.ErrDPoPInvalidProof, so callers that map that error keep
+// answering 400 invalid_dpop_proof; logs and the rejection metric can tell
+// the size cap apart from other invalid proofs.
+var ErrDPoPProofTooLarge = fmt.Errorf("%w: proof is larger than %d bytes", domain.ErrDPoPInvalidProof, MaxDPoPProofBytes)
+
 // dpopClaims are the payload claims of a DPoP proof JWT (RFC 9449 §4.2).
 type dpopClaims struct {
 	JTI   string `json:"jti"`
@@ -61,8 +81,12 @@ type DPoPResult struct {
 //   - domain.ErrDPoPNonceRequired if serverNonce is non-empty but proof has no nonce
 //   - domain.ErrDPoPNonceMismatch if proof nonce doesn't match serverNonce
 func ValidateProof(proof, method, reqURL, serverNonce, accessTokenHash string, proofLifetime time.Duration) (*DPoPResult, error) {
-	// Parse the JWT. This also rejects unsupported algorithms (alg:none, HS*).
-	parsed, err := jwt.ParseSigned(proof, dpopSupportedAlgorithms)
+	// Bound the parser's input before it sees anything. See MaxDPoPProofBytes.
+	if len(proof) > MaxDPoPProofBytes {
+		return nil, ErrDPoPProofTooLarge
+	}
+
+	parsed, err := parseDPoPProof(proof)
 	if err != nil {
 		return nil, domain.ErrDPoPInvalidProof
 	}
@@ -148,6 +172,14 @@ func ValidateProof(proof, method, reqURL, serverNonce, accessTokenHash string, p
 		JTI:   claims.JTI,
 		Nonce: claims.Nonce,
 	}, nil
+}
+
+// parseDPoPProof parses a DPoP proof as a signed JWT, accepting only the
+// asymmetric algorithms in dpopSupportedAlgorithms (so alg:none and HS* fail
+// here). The JOSE library reads the embedded "jwk" header while parsing, so
+// this is where an attacker-supplied key is first touched.
+func parseDPoPProof(proof string) (*jwt.JSONWebToken, error) {
+	return jwt.ParseSigned(proof, dpopSupportedAlgorithms)
 }
 
 // ComputeJKT computes the JWK Thumbprint per RFC 7638 using SHA-256.

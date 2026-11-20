@@ -51,7 +51,7 @@ has the end-to-end sequence diagram.
 |---|---|
 | **Time to run** | ~2 minutes (first build is ~90s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, Node.js 22+ (only if you run outside Docker) |
-| **SDK** | `@authplane/sdk` 0.4.0 (npm) |
+| **SDK** | `@authplane/sdk` 0.5.0 (npm) |
 | **Wire grant** | `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693) |
 | **Stops at** | the agent catching `ConsentRequiredError` and printing the `consentUrl` — there is no real upstream provider in this example |
 

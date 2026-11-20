@@ -267,6 +267,7 @@ DPoP works with all token-issuing grants:
 |---|---|---|
 | `invalid_dpop_proof` | The proof JWT is malformed or invalid | Check: `typ` must be `dpop+jwt`, `alg` must be ES256/RS256/PS256, `jwk` must be a public key (not private), `htm`/`htu` must match your request, `iat` must be recent |
 | `use_dpop_nonce` | Server requires a nonce you didn't include | Read the `DPoP-Nonce` response header, include it in your proof's `nonce` claim, and retry |
+| `invalid_dpop_proof` (too large) | The `DPoP` header is over 8 KiB and was rejected before parsing | A real proof is under 2.5 KB. Send one proof per request with only the standard claims. |
 | `invalid_dpop_proof` (replay) | You reused a `jti` | Generate a fresh UUID for every proof. Each proof must have a unique `jti`. Replay tracking is backed by the [Replay Store](glossary.md#glossary-replay-store). |
 | Token type is `Bearer` not `DPoP` | DPoP is not enabled or proof wasn't included | Check `dpop.enabled: true` in config. Ensure the `DPoP` header is present on the token request. |
 

@@ -46,7 +46,7 @@ has the end-to-end sequence diagram.
 |---|---|
 | **Time to run** | ~2 minutes (first build is ~60s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, **Python 3.12+** (only if you run outside Docker — `pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` 0.4.0 (PyPI) |
+| **SDK** | `authplane-sdk` 0.5.0 (PyPI) |
 | **Topology** | Agent ↔ Authserver only — no MCP server in this tier |
 
 ## Run it in 3 commands

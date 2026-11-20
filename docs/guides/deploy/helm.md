@@ -35,7 +35,7 @@ From OCI:
 
 ```bash
 helm install authplane oci://ghcr.io/authplane/charts/authplane \
-  --version 0.4.3 -f values-production.yaml
+  --version 0.4.4 -f values-production.yaml
 ```
 
 ### 2. Pre-create the secrets (production)

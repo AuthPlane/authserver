@@ -38,7 +38,7 @@ that needs to talk to the other resource.
 |---|---|
 | **Time to run** | ~2 minutes (after tier 01 is already up) |
 | **Prereqs** | Node.js 22+, `curl`, `jq`, tier 01 running |
-| **SDK** | `@authplane/sdk` 0.4.0 (npm) |
+| **SDK** | `@authplane/sdk` 0.5.0 (npm) |
 | **Runtime** | Node.js 22 + `tsx`, plain `fetch` against the MCP streamable-http transport |
 
 ## Run it in 3 commands

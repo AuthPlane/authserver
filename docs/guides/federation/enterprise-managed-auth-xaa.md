@@ -187,6 +187,7 @@ Denial reasons emitted by `internal/services/jwt_bearer.go` and the XAA policy e
 | `invalid_scope` | Intersection of client/assertion/request/policy scopes is empty | Patch the client's `scope`, widen the policy `scopes`, or narrow the request. |
 | `invalid_resource` | Resource not registered, or assertion/request resources disagree | Register the resource (`POST /admin/resources`); align the `resource` claim. An unregistered resource is detected after the `jti` is consumed, so the retry needs a fresh assertion. |
 | `resource_required` | `xaa.require_resource: true` and neither the assertion nor the request named a resource. Returned as `400 invalid_target`. | Send `resource=<registered URI>` on the token request, or mint the assertion with a `resource` claim. The refused assertion is not spent; resend it with the resource added. |
+| Assertions signed with one IdP key fail while others from the same IdP work | AuthPlane skipped that key of the IdP's JWKS: an RSA key over 4096 bits, or a key type it does not support. The log shows `WARN IdP JWKS key skipped` with the key's `kid` | Have the IdP sign with an RSA key of 2048 to 4096 bits or an EC key. |
 | `policy_denied` | XAA policy did not match (wrong `client_id`, resource, or all scopes filtered out) | List policies (`GET /admin/xaa/policies?idp_id=...`); confirm one matches the (idp, client, scope, resource) tuple. |
 | `access_denied` in `strict` mode | No subject mapping exists for the IdP's subject | Create an explicit mapping (Step 4) or switch `subject_mode: auto_map`. |
 

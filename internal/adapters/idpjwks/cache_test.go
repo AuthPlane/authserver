@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -456,5 +457,44 @@ func TestSSRFSafeDialer_RefusesLiveLoopbackListener(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SSRF protection") {
 		t.Errorf("error = %v, want an SSRF refusal", err)
+	}
+}
+
+// An IdP that publishes an RSA key over 4096 bits next to its normal keys must
+// keep working: go-jose (v4.1.6+) refuses such a key, and parsing the set in
+// one piece would refuse every key of that IdP.
+func TestCache_GetKeys_SkipsOversizedRSAKey(t *testing.T) {
+	jwks, _ := testJWKS(t)
+	good, err := json.Marshal(jwks.Keys[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := make([]byte, 8192/8)
+	if _, err = rand.Read(n); err != nil {
+		t.Fatal(err)
+	}
+	n[0] |= 0x80
+	big := `{"kty":"RSA","kid":"rsa-8192","use":"sig","n":"` + base64.RawURLEncoding.EncodeToString(n) + `","e":"AQAB"}`
+	body := `{"keys":[` + big + `,` + string(good) + `]}`
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	store := newMockIdPStore()
+	_ = store.Save(context.Background(), idp.TrustedIDP{
+		ID: "test-idp", Name: "Test", Issuer: srv.URL, JWKSUri: srv.URL + "/jwks",
+		Audience: "https://authplane.example.com", Enabled: true,
+	})
+	cache := New(store, adaptercache.NewMemory[*Entry](), CacheConfig{}, observability.NewNoop(), WithHTTPClient(srv.Client()))
+
+	keys, err := cache.GetKeys(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("GetKeys: %v", err)
+	}
+	if len(keys.Keys) != 1 || keys.Keys[0].KeyID != "test-kid" {
+		t.Fatalf("keys = %+v, want only test-kid", keys.Keys)
 	}
 }

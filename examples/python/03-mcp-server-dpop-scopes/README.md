@@ -39,8 +39,8 @@ concerns layered on top of tier 02:
 |---|---|
 | **Time to run** | ~3 minutes (first build is ~90s, subsequent runs are seconds) |
 | **Prereqs** | Docker 24+, `docker compose`, `curl`, `jq`, **Python 3.12+** (only if you run outside Docker — `pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` + `authplane-fastmcp` 0.4.0 (PyPI) |
-| **MCP framework** | `fastmcp >= 3.2, < 4` (matches `pyproject.toml`) — the 3.2 floor comes from `authplane-fastmcp` 0.4.0 |
+| **SDK** | `authplane-sdk` + `authplane-fastmcp` 0.5.0 (PyPI) |
+| **MCP framework** | `fastmcp >= 3.2, < 4` (matches `pyproject.toml`) — the 3.2 floor comes from `authplane-fastmcp` 0.5.0 |
 
 ## Run it in 3 commands
 

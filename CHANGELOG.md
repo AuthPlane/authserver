@@ -4,6 +4,157 @@ All notable, user-facing changes to authserver are documented here —
 operator-impact and wire-shape changes only. The format follows
 [Keep a Changelog](https://keepachangelog.com/); dates are ISO 8601.
 
+## [0.2.4] — 2026-11-17
+
+Security release. It closes a denial of service in which one anonymous
+request could hold a CPU core for tens of seconds through a crafted key in a
+DPoP proof or a token, moves the server to Go 1.27.4, and brings every Go
+module and the admin UI's npm packages to their latest versions. No new
+config keys, schema migrations, metric names or audit actions;
+`authplane_dpop_proofs_rejected_total` gains the `too_large` reason. Two
+new fixed limits and the stricter key handling in go-jose can reject
+requests or keys that 0.2.3 accepted; see Upgrade notes.
+
+### Upgrade notes
+
+- **Request headers are capped at 32 KiB** on the public (`:9000`) and
+  admin (`:9001`) listeners, request line included. 0.2.3 allowed about
+  1 MB. A larger request gets `431 Request Header Fields Too Large` with a
+  plain-text body (not an OAuth JSON error). Up to about 68 KiB of headers,
+  the rejection is logged as a warning (`request headers too large`, with
+  the size and the names of the largest headers, never their values), marked
+  on the request span and counted in `authserver_http_requests_total` with
+  `http_status_code="431"` (alert `RequestHeadersTooLarge` in
+  `deploy/observability/alerts.yaml`). Above that, Go's HTTP server refuses to read the headers at all and
+  answers `431` itself, which AuthPlane cannot see; only the client and the
+  proxy do. Typical requests use a few KB. Proxies that allow more than
+  32 KiB (Envoy and Istio default to 60 KiB, cloud load balancers to about
+  64 KB, Traefik and Caddy to 1 MB) pass such requests on to AuthPlane.
+  Before upgrading, check the largest request headers your proxy sees for the
+  AuthPlane hosts, mostly cookies shared on a parent domain. The limit has
+  no config key. If clients hit it, trim the headers at the proxy or serve
+  AuthPlane on its own host so parent-domain cookies are not sent (see
+  Request size limits in the hardened deployment guide). Rolling back to
+  0.2.3 also lifts it, but brings back the denial of service this release
+  fixes.
+- **DPoP proofs larger than 8 KiB are rejected** with `400
+  invalid_dpop_proof` before they are parsed. A real proof is under 2.5 KB,
+  including RS256 with a 4096-bit key and both `nonce` and `ath`. On every
+  grant the rejection is counted in `authplane_dpop_proofs_rejected_total`
+  with `reason="too_large"`. Proofs checked by AuthPlane's own protected
+  endpoints (not the token endpoint) are not counted; they are logged at
+  debug level.
+- **RSA keys over 4096 bits are no longer accepted.** go-jose now refuses
+  them anywhere: in JWS headers, and in the JWKS of trusted IdPs (jwt-bearer
+  and ID-JAG) and OIDC login providers, fetched or set in config. AuthPlane
+  skips such a key, logs a warning naming its `kid`, and keeps using the
+  other keys of the set; a token signed with the skipped key fails as if
+  the key were unknown. 0.2.3 used these keys. Before upgrading, list the
+  affected keys with
+  `curl -s <jwks_uri> | jq '.keys[] | select(.kty=="RSA" and (.n|length) > 683) | .kid'`
+  (a 4096-bit modulus is 683 base64url characters), and check JWKS sets in
+  config the same way. Keys in `x5c` certificate chains are not covered by
+  this check.
+- **jwt-bearer and ID-JAG assertions must be compact-serialized JWTs**, as
+  RFC 7519 and RFC 7523 require. A JWS in JSON serialization was accepted
+  before and now fails with `invalid_grant`.
+- **Building from source needs Go 1.27.4 or later** (`go.mod`). 0.2.3
+  needed Go 1.26.9. The Go examples need Go 1.26 or later.
+- **The Go examples and `AGENTS.md` now pin the Go SDK v0.5.0**, which
+  brings the MCP Go SDK 1.8.0. v0.5.0 renames two calls the examples use:
+  `ProtectedResourceMetadataHandler()` is now `PRMHandler()`, and
+  `ClientCredentials` takes an `authplane.ClientCredentialsInput` instead of
+  scope and resource slices. v0.5.0 also no longer reads
+  `AUTHPLANE_DEV_MODE`, and its default fetch settings refuse `http://`,
+  localhost and private addresses. To reach a local `http://` issuer, pass
+  `authplane.WithFetchSettings(authplane.DevModeFetchSettings())`; the
+  examples do this only when `AUTHPLANE_DEV_MODE=1`. Resource servers built
+  on the Go SDK v0.4.0 are exposed to the same go-jose flaw (see Security)
+  through the bearer token and should upgrade too.
+- **PostgreSQL driver (pgx 5.13):** a connection that closes in the middle
+  of a response is no longer retried, so a database failover can surface a
+  few more errors to clients; `require_auth` and `channel_binding=require`
+  in the DSN are now enforced; client certificate files are re-read on
+  every TLS connection and must stay readable. **SQLite driver:** a wait on
+  a locked database now ends when the request is cancelled, instead of
+  always waiting out the 5 s busy timeout.
+- **HTTP telemetry labels changed** (see Fixed). Dashboards, alerts or
+  samplers keyed on these values need updating: request spans are named
+  `METHOD route-pattern` (for example `POST /oauth/token`), or by the
+  method alone when no route matched, instead of method and raw path, and
+  their `http.route` attribute holds the pattern; 404, 405 and 429
+  responses are labelled `unmatched` in the HTTP metrics' `http_route` and
+  the span's `http.route` instead of their path (the new in-process `431`
+  is labelled the same way); non-standard methods are `_OTHER`. An inbound
+  `X-Request-ID` over 128 bytes, or containing a space, `"` or `\`, is
+  replaced by a generated ID, so it no longer matches the proxy's ID.
+
+### Security
+
+- **An anonymous caller could exhaust the server's CPU with one request
+  (CVE-2026-116587).** go-jose v4.1.5 and earlier parse an RSA key embedded
+  in a JWS header in full, including private-key validation, before checking
+  anything else, and the cost grows steeply with the key size. With the
+  defaults (open dynamic client registration, DPoP on), anyone could register
+  a client and send a token request whose `DPoP` header carried such a key,
+  or post such a token to `/oauth/revoke` or `/oauth/introspect`. A 44 KB
+  proof or token cost about 30 seconds of CPU. go-jose is now v4.1.9, which
+  caps RSA keys at 4096 bits, refuses private parameters in a header key and
+  checks the algorithm first. The header and DPoP size limits add a bound
+  that does not depend on the library, but only for input that arrives in
+  request headers; tokens sent in a form body (revocation, introspection,
+  token exchange, jwt-bearer assertions) are bounded by the 64 KB body
+  limit and rely on the go-jose fix.
+- **Built with Go 1.27.4**, closing CVE-2026-111943 in `crypto/x509`
+  certificate-chain verification. It affects the server's outbound TLS
+  connections (OIDC providers, IdP JWKS, Vault, client metadata documents)
+  and needs an attacker on the network path.
+- **`golang.org/x/net` v0.62.0**, closing CVE-2026-78661. The affected
+  package (`x/net/html`) is not linked into the server; this clears the
+  container image scan.
+- **Admin UI dependencies updated**, closing the `npm audit` findings in its
+  build toolchain (Vite and `launch-editor`).
+
+### Changed
+
+- Every Go module is at its latest release, including pgx 5.13.0, gRPC
+  1.85.0, the SQLite driver 1.62.0, `golang.org/x/crypto` 0.59.0 and
+  OpenTelemetry 1.47.0. The OpenTelemetry log SDK moves from 0.22 to its
+  stable v1.47.0 release. `modernc.org/libc` stays at v1.80.1, the version
+  the SQLite driver requires.
+
+### Fixed
+
+- The RFC compliance statement said `/oauth/revoke` always returns `200`.
+  It also returns `503 temporarily_unavailable` when a store cannot look up
+  or record the revocation, `401 invalid_client` and `400 invalid_request`.
+- The jwt-bearer and token exchange grants did not count their DPoP proof
+  checks in `authplane_dpop_proofs_validated_total` and
+  `authplane_dpop_proofs_rejected_total`, so a replayed or invalid proof on
+  those grants did not show in DPoP dashboards or alerts. They are now
+  counted with the same `reason` values as the other grants, and
+  `deploy/observability/alerts.yaml` gains `DPoPProofReplay`.
+- Caller-controlled request fields no longer reach telemetry unbounded. A
+  request no route matched (404, or refused before routing) is labelled
+  `http_route="unmatched"` in `authserver_http_requests_total` and
+  `authserver_http_request_duration_seconds` instead of carrying its raw
+  path, so callers cannot create metric series at will; dashboards that
+  grouped 404s by path see one series instead. A method outside the
+  standard HTTP set is labelled `_OTHER` in metrics, spans and logs. Request
+  spans are named by method and matched route (`POST /oauth/token`), or by
+  the method alone when no route matched, instead of method and raw path,
+  and their `http.route` attribute now holds the route pattern. A request
+  whose handler panics now ends its span as an error and is counted as a
+  `500`. An inbound `X-Request-ID` is adopted only when it is at most 128
+  bytes of printable ASCII without spaces, `"` or `\`; otherwise the server
+  generates one. The path and `User-Agent` in logs, and the path in the
+  span's `http.url`, are cut to 256 bytes.
+- A JWKS of a trusted IdP or OIDC login provider that held one key AuthPlane
+  cannot use, such as a key type it does not support, failed as a whole, so
+  every key of that issuer stopped working. AuthPlane now skips that key
+  with a warning and uses the others, as RFC 7517 §5 recommends. A set with
+  no usable key still fails.
+
 ## [0.2.3] — 2026-10-14
 
 Security and signing-key patch release. No new config keys, schema

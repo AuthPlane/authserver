@@ -35,9 +35,10 @@ func main() {
 	// authplane:begin
 	client := must(authplane.NewClient(ctx, os.Getenv("AUTHPLANE_ISSUER"),
 		authplane.WithClientCredentials(os.Getenv("AUTHPLANE_CLIENT_ID"), os.Getenv("AUTHPLANE_CLIENT_SECRET")),
+		authplane.WithFetchSettings(fetchSettings()),
 	))
 	defer client.Close()
-	tok := must(client.ClientCredentials(ctx, []string{"mcp:echo"}, []string{resource}))
+	tok := must(client.ClientCredentials(ctx, authplane.ClientCredentialsInput{Scopes: []string{"mcp:echo"}, Resources: []string{resource}}))
 	// authplane:end
 
 	// === call the MCP tool =======================================================
@@ -81,4 +82,15 @@ func must[T any](v T, err error) T {
 		log.Fatal(err)
 	}
 	return v
+}
+
+// fetchSettings maps AUTHPLANE_DEV_MODE=1 (set in .env.example) to the SDK's
+// dev-mode fetch settings, so the agent can reach the local http:// issuer.
+// The Go SDK does not read that variable itself; leave it unset in
+// production, where the issuer must be https.
+func fetchSettings() authplane.FetchSettings {
+	if os.Getenv("AUTHPLANE_DEV_MODE") == "1" {
+		return authplane.DevModeFetchSettings()
+	}
+	return authplane.DefaultFetchSettings()
 }

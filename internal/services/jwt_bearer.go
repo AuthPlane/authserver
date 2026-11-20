@@ -640,6 +640,7 @@ func (s *JWTBearerService) validateDPoP(ctx context.Context, span trace.Span, pr
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "DPoP proof validation failed")
+		s.recordDPoPMetric(ctx, err)
 		return "", err
 	}
 
@@ -647,11 +648,13 @@ func (s *JWTBearerService) validateDPoP(ctx context.Context, span trace.Span, pr
 		if result.Nonce == "" {
 			span.RecordError(domain.ErrDPoPNonceRequired)
 			span.SetStatus(codes.Error, "DPoP nonce required but missing")
+			s.recordDPoPMetric(ctx, domain.ErrDPoPNonceRequired)
 			return "", domain.ErrDPoPNonceRequired
 		}
 		if err := s.dpopStore.ValidateNonce(ctx, result.Nonce); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "DPoP nonce validation failed")
+			s.recordDPoPMetric(ctx, domain.ErrDPoPNonceMismatch)
 			return "", domain.ErrDPoPNonceMismatch
 		}
 	}
@@ -660,10 +663,17 @@ func (s *JWTBearerService) validateDPoP(ctx context.Context, span trace.Span, pr
 	if err := s.dpopStore.ConsumeJTI(ctx, result.JTI, jtiExpiry); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "DPoP JTI replay")
+		s.recordDPoPMetric(ctx, err)
 		return "", err
 	}
 
+	s.recordDPoPMetric(ctx, nil)
 	return result.JKT, nil
+}
+
+// recordDPoPMetric records DPoP proof validation result metrics.
+func (s *JWTBearerService) recordDPoPMetric(ctx context.Context, err error) {
+	recordDPoPProofMetric(ctx, s.metrics, err)
 }
 
 // isKnownResource checks whether the resource URI is registered.
@@ -687,7 +697,8 @@ func (s *JWTBearerService) isKnownResource(ctx context.Context, resource string)
 // extractIssuerFromJWT extracts the "iss" claim from a JWT without verifying the signature.
 // This is used for IdP lookup before we have the JWKS.
 func extractIssuerFromJWT(raw string) (string, error) {
-	tok, err := jose.ParseSigned(raw, crypto.AssertionAlgorithms())
+	// A JWT is always compact-serialized (RFC 7519 §1).
+	tok, err := jose.ParseSignedCompact(raw, crypto.AssertionAlgorithms())
 	if err != nil {
 		return "", fmt.Errorf("parse JWT: %w", err)
 	}

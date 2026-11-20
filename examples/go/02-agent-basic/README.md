@@ -1,7 +1,7 @@
 # Tier 02 — Calling another resource from your MCP server (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 5 lines · Total example: 53 lines · SDK: go-sdk v0.4.0**
+**Auth-specific code: 6 lines · Total example: 60 lines · SDK: go-sdk v0.5.0**
 <!-- loccount:end -->
 
 When your MCP server needs to call another resource — another Mint MCP
@@ -26,8 +26,8 @@ tool handler that needs to talk to the other resource — the standalone
 | | |
 |---|---|
 | **Time to run** | ~30 seconds once tier-01 is up |
-| **Prereqs** | The tier-01 example is up (`cd ../01-mcp-server-basic && make run && make verify`), plus `go 1.25+`, `curl`, `jq` |
-| **SDK** | `github.com/authplane/go-sdk/core` v0.3.0 (Go module proxy) |
+| **Prereqs** | The tier-01 example is up (`cd ../01-mcp-server-basic && make run && make verify`), plus `go 1.26+`, `curl`, `jq` |
+| **SDK** | `github.com/authplane/go-sdk/core` v0.5.0 (Go module proxy) |
 | **Pairs with** | [Tier 01 — Basic MCP server (Go)](../01-mcp-server-basic/) — the agent calls into the MCP server that tier brings up |
 
 ## Run it in 3 commands
@@ -109,7 +109,7 @@ describe what's happening so you can reproduce the flow by hand.
    ```
 
    The Go agent in `main.go` builds the same request via
-   `client.ClientCredentials(ctx, scopes, resources)`. The response
+   `client.ClientCredentials(ctx, authplane.ClientCredentialsInput{Scopes: scopes, Resources: resources})`. The response
    includes `access_token`, `token_type=Bearer`, `expires_in`, and
    `scope`. There is no refresh token for `client_credentials`.
 
@@ -142,15 +142,23 @@ The same agent with an Authplane-minted bearer token:
 ```diff
 + client, _ := authplane.NewClient(ctx, os.Getenv("AUTHPLANE_ISSUER"),
 +     authplane.WithClientCredentials(os.Getenv("AUTHPLANE_CLIENT_ID"), os.Getenv("AUTHPLANE_CLIENT_SECRET")),
++     authplane.WithFetchSettings(fetchSettings()),
 + )
 + defer client.Close()
-+ tok, _ := client.ClientCredentials(ctx, []string{"mcp:echo"}, []string{resource})
++ tok, _ := client.ClientCredentials(ctx, authplane.ClientCredentialsInput{Scopes: []string{"mcp:echo"}, Resources: []string{resource}})
   body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{...}}`)
   req, _ := http.NewRequest(http.MethodPost, mcpURL, bytes.NewReader(body))
 + req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
   req.Header.Set("Content-Type", "application/json")
   resp, _ := http.DefaultClient.Do(req)
 ```
+
+`fetchSettings()` (bottom of `main.go`) returns
+`authplane.DevModeFetchSettings()` when `AUTHPLANE_DEV_MODE=1`, which
+`.env.example` sets so the agent can reach the local `http://` issuer. The
+Go SDK (v0.5.0 and later) does not read that variable itself, and its
+default fetch settings refuse `http://`, localhost and private addresses.
+Leave it unset in production.
 
 The auth-specific lines live inside the `// authplane:begin` /
 `// authplane:end` markers in [`main.go`](./main.go). The example uses the

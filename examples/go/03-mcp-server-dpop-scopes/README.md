@@ -1,7 +1,7 @@
 # Tier 03 — MCP server + agent with DPoP + per-tool scopes (Go)
 
 <!-- loccount:begin -->
-**Auth-specific code: 15 lines · Total example: 132 lines · SDK: go-sdk v0.4.0**
+**Auth-specific code: 16 lines · Total example: 139 lines · SDK: go-sdk v0.5.0**
 <!-- loccount:end -->
 
 A paired Go MCP server and agent that demonstrate two raised guard rails on
@@ -39,9 +39,9 @@ plumbing.
 | | |
 |---|---|
 | **Time to run** | ~1 minute first run (AS image pull + `go build`); seconds warm. The `make docker-run` variant adds a ~90s image build. |
-| **Prereqs** | Docker 24+, `docker compose`, `go 1.25+`, `curl`, `jq` |
-| **SDK** | `github.com/authplane/go-sdk/{mcp,core}` v0.3.0 (Go module proxy) |
-| **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.4.1` |
+| **Prereqs** | Docker 24+, `docker compose`, `go 1.26+`, `curl`, `jq` |
+| **SDK** | `github.com/authplane/go-sdk/{mcp,core}` v0.5.0 (Go module proxy) |
+| **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.8.0` |
 | **DPoP algorithm** | ES256 (ECDSA P-256). RS256 is also supported via `authplane.NewDPoPKeyMaterial(jose.RS256)`. |
 | **Pairs with** | [Tier 02 — Basic agent (Go)](../02-agent-basic/) — same client-credentials flow, but Bearer-only. This tier upgrades it to DPoP. |
 
@@ -204,13 +204,13 @@ tier-03 agent generates DPoP key material at startup, enables outbound
 DPoP on the client, and signs a fresh proof for the MCP request itself:
 
 ```diff
-- client, _ := authplane.NewClient(ctx, os.Getenv("AUTHPLANE_ISSUER"),
--     authplane.WithClientCredentials(id, secret))
 + km, _ := authplane.NewDPoPKeyMaterial(jose.ES256)
-+ client, _ := authplane.NewClient(ctx, os.Getenv("AUTHPLANE_ISSUER"),
-+     authplane.WithClientCredentials(id, secret),
+  client, _ := authplane.NewClient(ctx, os.Getenv("AUTHPLANE_ISSUER"),
+      authplane.WithClientCredentials(id, secret),
+-     authplane.WithFetchSettings(fetchSettings()))
++     authplane.WithFetchSettings(fetchSettings()),
 +     authplane.WithDPoP(km))
-  tok, _ := client.ClientCredentials(ctx, []string{"mcp:echo", "mcp:add"}, []string{resource})
+  tok, _ := client.ClientCredentials(ctx, authplane.ClientCredentialsInput{Scopes: []string{"mcp:echo", "mcp:add"}, Resources: []string{resource}})
 + proof, _ := client.DPoPSigner().GenerateProof("POST", mcpURL,
 +     &authplane.DPoPProofOptions{AccessToken: tok.AccessToken})
 
@@ -288,9 +288,9 @@ token fails on the per-tool boundary with a clear
 > `*http.Request`, so `htu`/`htm`/`ath`/`cnf.jkt` are unreachable and the proof
 > could not be checked against the request.
 >
-> Verified against `go-sdk/mcp` v0.3.0 and `modelcontextprotocol/go-sdk`
-> v1.4.1; v1.6.0 of the MCP Go SDK carries the same scheme check, so this is
-> not fixable by a version bump. Resource-side DPoP needs adapter support: the
+> Verified against `go-sdk/mcp` v0.5.0 and `modelcontextprotocol/go-sdk`
+> v1.8.0; the MCP Go SDK has carried the same scheme check since v1.4.1, so
+> this is not fixable by a version bump. Resource-side DPoP needs adapter support: the
 > route has to bypass `AuthMiddleware` and call
 > `adapter.Resource().VerifyToken(ctx, token, resource.WithDPoP(dpopCtx))`
 > directly, which the `go-sdk/mcp` and `go-sdk/http` package READMEs (on the

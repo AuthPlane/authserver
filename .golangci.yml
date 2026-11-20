@@ -59,6 +59,21 @@ linters:
       - path: cmd/
         linters:
           - forbidigo
+      # ConsentRequiredError.Service is deprecated in favour of ResourceSlug
+      # and ProviderSlug but is still populated for existing readers until a
+      # minor release removes it. Setting it is intentional.
+      - linters:
+          - staticcheck
+        text: "SA1019: .*ConsentRequiredError\\)\\.Service is deprecated"
+      # G124 (added in golangci-lint v2.15.0) cannot see a Secure flag that is
+      # computed at runtime. The session, login-nonce and OIDC-state cookies
+      # are HttpOnly, carry an explicit SameSite, and set Secure from the
+      # cookie policy with the boot Secure floor applied; plain-HTTP local
+      # development is the only case where it is false.
+      - path: api/(shared/session|public/oauth/(login|oidc))\.go
+        linters:
+          - gosec
+        text: "G124:"
     paths:
       - vendor
       - node_modules

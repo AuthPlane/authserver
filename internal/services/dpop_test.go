@@ -13,6 +13,10 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/authplane/authserver/internal/adapters/keyfile"
 	"github.com/authplane/authserver/internal/adapters/static"
@@ -778,6 +782,9 @@ type dpopGrant struct {
 	// issue runs the grant with the given DPoP request fields and returns the
 	// access token and token_type.
 	issue func(t *testing.T, proof, method, url string) (accessToken, tokenType string, err error)
+	// setDPoPMetrics points the service's DPoP proof counters at the given
+	// validated and rejected counters.
+	setDPoPMetrics func(validated, rejected metric.Int64Counter)
 }
 
 // runDPoPGrantScenarios is the shared scenario table. newGrant builds a
@@ -962,6 +969,44 @@ func runDPoPGrantScenarios(t *testing.T, newGrant func(t *testing.T) *dpopGrant)
 		assertCnfJKT(t, tok, key, true)
 	})
 
+	t.Run("ProofChecks_AreCounted", func(t *testing.T) {
+		g := newGrant(t)
+		g.wire(g.nonce, dpopConfigProvider(true, false))
+		reader := sdkmetric.NewManualReader()
+		provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+		t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+		meter := provider.Meter("dpop-grant-test")
+		validated, err := meter.Int64Counter("authplane_dpop_proofs_validated_total")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rejectedCtr, err := meter.Int64Counter("authplane_dpop_proofs_rejected_total")
+		if err != nil {
+			t.Fatal(err)
+		}
+		g.setDPoPMetrics(validated, rejectedCtr)
+		key := newDPoPClientKey(t)
+
+		if _, _, err := g.issue(t, freshDPoPProof(t, key, "POST", dpopTokenURL), "POST", dpopTokenURL); err != nil {
+			t.Fatalf("issue with a valid proof: %v", err)
+		}
+		oversized := strings.Repeat("a", crypto.MaxDPoPProofBytes+1)
+		if _, _, err := g.issue(t, oversized, "POST", dpopTokenURL); !errors.Is(err, crypto.ErrDPoPProofTooLarge) {
+			t.Fatalf("err = %v, want ErrDPoPProofTooLarge", err)
+		}
+
+		if got := sumPoints(counterPoints(t, reader, "authplane_dpop_proofs_validated_total")); got != 1 {
+			t.Errorf("validated = %d, want 1", got)
+		}
+		rejected := counterPoints(t, reader, "authplane_dpop_proofs_rejected_total")
+		if len(rejected) != 1 || rejected[0].Value != 1 {
+			t.Fatalf("rejected points = %+v, want one point of 1", rejected)
+		}
+		if reason, _ := rejected[0].Attributes.Value(attribute.Key("reason")); reason.AsString() != "too_large" {
+			t.Errorf("reason = %q, want too_large", reason.AsString())
+		}
+	})
+
 	t.Run("ConfigError_FailsClosed", func(t *testing.T) {
 		g := newGrant(t)
 		wantErr := errors.New("dpop config unavailable")
@@ -986,8 +1031,9 @@ func TestClientCredentials_DPoP(t *testing.T) {
 		setup := newCCTestSetup(t)
 		c, secret := setup.createConfidentialClient(t, "read write")
 		return &dpopGrant{
-			nonce: setup.h.Stores.DPoPNonce,
-			wire:  setup.svc.WithDPoP,
+			nonce:          setup.h.Stores.DPoPNonce,
+			wire:           setup.svc.WithDPoP,
+			setDPoPMetrics: func(v, r metric.Int64Counter) { services.SetDPoPMetricsForTest(setup.svc, v, r) },
 			issue: func(t *testing.T, proof, method, url string) (string, string, error) {
 				resp, err := setup.svc.Exchange(context.Background(), input.ClientCredentialsRequest{
 					ClientID:     c.ID,
@@ -1011,8 +1057,9 @@ func TestJWTBearerGrant_DPoP(t *testing.T) {
 		setup := newJWTBearerTestSetup(t)
 		c, secret := setup.createJWTBearerClient(t, "read write")
 		return &dpopGrant{
-			nonce: setup.h.Stores.DPoPNonce,
-			wire:  setup.svc.WithDPoP,
+			nonce:          setup.h.Stores.DPoPNonce,
+			wire:           setup.svc.WithDPoP,
+			setDPoPMetrics: func(v, r metric.Int64Counter) { services.SetDPoPMetricsForTest(setup.svc, v, r) },
 			issue: func(t *testing.T, proof, method, url string) (string, string, error) {
 				// Assertion jtis are single-use; mint one per call.
 				raw := setup.signTestIDJAG(t, setup.validAssertion(c.ID))
@@ -1043,8 +1090,9 @@ func TestTokenExchange_DPoP(t *testing.T) {
 		})
 		c, secret := setup.createTEClient(t, []string{"urn:ietf:params:oauth:grant-type:token-exchange"}, "read write delete")
 		return &dpopGrant{
-			nonce: setup.h.Stores.DPoPNonce,
-			wire:  setup.svc.WithDPoP,
+			nonce:          setup.h.Stores.DPoPNonce,
+			wire:           setup.svc.WithDPoP,
+			setDPoPMetrics: func(v, r metric.Int64Counter) { services.SetDPoPMetricsForTest(setup.svc, v, r) },
 			issue: func(t *testing.T, proof, method, url string) (string, string, error) {
 				subjectToken := setup.mintSubjectToken(t, defaultSubjectClaims(c.ID))
 				resp, err := setup.svc.Exchange(context.Background(), input.TokenExchangeRequest{
@@ -1064,4 +1112,34 @@ func TestTokenExchange_DPoP(t *testing.T) {
 			},
 		}
 	})
+}
+
+// counterPoints collects reader and returns the int64 sum points of name.
+func counterPoints(t *testing.T, reader *sdkmetric.ManualReader, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == name {
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("%s: data %T, want Sum[int64]", name, m.Data)
+				}
+				return sum.DataPoints
+			}
+		}
+	}
+	return nil
+}
+
+// sumPoints adds the values of a counter's data points.
+func sumPoints(points []metricdata.DataPoint[int64]) int64 {
+	var n int64
+	for _, p := range points {
+		n += p.Value
+	}
+	return n
 }

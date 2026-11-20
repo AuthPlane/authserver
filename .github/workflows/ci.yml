@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  GOLANGCI_LINT_VERSION: "v2.11.4"
+  GOLANGCI_LINT_VERSION: "v2.15.0"
   NODE_VERSION: "22"
 
 jobs:

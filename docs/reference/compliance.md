@@ -112,7 +112,7 @@ The MCP 2026-07-28 specification deprecates DCR in favour of CIMD for clients wi
 
 ### RFC 7009 — Token Revocation
 
-**Implemented**: Revocation endpoint at `/oauth/revoke`. Accepts both access tokens and refresh tokens. Always returns 200 per spec.
+**Implemented**: Revocation endpoint at `/oauth/revoke`. Accepts both access tokens and refresh tokens. Returns 200 for a token it revoked or will not revoke (unknown, another client's, already revoked). Returns 503 `temporarily_unavailable` with `Retry-After` when a store cannot look up or record the revocation, so the client must treat the token as still valid and retry (RFC 7009 §2.2.1). Client-authentication and malformed-request failures get RFC 6749 §5.2 errors: 401 `invalid_client`, 400 `invalid_request`.
 
 ### RFC 7662 — Token Introspection
 

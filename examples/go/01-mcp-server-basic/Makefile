@@ -26,7 +26,7 @@ run: check-prereqs
 
 check-prereqs:
 	@$(SHARED)/check-prereqs.sh
-	@command -v go >/dev/null || (echo "ERROR: go not found. Install Go 1.25+ (https://go.dev/dl/)." >&2; exit 1)
+	@command -v go >/dev/null || (echo "ERROR: go not found. Install Go 1.26+ (https://go.dev/dl/)." >&2; exit 1)
 
 verify:
 	@./scripts/verify.sh

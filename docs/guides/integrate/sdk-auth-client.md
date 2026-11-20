@@ -49,12 +49,15 @@ For browser-based user login (authorization code flow), use the OAuth endpoints 
 ```go
 import "github.com/authplane/go-sdk/core/authplane"
 
-client := authplane.NewClient(authplane.Config{
-    IssuerURL:    "http://localhost:9000",
-    ClientID:     os.Getenv("AUTHPLANE_CLIENT_ID"),
-    ClientSecret: os.Getenv("AUTHPLANE_CLIENT_SECRET"),
-})
+client, err := authplane.NewClient(ctx, "http://localhost:9000",
+    authplane.WithClientCredentials(os.Getenv("AUTHPLANE_CLIENT_ID"), os.Getenv("AUTHPLANE_CLIENT_SECRET")),
+    // Local development only: the default fetch settings refuse http://,
+    // localhost and private addresses. Leave this out in production.
+    authplane.WithFetchSettings(authplane.DevModeFetchSettings()),
+)
 ```
+
+Go SDK v0.5.0 and later no longer turn on dev-mode fetch settings from an environment variable; pass them explicitly as above.
 
 **TypeScript:**
 
@@ -87,9 +90,9 @@ Bind the token to the Resource you intend to call with the `resource` parameter 
 **Go:**
 
 ```go
-token, err := client.ClientCredentials(ctx, authplane.TokenRequest{
-    Resource: "http://localhost:8080/mcp",
-    Scope:    "mcp:echo",
+token, err := client.ClientCredentials(ctx, authplane.ClientCredentialsInput{
+    Scopes:    []string{"mcp:echo"},
+    Resources: []string{"http://localhost:8080/mcp"},
 })
 ```
 
@@ -130,16 +133,18 @@ Resource theft is the most common token-loss mode in MCP. DPoP binds the token t
 **Go:**
 
 ```go
-signer, _ := authplane.NewDPoPSigner(authplane.ES256)
-client := authplane.NewClient(authplane.Config{
-    IssuerURL: "http://localhost:9000",
-    ClientID: id, ClientSecret: secret,
-    DPoP: signer,
-})
-// All subsequent tokens are DPoP-bound; the client auto-attaches a proof on each call.
+import "github.com/go-jose/go-jose/v4"
+
+keys, err := authplane.NewDPoPKeyMaterial(jose.ES256)
+client, err := authplane.NewClient(ctx, "http://localhost:9000",
+    authplane.WithClientCredentials(id, secret),
+    authplane.WithFetchSettings(authplane.DevModeFetchSettings()), // local development only
+    authplane.WithDPoP(keys),
+)
+// All subsequent tokens are DPoP-bound; the client attaches a proof to each token request.
 ```
 
-The same `signer` must be used on every call to the resource server — that's what proves possession.
+The same key material must sign the proof on every call to the resource server — that's what proves possession.
 
 ### 6. (Optional) Exchange for a delegated token
 
@@ -148,11 +153,11 @@ When an agent operates on behalf of a user, exchange the user's token (subject) 
 **Go:**
 
 ```go
-delegated, err := client.TokenExchange(ctx, authplane.ExchangeRequest{
+delegated, err := client.TokenExchange(ctx, authplane.TokenExchangeInput{
     SubjectToken: userToken,
     ActorToken:   agentToken,
-    Resource:     "http://localhost:8080/mcp",
-    Scope:        "mcp:echo",
+    Resources:    []string{"http://localhost:8080/mcp"},
+    Scopes:       []string{"mcp:echo"},
 })
 ```
 

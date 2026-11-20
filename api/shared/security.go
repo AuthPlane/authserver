@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
 )
 
@@ -82,7 +83,7 @@ func CORSMiddleware(provider output.CORSConfigProvider, logger *slog.Logger) fun
 				if logger != nil {
 					logger.ErrorContext(r.Context(),
 						"cors: allowed-origins resolution failed; failing closed (no CORS headers)",
-						"error", err, "path", r.URL.Path)
+						"error", err, "path", observability.TruncateForLog(r.URL.Path, maxLoggedPathBytes))
 				}
 				next.ServeHTTP(w, r)
 				return

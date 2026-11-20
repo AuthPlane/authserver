@@ -28,6 +28,8 @@ type ChainDeps struct {
 
 // ChainBuilder composes the server's middleware chain around inner — the routed
 // handler (rate limiter, then mux). It returns the handler NewServer serves.
+// Middleware composed around inner through DefaultChain runs after the
+// request-header cap.
 //
 // A nil builder means DefaultChain. A builder is expected to compose AROUND
 // DefaultChain rather than replace it:
@@ -48,8 +50,11 @@ type ChainBuilder func(ChainDeps, http.Handler) http.Handler
 
 // DefaultChain is the server's middleware composition:
 //
-//	SecurityHeaders → Recover → RequestID → CORS → Tracing → Metrics → Logging → inner
+//	SecurityHeaders → Recover → RequestID → CORS → Tracing → Metrics → Logging → RequestHeaderLimit → inner
 //
+// RequestHeaderLimit sits directly around inner, so anything a ChainBuilder
+// inserts there sees request headers already capped at
+// shared.MaxRequestHeaderBytes, and a 431 is logged, traced and counted.
 // It is exported so a distribution can build on it instead of restating it; the
 // order, and the invariant that SecurityHeaders and Recover wrap everything else,
 // stay owned here.
@@ -61,7 +66,9 @@ func DefaultChain(c ChainDeps, inner http.Handler) http.Handler {
 				c.CORS(
 					obsMW.Tracing()(
 						obsMW.Metrics()(
-							obsMW.Logging()(inner),
+							obsMW.Logging()(
+								shared.RequestHeaderLimit(c.Obs.Logger)(inner),
+							),
 						),
 					),
 				),

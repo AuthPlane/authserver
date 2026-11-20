@@ -2,6 +2,7 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -19,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/domain"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
@@ -73,6 +77,45 @@ type Provider struct {
 	// jwks_uri into a single fetch (the cache's own singleflight only covers
 	// the freshness-respecting Load path, which a kid miss deliberately bypasses).
 	jwksRefresh singleflight.Group
+
+	// configuredJWKS holds the last parsed config-supplied key set, so a
+	// set with skipped keys is parsed, and warned about, once per config
+	// value instead of on every login.
+	configuredJWKS configuredJWKSCache
+}
+
+// configuredJWKSCache memoizes the parse of the most recent configured JWKS.
+type configuredJWKSCache struct {
+	mu     sync.Mutex
+	raw    []byte
+	issuer string
+	set    *jose.JSONWebKeySet
+	err    error
+}
+
+func (c *configuredJWKSCache) parse(ctx context.Context, p *Provider, cfg output.OIDCConfig) (*jose.JSONWebKeySet, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.raw != nil && c.issuer == cfg.Issuer && bytes.Equal(c.raw, cfg.JWKS) {
+		return c.set, c.err
+	}
+	set, skipped, err := crypto.ParseJWKS(cfg.JWKS)
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("jwks.keys_skipped", skipped.Total))
+	p.logSkippedJWKs(ctx, "configured OIDC JWKS key skipped", skipped, "issuer", cfg.Issuer)
+	c.raw, c.issuer = bytes.Clone(cfg.JWKS), cfg.Issuer
+	c.set, c.err = set, err
+	return set, err
+}
+
+// logSkippedJWKs warns once per described skipped key, then once for the
+// keys ParseJWKS only counted.
+func (p *Provider) logSkippedJWKs(ctx context.Context, msg string, skipped crypto.SkippedJWKs, source ...any) {
+	for _, s := range skipped.Sample {
+		p.logger.WarnContext(ctx, msg, slices.Concat(source, []any{"index", s.Index, "kid", s.Kid, "kty", s.Kty, "error", s.Err})...)
+	}
+	if more := skipped.Total - len(skipped.Sample); more > 0 {
+		p.logger.WarnContext(ctx, msg+" (more keys, no detail)", slices.Concat(source, []any{"count", more, "skipped_total", skipped.Total})...)
+	}
 }
 
 // Option configures the Provider.
@@ -439,11 +482,11 @@ func (p *Provider) fetchDiscovery(ctx context.Context, issuer string) (Discovery
 // counters reflect whether this call went to the network.
 func (p *Provider) resolveJWKS(ctx context.Context, cfg output.OIDCConfig, doc DiscoveryDoc) (*jose.JSONWebKeySet, error) {
 	if len(cfg.JWKS) > 0 {
-		var ks jose.JSONWebKeySet
-		if err := json.Unmarshal(cfg.JWKS, &ks); err != nil {
-			return nil, errors.Join(domain.ErrOIDCUnavailable, fmt.Errorf("parse configured JWKS: %w", err))
+		ks, err := p.configuredJWKS.parse(ctx, p, cfg)
+		if err != nil {
+			return nil, errors.Join(domain.ErrOIDCUnavailable, fmt.Errorf("configured JWKS: %w", err))
 		}
-		return &ks, nil
+		return ks, nil
 	}
 
 	if _, ok := p.jwks.Fresh(ctx, doc.JWKSURI); ok {
@@ -513,13 +556,15 @@ func (p *Provider) fetchJWKS(ctx context.Context, jwksURI string) (*jose.JSONWeb
 		return nil, fmt.Errorf("read JWKS body: %w", err)
 	}
 
-	var jwks jose.JSONWebKeySet
-	if err := json.Unmarshal(body, &jwks); err != nil {
-		return nil, fmt.Errorf("parse JWKS: %w", err)
+	jwks, skipped, err := crypto.ParseJWKS(body)
+	span.SetAttributes(attribute.Int("jwks.keys_skipped", skipped.Total))
+	p.logSkippedJWKs(ctx, "OIDC JWKS key skipped", skipped, "jwks_uri", jwksURI)
+	if err != nil {
+		return nil, err
 	}
 
 	p.logger.DebugContext(ctx, "OIDC JWKS fetched", "key_count", len(jwks.Keys))
-	return &jwks, nil
+	return jwks, nil
 }
 
 type tokenResponse struct {

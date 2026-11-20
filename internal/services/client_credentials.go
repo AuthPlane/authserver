@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -467,31 +466,7 @@ func (s *ClientCredentialsService) validateDPoP(ctx context.Context, span trace.
 
 // recordDPoPMetric records DPoP proof validation result metrics.
 func (s *ClientCredentialsService) recordDPoPMetric(ctx context.Context, err error) {
-	if s.metrics == nil {
-		return
-	}
-	if s.metrics.DPoPProofsValidated != nil && err == nil {
-		s.metrics.DPoPProofsValidated.Add(ctx, 1, otelmetric.WithAttributes(
-			attribute.String("result", "valid"),
-		))
-		return
-	}
-	if s.metrics.DPoPProofsRejected != nil && err != nil {
-		reason := "unknown"
-		switch {
-		case errors.Is(err, domain.ErrDPoPInvalidProof):
-			reason = "invalid_proof"
-		case errors.Is(err, domain.ErrDPoPReplay):
-			reason = "replay"
-		case errors.Is(err, domain.ErrDPoPNonceRequired):
-			reason = "nonce_required"
-		case errors.Is(err, domain.ErrDPoPNonceMismatch):
-			reason = "nonce_mismatch"
-		}
-		s.metrics.DPoPProofsRejected.Add(ctx, 1, otelmetric.WithAttributes(
-			attribute.String("reason", reason),
-		))
-	}
+	recordDPoPProofMetric(ctx, s.metrics, err)
 }
 
 // lookupResource returns the registered resource whose URI is uri, or nil

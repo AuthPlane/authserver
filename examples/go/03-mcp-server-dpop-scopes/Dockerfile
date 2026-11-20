@@ -6,7 +6,7 @@
 # `go run ./agent`, so the example can demonstrate DPoP from a fresh ephemeral
 # key per invocation without persisting it inside an image.
 
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 

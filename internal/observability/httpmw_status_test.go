@@ -59,3 +59,35 @@ func TestTracing_SpanStatusByResponseCode(t *testing.T) {
 		})
 	}
 }
+
+// A panicking handler must still end its span as a 500 with the route, so
+// panics show in trace error filters (Recover, outside, writes the 500).
+func TestTracing_PanicEndsSpanAsServerError(t *testing.T) {
+	mw, exp := newRecordingMiddleware(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) { panic("boom") })
+	h := mw.Recover()(mw.Tracing()(mw.Metrics()(RecordRoute(mux))))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/boom", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500", rec.Code)
+	}
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("%d spans, want 1", len(spans))
+	}
+	s := spans[0]
+	if s.Name != "GET /boom" || s.Status.Code != codes.Error {
+		t.Fatalf("span %q status %v, want GET /boom with Error", s.Name, s.Status.Code)
+	}
+	var status int64
+	for _, kv := range s.Attributes {
+		if kv.Key == "http.status_code" {
+			status = kv.Value.AsInt64()
+		}
+	}
+	if status != http.StatusInternalServerError {
+		t.Fatalf("http.status_code = %d, want 500", status)
+	}
+}

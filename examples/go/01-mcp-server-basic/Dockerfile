@@ -2,7 +2,7 @@
 # in a distroless image so the runtime container has no shell, no package
 # manager, and a minimal attack surface.
 
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 

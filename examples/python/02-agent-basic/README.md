@@ -37,7 +37,7 @@ that needs to talk to the other resource.
 |---|---|
 | **Time to run** | ~30 seconds (tier 01 must already be running) |
 | **Prereqs** | Tier 01 up (`make run` there), `curl`, `jq`, **Python 3.12+** (`pyproject.toml` pins `requires-python = ">=3.12"`) |
-| **SDK** | `authplane-sdk` 0.4.0 (PyPI) |
+| **SDK** | `authplane-sdk` 0.5.0 (PyPI) |
 | **HTTP client** | `httpx >= 0.27, < 1` (matches `pyproject.toml`) |
 
 ## Run it in 3 commands

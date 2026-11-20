@@ -19,6 +19,8 @@ Content-Type: `application/problem+json`
 
 The `error` field is the machine-readable code your client should switch on. The `error_description` is human-readable and explains what happened.
 
+One response is the exception: `431 Request Header Fields Too Large` (see [below](#431-request-header-fields-too-large)) has a plain-text body and no `error` field.
+
 ---
 
 ## Quick diagnosis — "I got an error, now what?"
@@ -232,6 +234,7 @@ The DPoP proof JWT is invalid.
 | `htu` mismatch | The `htu` claim doesn't match the URL | Set `htu` to scheme + host + path (no query string) |
 | `iat` too old | The proof is older than `proof_lifetime` | Generate a fresh proof for each request. Don't cache proofs. |
 | JTI reused | You sent the same `jti` twice | Generate a new UUID for every proof |
+| Proof larger than 8 KiB | The `DPoP` header is over 8192 bytes. It is rejected before it is parsed. On the token endpoint it is counted as `reason="too_large"` in `authplane_dpop_proofs_rejected_total` | A real proof is under 2.5 KB, even RS256 with a 4096-bit key plus `nonce` and `ath`. Check that you send one proof, not a chain, and no extra claims. |
 
 ### `use_dpop_nonce` — HTTP 400
 
@@ -311,6 +314,18 @@ The user hasn't consented to the requested scopes yet. This is a redirect to the
 ### `slow_down` — HTTP 429
 
 Too many requests. Check the `Retry-After` header for how long to wait.
+
+### 431 Request Header Fields Too Large
+
+The request's headers, request line included, are larger than 32 KiB, the limit on both the public (`:9000`) and admin (`:9001`) listeners. The limit is fixed and has no config key. The body is plain text (`431 Request Header Fields Too Large`), not an OAuth or Problem Details JSON body.
+
+Up to about 68 KiB of headers, AuthPlane logs the rejection as a warning, `request headers too large`, with `header_bytes`, `limit_bytes` and `largest_headers` (the names and sizes of the three largest headers, never their values), adds an event to the request span, and counts the response in `authserver_http_requests_total` with `http_status_code="431"` and `http_route="unmatched"`. A CORS preflight (`OPTIONS` from an allowed origin) is answered before the cap and is not refused. Larger header blocks are refused by Go's HTTP server before any of AuthPlane runs: those appear only in the client's and the proxy's logs. A client still sending its headers may see the connection close instead, which a reverse proxy can report as a `502`.
+
+| When you see it | What happened | How to fix |
+|---|---|---|
+| Browser requests to the admin UI or login pages | Cookies from other applications on a shared parent domain push the `Cookie` header over the limit | Serve AuthPlane on its own host, or scope the other applications' cookies more narrowly |
+| API calls through a gateway | The gateway adds large headers (for example `x-forwarded-client-cert` or many tracing headers) | Strip headers AuthPlane does not need at the gateway |
+| Any request | The client sends an oversized `Authorization` or `DPoP` header | A normal access token is a few KB; check the client is not sending a token chain or a full certificate |
 
 ### `server_error` — HTTP 500
 

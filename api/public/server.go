@@ -164,6 +164,9 @@ func NewServer(ctx context.Context, cfg config.ServerConfig, deps Deps, obs *obs
 			ReadTimeout:  cfg.ReadTimeout,
 			WriteTimeout: cfg.WriteTimeout,
 			IdleTimeout:  cfg.IdleTimeout,
+			// Backstop for headers too large to read; RequestHeaderLimit
+			// enforces the real cap. See the constants.
+			MaxHeaderBytes: shared.ServerMaxHeaderBytes,
 		},
 		obs: obs,
 	}
@@ -225,9 +228,11 @@ func NewServer(ctx context.Context, cfg config.ServerConfig, deps Deps, obs *obs
 	// logins per account, so following that advice used to switch off a control
 	// nothing replaced, silently. AuthLockout's own switch is AuthFailMax <= 0,
 	// which every one of its methods already honors.
-	var inner http.Handler = mux
+	// RecordRoute hands the matched pattern to the observability chain even
+	// when a distribution's middleware replaces the request on the way down.
+	var inner = observability.RecordRoute(mux)
 	if deps.RateLimitCfg.Enabled {
-		inner = shared.NewRateLimiter(ctx, deps.RateLimitCfg).Middleware(mux)
+		inner = shared.NewRateLimiter(ctx, deps.RateLimitCfg).Middleware(inner)
 	}
 	lockout := shared.NewAuthLockout(ctx, deps.RateLimitCfg, obs.Logger)
 

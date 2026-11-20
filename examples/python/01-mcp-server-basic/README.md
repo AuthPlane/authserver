@@ -40,8 +40,8 @@ Troubleshooting below.
 | | |
 |---|---|
 | **Time to run** | About a minute first-run (venv install + AS pull); ~5 s warm |
-| **SDK** | `authplane-fastmcp` 0.4.0 (PyPI) — depends on `authplane-sdk` 0.4.0 |
-| **MCP framework** | `fastmcp >= 3.2, < 4` (matches `pyproject.toml`) — the 3.2 floor comes from `authplane-fastmcp` 0.4.0 |
+| **SDK** | `authplane-fastmcp` 0.5.0 (PyPI) — depends on `authplane-sdk` 0.5.0 |
+| **MCP framework** | `fastmcp >= 3.2, < 4` (matches `pyproject.toml`) — the 3.2 floor comes from `authplane-fastmcp` 0.5.0 |
 
 ## Run it
 

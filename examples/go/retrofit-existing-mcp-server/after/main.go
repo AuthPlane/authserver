@@ -51,7 +51,7 @@ func main() {
 	defer adapter.Close()
 	// authplane:end
 
-	http.Handle(adapter.WellKnownPRMPath(), adapter.ProtectedResourceMetadataHandler())
+	http.Handle(adapter.WellKnownPRMPath(), adapter.PRMHandler())
 	http.Handle("/mcp", adapter.AuthMiddleware(handler))
 
 	// === your tools ============================================================

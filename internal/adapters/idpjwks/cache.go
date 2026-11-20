@@ -3,7 +3,6 @@ package idpjwks
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,9 +12,11 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/authplane/authserver/internal/crypto"
 	"github.com/authplane/authserver/internal/observability"
 	"github.com/authplane/authserver/internal/ports/output"
 	"github.com/authplane/authserver/internal/ssrf"
@@ -178,12 +179,21 @@ func (c *Cache) fetchJWKS(ctx context.Context, jwksURI string) (*jose.JSONWebKey
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 
-	var jwks jose.JSONWebKeySet
-	if err := json.Unmarshal(body, &jwks); err != nil {
-		return nil, fmt.Errorf("parse JWKS: %w", err)
+	jwks, skipped, err := crypto.ParseJWKS(body)
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("jwks.keys_skipped", skipped.Total))
+	for _, s := range skipped.Sample {
+		c.logger.WarnContext(ctx, "IdP JWKS key skipped",
+			"jwks_uri", jwksURI, "index", s.Index, "kid", s.Kid, "kty", s.Kty, "error", s.Err)
+	}
+	if more := skipped.Total - len(skipped.Sample); more > 0 {
+		c.logger.WarnContext(ctx, "IdP JWKS keys skipped without detail",
+			"jwks_uri", jwksURI, "count", more, "skipped_total", skipped.Total)
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	return &jwks, nil
+	return jwks, nil
 }
 
 // ssrfSafeDialer returns a dialer whose Control hook re-checks the concrete

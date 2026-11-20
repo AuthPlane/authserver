@@ -9,7 +9,7 @@ on the user's behalf."
   (Claude Desktop, MCP Inspector, etc.) is handled by your MCP client.
 - **Time:** ~10 minutes to first token; ~30 minutes for the full path.
 - **Prereqs:** Docker. The DPoP and resource-to-resource steps
-  additionally need Go 1.25+, Node 22+, or Python 3.12+ depending on the
+  additionally need Go 1.26+, Node 22+, or Python 3.12+ depending on the
   language you pick.
 - **Conventions:** Commands assume macOS or Linux. Replace
   `http://localhost:9000` with your issuer URL once you deploy

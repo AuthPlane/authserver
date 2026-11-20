@@ -42,7 +42,7 @@ explicit `if err != nil { ... }`). Realistic full diff: ~12–14 added lines.
 +     }))
 +     defer adapter.Close()
 +     // authplane:end
-+     http.Handle(adapter.WellKnownPRMPath(), adapter.ProtectedResourceMetadataHandler())
++     http.Handle(adapter.WellKnownPRMPath(), adapter.PRMHandler())
 +     http.Handle("/mcp", adapter.AuthMiddleware(handler))
 +
 + // must panics on a non-nil error; replace with explicit `if err != nil`
@@ -99,8 +99,8 @@ same `make verify`, just longer first build (~1 min).
 | | |
 |---|---|
 | **Time to run** | Under a minute warm-cache (`go build` of two small binaries + AS image pull) |
-| **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.4.1` |
-| **SDK** | `github.com/authplane/go-sdk/mcp v0.4.0` (in `after/` only) |
+| **MCP framework** | `github.com/modelcontextprotocol/go-sdk v1.8.0` (both `before/` and `after/`) |
+| **SDK** | `github.com/authplane/go-sdk/mcp v0.5.0` (in `after/` only) |
 
 ## Troubleshooting
 
@@ -142,10 +142,10 @@ configure `GOPROXY` to allow it (or set `GOPRIVATE` if you mirror SDKs
 internally).
 
 **`missing go.sum entry for module providing package github.com/authplane/go-sdk/core/...`**
-`go get github.com/authplane/go-sdk/mcp@v0.4.0` adds the `mcp` adapter but
+`go get github.com/authplane/go-sdk/mcp@v0.5.0` adds the `mcp` adapter but
 *not* its transitive dependency `go-sdk/core`, so the very next `go build`
 fails on the missing checksum. Run **`go mod tidy`** (or
-`go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.3.0`) to record
+`go get github.com/authplane/go-sdk/mcp/pkg/authplanemcp@v0.5.0`) to record
 the `core` entries in `go.sum`. This example's committed `go.mod`/`go.sum`
 already include them — you only hit this when wiring the adapter into your
 own module.

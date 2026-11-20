@@ -74,7 +74,29 @@ groups:
           description: "Outbound CIMD fetches are being stopped by the negative cache, single-flight, or the global in-flight cap. The fetch path is reachable from an unauthenticated GET /oauth/authorize with a caller-chosen URL, so a sustained rate means someone is driving fetches, not that clients are registering."
           runbook: "docs/guides/operate/incident-runbook.md#what-can-go-wrong-cross-cutting"
 
+      - alert: DPoPProofReplay
+        expr: sum(increase(authplane_dpop_proofs_rejected_total{reason="replay"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A DPoP proof was replayed at the token endpoint"
+          description: "A proof's jti was seen before. Every grant counts its DPoP checks here; a replay means a captured proof is being reused. Break down with sum by (reason) (rate(authplane_dpop_proofs_rejected_total[5m]))."
+          runbook: "docs/guides/operate/incident-runbook.md#incident-suspected-dpop-replay-attack"
+
       # --- availability / latency ---------------------------------------------
+
+      - alert: RequestHeadersTooLarge
+        # More than a handful in 15 minutes, so one scanner request with
+        # oversized headers does not raise it.
+        expr: sum(increase(authserver_http_requests_total{http_status_code="431"}[15m])) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Requests refused for headers over 32 KiB"
+          description: "Clients are sending request headers over the fixed 32 KiB cap, usually cookies from other applications on a shared parent domain. The `request headers too large` warning names the largest headers. Requests over about 68 KiB are refused before AuthPlane runs and only show at the proxy."
+          runbook: "docs/guides/operate/incident-runbook.md#what-can-go-wrong-cross-cutting"
 
       - alert: HTTPServerErrorRatio
         expr: |
